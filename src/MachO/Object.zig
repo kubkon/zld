@@ -1537,7 +1537,7 @@ pub fn calcStabsSize(self: *Object, macho_file: *MachO) void {
                 const name = sym.getName(macho_file);
                 if (name.len > 0 and (name[0] == 'L' or name[0] == 'l')) continue;
             }
-            const sect = macho_file.sections.items(.header)[sym.out_n_sect];
+            const sect = macho_file.sections.items(.header)[sym.getOutputSectionIndex(macho_file)];
             if (sect.isCode()) {
                 self.output_symtab_ctx.nstabs += 4; // N_BNSYM, N_FUN, N_FUN, N_ENSYM
             } else if (sym.visibility == .global) {
@@ -1702,13 +1702,13 @@ pub fn writeStabs(self: *const Object, stroff: u32, macho_file: *MachO) void {
                 const name = sym.getName(macho_file);
                 if (name.len > 0 and (name[0] == 'L' or name[0] == 'l')) continue;
             }
-            const sect = macho_file.sections.items(.header)[sym.out_n_sect];
+            const sect = macho_file.sections.items(.header)[sym.getOutputSectionIndex(macho_file)];
             const sym_n_strx = n_strx: {
                 const symtab_index = sym.getOutputSymtabIndex(macho_file).?;
                 const osym = macho_file.symtab.items[symtab_index];
                 break :n_strx osym.n_strx;
             };
-            const sym_n_sect: u8 = if (!sym.flags.abs) @intCast(sym.out_n_sect + 1) else 0;
+            const sym_n_sect: u8 = if (!sym.flags.abs) @intCast(sym.getOutputSectionIndex(macho_file) + 1) else 0;
             const sym_n_value = sym.getAddress(.{}, macho_file);
             const sym_size = sym.getSize(macho_file);
             if (sect.isCode()) {
@@ -1803,7 +1803,7 @@ pub fn writeStabs(self: *const Object, stroff: u32, macho_file: *MachO) void {
                     const osym = macho_file.symtab.items[symtab_index];
                     break :n_strx osym.n_strx;
                 };
-                const sym_n_sect: u8 = if (!sym.flags.abs) @intCast(sym.out_n_sect + 1) else 0;
+                const sym_n_sect: u8 = if (!sym.flags.abs) @intCast(sym.getOutputSectionIndex(macho_file) + 1) else 0;
                 const sym_n_value = sym.getAddress(.{}, macho_file);
                 const sym_size = sym.getSize(macho_file);
                 if (stab.is_func) {

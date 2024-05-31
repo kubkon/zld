@@ -1686,13 +1686,6 @@ pub fn addAtomsToSections(self: *MachO) !void {
             const atoms = &self.sections.items(.atoms)[atom.out_n_sect];
             try atoms.append(self.base.allocator, atom_index);
         }
-        for (object.symbols.items) |sym_index| {
-            const sym = self.getSymbol(sym_index);
-            const atom = sym.getAtom(self) orelse continue;
-            if (!atom.flags.alive) continue;
-            if (sym.getFile(self).?.getIndex() != index) continue;
-            sym.out_n_sect = atom.out_n_sect;
-        }
     }
     if (self.getInternalObject()) |object| {
         for (object.atoms.items) |atom_index| {
@@ -1700,13 +1693,6 @@ pub fn addAtomsToSections(self: *MachO) !void {
             if (!atom.flags.alive) continue;
             const atoms = &self.sections.items(.atoms)[atom.out_n_sect];
             try atoms.append(self.base.allocator, atom_index);
-        }
-        for (object.symbols.items) |sym_index| {
-            const sym = self.getSymbol(sym_index);
-            const atom = sym.getAtom(self) orelse continue;
-            if (!atom.flags.alive) continue;
-            if (sym.getFile(self).?.getIndex() != object.index) continue;
-            sym.out_n_sect = atom.out_n_sect;
         }
     }
 }

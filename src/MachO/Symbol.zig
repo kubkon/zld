@@ -68,6 +68,11 @@ pub fn getAtom(symbol: Symbol, macho_file: *MachO) ?*Atom {
     return macho_file.getAtom(symbol.atom);
 }
 
+pub fn getOutputSectionIndex(symbol: Symbol, macho_file: *MachO) u8 {
+    if (symbol.getAtom(macho_file)) |atom| return atom.out_n_sect;
+    return symbol.out_n_sect;
+}
+
 pub fn getFile(symbol: Symbol, macho_file: *MachO) ?File {
     return macho_file.getFile(symbol.file);
 }
@@ -212,7 +217,7 @@ pub inline fn setExtra(symbol: Symbol, extra: Extra, macho_file: *MachO) void {
 pub fn setOutputSym(symbol: Symbol, macho_file: *MachO, out: *macho.nlist_64) void {
     if (symbol.isLocal()) {
         out.n_type = if (symbol.flags.abs) macho.N_ABS else macho.N_SECT;
-        out.n_sect = if (symbol.flags.abs) 0 else @intCast(symbol.out_n_sect + 1);
+        out.n_sect = if (symbol.flags.abs) 0 else @intCast(symbol.getOutputSectionIndex(macho_file) + 1);
         out.n_desc = 0;
         out.n_value = symbol.getAddress(.{ .stubs = false }, macho_file);
 
@@ -224,7 +229,7 @@ pub fn setOutputSym(symbol: Symbol, macho_file: *MachO, out: *macho.nlist_64) vo
         assert(symbol.visibility == .global);
         out.n_type = macho.N_EXT;
         out.n_type |= if (symbol.flags.abs) macho.N_ABS else macho.N_SECT;
-        out.n_sect = if (symbol.flags.abs) 0 else @intCast(symbol.out_n_sect + 1);
+        out.n_sect = if (symbol.flags.abs) 0 else @intCast(symbol.getOutputSectionIndex(macho_file) + 1);
         out.n_value = symbol.getAddress(.{ .stubs = false }, macho_file);
         out.n_desc = 0;
 
@@ -299,8 +304,8 @@ fn format2(
         symbol.getAddress(.{}, ctx.macho_file),
     });
     if (symbol.getFile(ctx.macho_file)) |file| {
-        if (symbol.out_n_sect != 0) {
-            try writer.print(" : sect({d})", .{symbol.out_n_sect});
+        if (symbol.getOutputSectionIndex(ctx.macho_file) != 0) {
+            try writer.print(" : sect({d})", .{symbol.getOutputSectionIndex(ctx.macho_file)});
         }
         if (symbol.getAtom(ctx.macho_file)) |atom| {
             try writer.print(" : atom({d})", .{atom.atom_index});
