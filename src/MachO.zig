@@ -2176,7 +2176,7 @@ fn performAllTheWork(self: *MachO) !void {
         .calc_symtab_size => self.base.thread_pool.spawnWg(&self.wait_group, calcSymtabSize, .{self}),
         .write_atoms => |x| self.base.thread_pool.spawnWg(&self.wait_group, writeAtomsWorker, .{ self, x[0], x[1] }),
         .write_thunk => |x| self.base.thread_pool.spawnWg(&self.wait_group, writeThunkWorker, .{ self, x[0], x[1] }),
-        .write_synthetic_section => |x| self.base.thread_pool.spawnWg(&self.wait_group, writeSyntheticSectionWorker, .{ self, x }),
+        .write_synthetic_section => |x| self.base.thread_pool.spawnWg(&self.wait_group, writeSyntheticSectionWorker, .{ self, x[0], x[1] }),
         .write_dyld_info => self.base.thread_pool.spawnWg(&self.wait_group, writeDyldInfoWorker, .{self}),
         .write_symtab => |x| self.base.thread_pool.spawnWg(&self.wait_group, writeSymtabWorker, .{ self, x }),
         .write_indsymtab => self.base.thread_pool.spawnWg(&self.wait_group, writeIndsymtabWorker, .{self}),
@@ -2282,7 +2282,7 @@ fn writeThunkWorker(self: *MachO, thunk: *const Thunk, out: []u8) void {
     };
 }
 
-fn writeSyntheticSectionWorker(self: *MachO, sect_id: u8) void {
+fn writeSyntheticSectionWorker(self: *MachO, sect_id: u8, out: []u8) void {
     const tracy = trace(@src());
     defer tracy.end();
     const Tag = enum {
@@ -2296,10 +2296,7 @@ fn writeSyntheticSectionWorker(self: *MachO, sect_id: u8) void {
         objc_stubs,
     };
     const doWork = struct {
-        fn doWork(macho_file: *MachO, header: macho.section_64, tag: Tag) !void {
-            const gpa = macho_file.base.allocator;
-            const buffer = try gpa.alloc(u8, header.size);
-            defer gpa.free(buffer);
+        fn doWork(macho_file: *MachO, tag: Tag, buffer: []u8) !void {
             var stream = std.io.fixedBufferStream(buffer);
             switch (tag) {
                 .eh_frame => eh_frame.write(macho_file, buffer),
@@ -2311,7 +2308,6 @@ fn writeSyntheticSectionWorker(self: *MachO, sect_id: u8) void {
                 .tlv_ptr => try macho_file.tlv_ptr.write(macho_file, stream.writer()),
                 .objc_stubs => try macho_file.objc_stubs.write(macho_file, stream.writer()),
             }
-            try macho_file.base.file.pwriteAll(buffer, header.offset);
         }
     }.doWork;
     const header = self.sections.items(.header)[sect_id];
@@ -2334,7 +2330,7 @@ fn writeSyntheticSectionWorker(self: *MachO, sect_id: u8) void {
             self.objc_stubs_sect_index.? == sect_id) break :tag .objc_stubs;
         unreachable;
     };
-    doWork(self, header, tag) catch |err| {
+    doWork(self, tag, out) catch |err| {
         self.base.fatal("could not write section '{s},{s}' to file: {s}", .{
             header.segName(),
             header.sectName(),
@@ -2344,36 +2340,23 @@ fn writeSyntheticSectionWorker(self: *MachO, sect_id: u8) void {
 }
 
 fn writeSyntheticSections(self: *MachO) !void {
-    if (self.eh_frame_sect_index) |i| {
-        try self.work_queue.writeItem(.{ .write_synthetic_section = i });
-    }
-
-    if (self.unwind_info_sect_index) |i| {
-        try self.work_queue.writeItem(.{ .write_synthetic_section = i });
-    }
-
-    if (self.got_sect_index) |i| {
-        try self.work_queue.writeItem(.{ .write_synthetic_section = i });
-    }
-
-    if (self.stubs_sect_index) |i| {
-        try self.work_queue.writeItem(.{ .write_synthetic_section = i });
-    }
-
-    if (self.stubs_helper_sect_index) |i| {
-        try self.work_queue.writeItem(.{ .write_synthetic_section = i });
-    }
-
-    if (self.la_symbol_ptr_sect_index) |i| {
-        try self.work_queue.writeItem(.{ .write_synthetic_section = i });
-    }
-
-    if (self.tlv_ptr_sect_index) |i| {
-        try self.work_queue.writeItem(.{ .write_synthetic_section = i });
-    }
-
-    if (self.objc_stubs_sect_index) |i| {
-        try self.work_queue.writeItem(.{ .write_synthetic_section = i });
+    const slice = self.sections.slice();
+    for (&[_]?u8{
+        self.eh_frame_sect_index,
+        self.unwind_info_sect_index,
+        self.got_sect_index,
+        self.stubs_sect_index,
+        self.stubs_helper_sect_index,
+        self.la_symbol_ptr_sect_index,
+        self.tlv_ptr_sect_index,
+        self.objc_stubs_sect_index,
+    }) |maybe_sect_id| {
+        if (maybe_sect_id) |sect_id| {
+            const header = slice.items(.header)[sect_id];
+            const out = &slice.items(.out)[sect_id];
+            try out.resize(self.base.allocator, header.size);
+            try self.work_queue.writeItem(.{ .write_synthetic_section = .{ sect_id, out.items } });
+        }
     }
 }
 
@@ -3401,7 +3384,7 @@ pub const Job = union(enum) {
     calc_symtab_size: void,
     write_atoms: struct { []const Atom.Index, []u8 },
     write_thunk: struct { *const Thunk, []u8 },
-    write_synthetic_section: u8,
+    write_synthetic_section: struct { u8, []u8 },
     write_dyld_info: void,
     write_symtab: File,
     write_indsymtab: void,
