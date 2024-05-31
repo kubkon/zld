@@ -1405,10 +1405,10 @@ pub fn scanRelocs(self: Object, macho_file: *MachO) !void {
         if (!rec.alive) continue;
         if (rec.getFde(macho_file)) |fde| {
             if (fde.getCie(macho_file).getPersonality(macho_file)) |sym| {
-                sym.flags.got = true;
+                sym.setSectionFlags(.{ .got = true });
             }
         } else if (rec.getPersonality(macho_file)) |sym| {
-            sym.flags.got = true;
+            sym.setSectionFlags(.{ .got = true });
         }
     }
 }

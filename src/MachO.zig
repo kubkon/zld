@@ -1244,7 +1244,7 @@ fn createObjcSections(self: *MachO) !void {
         const name = eatPrefix(sym.getName(self), "_objc_msgSend$").?;
         const selrefs_index = try internal.addObjcMsgsendSections(name, self);
         sym.addExtra(.{ .objc_selrefs = selrefs_index }, self);
-        sym.flags.objc_stubs = true;
+        sym.setSectionFlags(.{ .objc_stubs = true });
     }
 }
 
@@ -1318,36 +1318,36 @@ fn scanRelocs(self: *MachO) !void {
     if (self.entry_index) |index| {
         const sym = self.getSymbol(index);
         if (sym.getFile(self) != null) {
-            if (sym.flags.import) sym.flags.stubs = true;
+            if (sym.flags.import) sym.setSectionFlags(.{ .stubs = true });
         }
     }
 
     if (self.dyld_stub_binder_index) |index| {
         const sym = self.getSymbol(index);
-        if (sym.getFile(self) != null) sym.flags.got = true;
+        if (sym.getFile(self) != null) sym.setSectionFlags(.{ .got = true });
     }
 
     if (self.objc_msg_send_index) |index| {
         const sym = self.getSymbol(index);
         if (sym.getFile(self) != null)
-            sym.flags.got = true; // TODO is it always needed, or only if we are synthesising fast stubs?
+            sym.setSectionFlags(.{ .got = true }); // TODO is it always needed, or only if we are synthesising fast stubs?
     }
 
     for (self.symbols.items, 0..) |*symbol, i| {
         const index = @as(Symbol.Index, @intCast(i));
-        if (symbol.flags.got) {
+        if (symbol.getSectionFlags().got) {
             log.debug("'{s}' needs GOT", .{symbol.getName(self)});
             try self.got.addSymbol(index, self);
         }
-        if (symbol.flags.stubs) {
+        if (symbol.getSectionFlags().stubs) {
             log.debug("'{s}' needs STUBS", .{symbol.getName(self)});
             try self.stubs.addSymbol(index, self);
         }
-        if (symbol.flags.tlv_ptr) {
+        if (symbol.getSectionFlags().tlv_ptr) {
             log.debug("'{s}' needs TLV pointer", .{symbol.getName(self)});
             try self.tlv_ptr.addSymbol(index, self);
         }
-        if (symbol.flags.objc_stubs) {
+        if (symbol.getSectionFlags().objc_stubs) {
             log.debug("'{s}' needs OBJC STUBS", .{symbol.getName(self)});
             try self.objc_stubs.addSymbol(index, self);
         }

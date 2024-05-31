@@ -242,12 +242,12 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
             .branch => {
                 const symbol = rel.getTargetSymbol(macho_file);
                 if (symbol.flags.import or (symbol.flags.@"export" and symbol.flags.weak) or symbol.flags.interposable) {
-                    symbol.flags.stubs = true;
+                    symbol.setSectionFlags(.{ .stubs = true });
                     if (symbol.flags.weak) {
                         macho_file.binds_to_weak = true;
                     }
                 } else if (mem.startsWith(u8, symbol.getName(macho_file), "_objc_msgSend$")) {
-                    symbol.flags.objc_stubs = true;
+                    symbol.setSectionFlags(.{ .objc_stubs = true });
                 }
             },
 
@@ -261,7 +261,7 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
                     symbol.flags.interposable or
                     macho_file.options.cpu_arch.? == .aarch64) // TODO relax on arm64
                 {
-                    symbol.flags.got = true;
+                    symbol.setSectionFlags(.{ .got = true });
                     if (symbol.flags.weak) {
                         macho_file.binds_to_weak = true;
                     }
@@ -269,7 +269,7 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
             },
 
             .got => {
-                rel.getTargetSymbol(macho_file).flags.got = true;
+                rel.getTargetSymbol(macho_file).setSectionFlags(.{ .got = true });
             },
 
             .tlv,
@@ -284,7 +284,7 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
                     );
                 }
                 if (symbol.flags.import or (symbol.flags.@"export" and symbol.flags.weak) or symbol.flags.interposable) {
-                    symbol.flags.tlv_ptr = true;
+                    symbol.setSectionFlags(.{ .tlv_ptr = true });
                     if (symbol.flags.weak) {
                         macho_file.binds_to_weak = true;
                     }
@@ -481,7 +481,7 @@ fn resolveRelocInner(
             assert(rel.tag == .@"extern");
             assert(rel.meta.length == 2);
             assert(rel.meta.pcrel);
-            if (rel.getTargetSymbol(macho_file).flags.got) {
+            if (rel.getTargetSymbol(macho_file).getSectionFlags().got) {
                 try writer.writeInt(i32, @intCast(G + A - P), .little);
             } else {
                 try relaxGotLoad(code[rel_offset - 3 ..]);
@@ -494,7 +494,7 @@ fn resolveRelocInner(
             assert(rel.meta.length == 2);
             assert(rel.meta.pcrel);
             const sym = rel.getTargetSymbol(macho_file);
-            if (sym.flags.tlv_ptr) {
+            if (sym.getSectionFlags().tlv_ptr) {
                 const S_: i64 = @intCast(sym.getTlvPtrAddress(macho_file));
                 try writer.writeInt(i32, @intCast(S_ + A - P), .little);
             } else {
@@ -522,7 +522,7 @@ fn resolveRelocInner(
                 const target = switch (rel.type) {
                     .page => S + A,
                     .got_load_page => G + A,
-                    .tlvp_page => if (sym.flags.tlv_ptr) blk: {
+                    .tlvp_page => if (sym.getSectionFlags().tlv_ptr) blk: {
                         const S_: i64 = @intCast(sym.getTlvPtrAddress(macho_file));
                         break :blk S_ + A;
                     } else S + A,
@@ -577,7 +577,7 @@ fn resolveRelocInner(
 
             const sym = rel.getTargetSymbol(macho_file);
             const target = target: {
-                const target = if (sym.flags.tlv_ptr) blk: {
+                const target = if (sym.getSectionFlags().tlv_ptr) blk: {
                     const S_: i64 = @intCast(sym.getTlvPtrAddress(macho_file));
                     break :blk S_ + A;
                 } else S + A;
@@ -615,7 +615,7 @@ fn resolveRelocInner(
                 }
             };
 
-            var inst = if (sym.flags.tlv_ptr) aarch64.Instruction{
+            var inst = if (sym.getSectionFlags().tlv_ptr) aarch64.Instruction{
                 .load_store_register = .{
                     .rt = reg_info.rd,
                     .rn = reg_info.rn,

@@ -196,7 +196,7 @@ pub fn dedupLiterals(self: InternalObject, lp: MachO.LiteralPool, macho_file: *M
 
     for (self.symbols.items) |sym_index| {
         const sym = macho_file.getSymbol(sym_index);
-        if (!sym.flags.objc_stubs) continue;
+        if (!sym.getSectionFlags().objc_stubs) continue;
         var extra = sym.getExtra(macho_file);
         const atom = macho_file.getAtom(extra.objc_selrefs).?;
         if (atom.getLiteralPoolIndex(macho_file)) |lp_index| {
