@@ -406,15 +406,11 @@ pub fn flush(self: *MachO) !void {
     state_log.debug("{}", .{self.dumpState()});
 
     try self.updateLinkeditSizes();
-    try self.performAllTheWork();
-
-    try self.allocateLinkeditSegment();
-
     try self.writeSections();
     try self.writeSyntheticSections();
-    try self.writeSymtab();
     try self.performAllTheWork();
     try self.writeSectionsToFile();
+    try self.allocateLinkeditSegment();
     try self.writeLinkeditSectionsToFile();
 
     var codesig: ?CodeSignature = if (self.requiresCodeSig()) blk: {
@@ -2170,14 +2166,34 @@ fn performAllTheWork(self: *MachO) !void {
         .rebase_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLinkeditSizeWorker, .{ self, .rebase }),
         .bind_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLinkeditSizeWorker, .{ self, .bind }),
         .weak_bind_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLinkeditSizeWorker, .{ self, .weak_bind }),
-        .lazy_bind_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLinkeditSizeWorker, .{ self, .lazy_bind }),
+        .lazy_bind_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLazyBindSizeWorker, .{self}),
         .export_trie_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLinkeditSizeWorker, .{ self, .export_trie }),
         .data_in_code_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLinkeditSizeWorker, .{ self, .data_in_code }),
         .calc_symtab_size => self.base.thread_pool.spawnWg(&self.wait_group, calcSymtabSize, .{self}),
         .write_atoms => |x| self.base.thread_pool.spawnWg(&self.wait_group, writeAtomsWorker, .{ self, x[0], x[1] }),
         .write_thunk => |x| self.base.thread_pool.spawnWg(&self.wait_group, writeThunkWorker, .{ self, x[0], x[1] }),
         .write_synthetic_section => |x| self.base.thread_pool.spawnWg(&self.wait_group, writeSyntheticSectionWorker, .{ self, x[0], x[1] }),
-        .write_symtab => |x| self.base.thread_pool.spawnWg(&self.wait_group, writeSymtabWorker, .{ self, x }),
+    };
+}
+
+fn updateLazyBindSizeWorker(self: *MachO) void {
+    const doWork = struct {
+        fn doWork(macho_file: *MachO) !void {
+            const tracy = trace(@src());
+            defer tracy.end();
+            try macho_file.lazy_bind.updateSize(macho_file);
+            // TODO wasteful check
+            if (macho_file.stubs_helper_sect_index) |sect_id| {
+                const slice = macho_file.sections.slice();
+                const header = slice.items(.header)[sect_id];
+                const out = &slice.items(.out)[sect_id];
+                try out.resize(macho_file.base.allocator, header.size);
+                try macho_file.stubs_helper.write(macho_file, out.writer(macho_file.base.allocator));
+            }
+        }
+    }.doWork;
+    doWork(self) catch |err| {
+        self.base.fatal("could not calculate lazy_bind opcodes size: {s}", .{@errorName(err)});
     };
 }
 
@@ -2185,7 +2201,6 @@ fn updateLinkeditSizeWorker(self: *MachO, tag: enum {
     rebase,
     bind,
     weak_bind,
-    lazy_bind,
     export_trie,
     data_in_code,
 }) void {
@@ -2193,7 +2208,6 @@ fn updateLinkeditSizeWorker(self: *MachO, tag: enum {
         .rebase => self.rebase.updateSize(self),
         .bind => self.bind.updateSize(self),
         .weak_bind => self.weak_bind.updateSize(self),
-        .lazy_bind => self.lazy_bind.updateSize(self),
         .export_trie => self.export_trie.updateSize(self),
         .data_in_code => self.data_in_code.updateSize(self),
     };
@@ -2287,7 +2301,6 @@ fn writeSyntheticSectionWorker(self: *MachO, sect_id: u8, out: []u8) void {
         unwind_info,
         got,
         stubs,
-        stubs_helper,
         la_symbol_ptr,
         tlv_ptr,
         objc_stubs,
@@ -2300,7 +2313,6 @@ fn writeSyntheticSectionWorker(self: *MachO, sect_id: u8, out: []u8) void {
                 .unwind_info => try macho_file.unwind_info.write(macho_file, buffer),
                 .got => try macho_file.got.write(macho_file, stream.writer()),
                 .stubs => try macho_file.stubs.write(macho_file, stream.writer()),
-                .stubs_helper => try macho_file.stubs_helper.write(macho_file, stream.writer()),
                 .la_symbol_ptr => try macho_file.la_symbol_ptr.write(macho_file, stream.writer()),
                 .tlv_ptr => try macho_file.tlv_ptr.write(macho_file, stream.writer()),
                 .objc_stubs => try macho_file.objc_stubs.write(macho_file, stream.writer()),
@@ -2317,8 +2329,6 @@ fn writeSyntheticSectionWorker(self: *MachO, sect_id: u8, out: []u8) void {
             self.got_sect_index.? == sect_id) break :tag .got;
         if (self.stubs_sect_index != null and
             self.stubs_sect_index.? == sect_id) break :tag .stubs;
-        if (self.stubs_helper_sect_index != null and
-            self.stubs_helper_sect_index.? == sect_id) break :tag .stubs_helper;
         if (self.la_symbol_ptr_sect_index != null and
             self.la_symbol_ptr_sect_index.? == sect_id) break :tag .la_symbol_ptr;
         if (self.tlv_ptr_sect_index != null and
@@ -2343,7 +2353,6 @@ fn writeSyntheticSections(self: *MachO) !void {
         self.unwind_info_sect_index,
         self.got_sect_index,
         self.stubs_sect_index,
-        self.stubs_helper_sect_index,
         self.la_symbol_ptr_sect_index,
         self.tlv_ptr_sect_index,
         self.objc_stubs_sect_index,
@@ -2482,26 +2491,28 @@ fn calcSymtabSizeImpl(self: *MachO) !void {
         cmd.iundefsym = nlocals + nstabs + nexports;
         cmd.nundefsym = nimports;
     }
+
+    {
+        wg.reset();
+        defer wg.wait();
+
+        const cmd = self.symtab_cmd;
+        try self.symtab.resize(gpa, cmd.nsyms);
+        try self.strtab.resize(gpa, cmd.strsize);
+        for (self.objects.items) |index| {
+            self.base.thread_pool.spawnWg(&wg, writeSymtabWorker, .{ self, self.getFile(index).? });
+        }
+        for (self.dylibs.items) |index| {
+            self.base.thread_pool.spawnWg(&wg, writeSymtabWorker, .{ self, self.getFile(index).? });
+        }
+        if (self.getInternalObject()) |internal| {
+            self.base.thread_pool.spawnWg(&wg, writeSymtabWorker, .{ self, internal.asFile() });
+        }
+    }
 }
 
 fn calcSymtabSizeFileWorker(self: *MachO, file: File) void {
     file.calcSymtabSize(self);
-}
-
-fn writeSymtab(self: *MachO) !void {
-    const gpa = self.base.allocator;
-    const cmd = self.symtab_cmd;
-    try self.symtab.resize(gpa, cmd.nsyms);
-    try self.strtab.resize(gpa, cmd.strsize);
-    for (self.objects.items) |index| {
-        try self.work_queue.writeItem(.{ .write_symtab = self.getFile(index).? });
-    }
-    for (self.dylibs.items) |index| {
-        try self.work_queue.writeItem(.{ .write_symtab = self.getFile(index).? });
-    }
-    if (self.getInternalObject()) |internal| {
-        try self.work_queue.writeItem(.{ .write_symtab = internal.asFile() });
-    }
 }
 
 fn writeSymtabWorker(self: *MachO, file: File) void {
@@ -3354,7 +3365,6 @@ pub const Job = union(enum) {
     write_atoms: struct { []const Atom.Index, []u8 },
     write_thunk: struct { *const Thunk, []u8 },
     write_synthetic_section: struct { u8, []u8 },
-    write_symtab: File,
 };
 
 pub const base_tag = Zld.Tag.macho;
