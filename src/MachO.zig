@@ -1304,10 +1304,15 @@ fn scanRelocs(self: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    for (self.objects.items) |index| {
-        try self.work_queue.writeItem(.{ .scan_relocs = self.getFile(index).?.object });
+    var wg: WaitGroup = .{};
+
+    {
+        wg.reset();
+        defer wg.wait();
+        for (self.objects.items) |index| {
+            self.base.thread_pool.spawnWg(&wg, scanRelocsWorker, .{ self, self.getFile(index).?.object });
+        }
     }
-    try self.performAllTheWork();
 
     try self.reportUndefs();
 
@@ -2146,7 +2151,6 @@ fn performAllTheWork(self: *MachO) !void {
     self.wait_group.reset();
     defer self.wait_group.wait();
     while (self.work_queue.readItem()) |job| switch (job) {
-        .scan_relocs => |x| self.base.thread_pool.spawnWg(&self.wait_group, scanRelocsWorker, .{ self, x }),
         .section_size => |x| self.base.thread_pool.spawnWg(&self.wait_group, calcSectionSizeWorker, .{ self, x }),
         .create_thunks => |x| self.base.thread_pool.spawnWg(&self.wait_group, createThunksWorker, .{ self, x }),
         .rebase_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLinkeditSizeWorker, .{ self, .rebase }),
@@ -3338,7 +3342,6 @@ pub const null_sym = macho.nlist_64{
 };
 
 pub const Job = union(enum) {
-    scan_relocs: *const Object,
     section_size: u8,
     create_thunks: u8,
     rebase_size: void,
