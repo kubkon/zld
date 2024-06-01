@@ -210,7 +210,7 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
             mem.eql(u8, isec.sectName(), "__compact_unwind") or
             isec.attrs() & macho.S_ATTR_DEBUG != 0)
         {
-            atom.flags.alive = false;
+            _ = atom.alive.swap(false, .seq_cst);
         }
     }
 }
@@ -372,7 +372,7 @@ fn addAtom(self: *Object, args: AddAtomArgs, macho_file: *MachO) !Atom.Index {
     atom.name = args.name;
     atom.n_sect = args.n_sect;
     atom.size = args.size;
-    atom.alignment = args.alignment;
+    atom.alignment.store(args.alignment, .seq_cst);
     atom.off = args.off;
     try self.atoms.append(gpa, atom_index);
     return atom_index;
@@ -534,7 +534,7 @@ pub fn resolveLiterals(self: Object, lp: *MachO.LiteralPool, macho_file: *MachO)
                 assert(relocs.len == 1);
                 const rel = relocs[0];
                 const target = switch (rel.tag) {
-                    .local => rel.target,
+                    .local => rel.target.load(.seq_cst),
                     .@"extern" => rel.getTargetSymbol(macho_file).atom,
                 };
                 const addend = math.cast(u32, rel.addend) orelse return error.Overflow;
@@ -560,7 +560,7 @@ pub fn dedupLiterals(self: Object, lp: MachO.LiteralPool, macho_file: *MachO) vo
 
     for (self.atoms.items) |atom_index| {
         const atom = macho_file.getAtom(atom_index) orelse continue;
-        if (!atom.flags.alive) continue;
+        if (!atom.alive.load(.seq_cst)) continue;
         if (!atom.flags.relocs) continue;
 
         const relocs = blk: {
@@ -570,13 +570,13 @@ pub fn dedupLiterals(self: Object, lp: MachO.LiteralPool, macho_file: *MachO) vo
         };
         for (relocs) |*rel| switch (rel.tag) {
             .local => {
-                const target = macho_file.getAtom(rel.target).?;
+                const target = macho_file.getAtom(rel.target.load(.seq_cst)).?;
                 if (target.getLiteralPoolIndex(macho_file)) |lp_index| {
                     const lp_atom = lp.getAtom(lp_index, macho_file);
                     if (target.atom_index != lp_atom.atom_index) {
-                        lp_atom.alignment = @max(lp_atom.alignment, target.alignment);
-                        target.flags.alive = false;
-                        rel.target = lp_atom.atom_index;
+                        _ = lp_atom.alignment.fetchMax(target.alignment.load(.seq_cst), .seq_cst);
+                        _ = target.alive.swap(false, .seq_cst);
+                        _ = rel.target.swap(lp_atom.atom_index, .seq_cst);
                     }
                 }
             },
@@ -586,8 +586,10 @@ pub fn dedupLiterals(self: Object, lp: MachO.LiteralPool, macho_file: *MachO) vo
                     if (target_atom.getLiteralPoolIndex(macho_file)) |lp_index| {
                         const lp_atom = lp.getAtom(lp_index, macho_file);
                         if (target_atom.atom_index != lp_atom.atom_index) {
-                            lp_atom.alignment = @max(lp_atom.alignment, target_atom.alignment);
-                            target_atom.flags.alive = false;
+                            _ = lp_atom.alignment.fetchMax(target_atom.alignment.load(.seq_cst), .seq_cst);
+                            _ = target_atom.alive.swap(false, .seq_cst);
+                            target_sym.mutex.lock();
+                            defer target_sym.mutex.unlock();
                             target_sym.atom = lp_atom.atom_index;
                         }
                     }
@@ -843,7 +845,7 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
         var next_reloc: usize = 0;
         for (subsections.items) |subsection| {
             const atom = macho_file.getAtom(subsection.atom).?;
-            if (!atom.flags.alive) continue;
+            if (!atom.alive.load(.seq_cst)) continue;
             if (next_reloc >= relocs.items.len) break;
             const end_addr = atom.off + atom.size;
             const rel_index = next_reloc;
@@ -946,7 +948,7 @@ fn initEhFrameRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
                     });
                     return error.ParseFailed;
                 };
-                cie.personality = .{ .index = @intCast(rel.target), .offset = rel.offset - cie.offset };
+                cie.personality = .{ .index = @intCast(rel.target.load(.seq_cst)), .offset = rel.offset - cie.offset };
             },
             else => {},
         }
@@ -1023,7 +1025,7 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
                 },
                 16 => switch (rel.tag) { // personality function
                     .@"extern" => {
-                        out.personality = rel.target;
+                        out.personality = rel.target.load(.seq_cst);
                     },
                     .local => if (sym_lookup.find(rec.personalityFunction)) |sym_index| {
                         out.personality = sym_index;
@@ -1313,7 +1315,7 @@ pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
         if (nlist.undf() and !nlist.tentative()) continue;
         if (nlist.sect()) {
             const atom = macho_file.getAtom(atom_index).?;
-            if (!atom.flags.alive) continue;
+            if (!atom.alive.load(.seq_cst)) continue;
         }
 
         const symbol = macho_file.getSymbol(index);
@@ -1394,7 +1396,7 @@ pub fn scanRelocs(self: Object, macho_file: *MachO) !void {
 
     for (self.atoms.items) |atom_index| {
         const atom = macho_file.getAtom(atom_index).?;
-        if (!atom.flags.alive) continue;
+        if (!atom.alive.load(.seq_cst)) continue;
         const sect = atom.getInputSection(macho_file);
         if (sect.isZerofill()) continue;
         try atom.scanRelocs(macho_file);
@@ -1431,6 +1433,7 @@ pub fn convertTentativeDefinitions(self: *Object, macho_file: *MachO) !void {
         const atom_index = try macho_file.addAtom();
         try self.atoms.append(gpa, atom_index);
 
+        const alignment = (nlist.n_desc >> 8) & 0x0f;
         const name = try std.fmt.allocPrintZ(gpa, "__DATA$__common${s}", .{sym.getName(macho_file)});
         defer gpa.free(name);
         const atom = macho_file.getAtom(atom_index).?;
@@ -1438,13 +1441,13 @@ pub fn convertTentativeDefinitions(self: *Object, macho_file: *MachO) !void {
         atom.name = try self.addString(gpa, name);
         atom.file = self.index;
         atom.size = nlist.n_value;
-        atom.alignment = (nlist.n_desc >> 8) & 0x0f;
+        atom.alignment.store(alignment, .seq_cst);
 
         const n_sect = try self.addSection(gpa, "__DATA", "__common");
         const sect = &self.sections.items(.header)[n_sect];
         sect.flags = macho.S_ZEROFILL;
         sect.size = atom.size;
-        sect.@"align" = atom.alignment;
+        sect.@"align" = alignment;
         atom.n_sect = n_sect;
 
         sym.value = 0;
@@ -1484,7 +1487,7 @@ pub fn calcSymtabSize(self: *Object, macho_file: *MachO) void {
         const sym = macho_file.getSymbol(sym_index);
         const file = sym.getFile(macho_file) orelse continue;
         if (file.getIndex() != self.index) continue;
-        if (sym.getAtom(macho_file)) |atom| if (!atom.flags.alive) continue;
+        if (sym.getAtom(macho_file)) |atom| if (!atom.alive.load(.seq_cst)) continue;
         if (sym.isSymbolStab(macho_file)) continue;
         const name = sym.getName(macho_file);
         // TODO in -r mode, we actually want to merge symbol names and emit only one
@@ -2229,7 +2232,7 @@ const x86_64 = struct {
             out.appendAssumeCapacity(.{
                 .tag = if (rel.r_extern == 1) .@"extern" else .local,
                 .offset = @as(u32, @intCast(rel.r_address)),
-                .target = target,
+                .target = std.atomic.Value(u32).init(target),
                 .addend = addend,
                 .type = @"type",
                 .meta = .{
@@ -2411,7 +2414,7 @@ const aarch64 = struct {
             out.appendAssumeCapacity(.{
                 .tag = if (rel.r_extern == 1) .@"extern" else .local,
                 .offset = @as(u32, @intCast(rel.r_address)),
-                .target = target,
+                .target = std.atomic.Value(u32).init(target),
                 .addend = addend,
                 .type = @"type",
                 .meta = .{

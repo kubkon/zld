@@ -48,7 +48,7 @@ pub const Bind = struct {
             const file = macho_file.getFile(index).?;
             for (file.getAtoms()) |atom_index| {
                 const atom = macho_file.getAtom(atom_index) orelse continue;
-                if (!atom.flags.alive) continue;
+                if (!atom.alive.load(.seq_cst)) continue;
                 if (atom.getInputSection(macho_file).isZerofill()) continue;
                 const atom_addr = atom.getAddress(macho_file);
                 const relocs = atom.getRelocs(macho_file);
@@ -61,7 +61,7 @@ pub const Bind = struct {
                     const sym = rel.getTargetSymbol(macho_file);
                     if (sym.isTlvInit(macho_file)) continue;
                     const entry = Entry{
-                        .target = rel.target,
+                        .target = rel.target.load(.seq_cst),
                         .offset = atom_addr + rel_offset - seg.vmaddr,
                         .segment_id = seg_id,
                         .addend = addend,
@@ -303,7 +303,7 @@ pub const WeakBind = struct {
 
             for (file.getAtoms()) |atom_index| {
                 const atom = macho_file.getAtom(atom_index) orelse continue;
-                if (!atom.flags.alive) continue;
+                if (!atom.alive.load(.seq_cst)) continue;
                 if (atom.getInputSection(macho_file).isZerofill()) continue;
                 const atom_addr = atom.getAddress(macho_file);
                 const relocs = atom.getRelocs(macho_file);
@@ -316,7 +316,7 @@ pub const WeakBind = struct {
                     const sym = rel.getTargetSymbol(macho_file);
                     if (sym.isTlvInit(macho_file)) continue;
                     const entry = Entry{
-                        .target = rel.target,
+                        .target = rel.target.load(.seq_cst),
                         .offset = atom_addr + rel_offset - seg.vmaddr,
                         .segment_id = seg_id,
                         .addend = addend,

@@ -97,7 +97,7 @@ pub const File = union(enum) {
         defer tracy.end();
         for (file.getAtoms()) |atom_index| {
             const atom = macho_file.getAtom(atom_index) orelse continue;
-            if (!atom.flags.alive) continue;
+            if (!atom.alive.load(.seq_cst)) continue;
             atom.out_n_sect = try Atom.initOutputSection(atom.getInputSection(macho_file), macho_file);
         }
     }

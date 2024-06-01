@@ -1,6 +1,6 @@
 tag: enum { @"extern", local },
 offset: u32,
-target: u32,
+target: std.atomic.Value(u32),
 addend: i64,
 type: Type,
 meta: packed struct {
@@ -12,12 +12,12 @@ meta: packed struct {
 
 pub fn getTargetSymbol(rel: Relocation, macho_file: *MachO) *Symbol {
     assert(rel.tag == .@"extern");
-    return macho_file.getSymbol(rel.target);
+    return macho_file.getSymbol(rel.target.load(.seq_cst));
 }
 
 pub fn getTargetAtom(rel: Relocation, macho_file: *MachO) *Atom {
     assert(rel.tag == .local);
-    return macho_file.getAtom(rel.target).?;
+    return macho_file.getAtom(rel.target.load(.seq_cst)).?;
 }
 
 pub fn getTargetAddress(rel: Relocation, macho_file: *MachO) u64 {

@@ -17,8 +17,8 @@ pub fn createThunks(sect_id: u8, macho_file: *MachO) !void {
     while (i < atoms.len) {
         const start = i;
         const start_atom = macho_file.getAtom(atoms[start]).?;
-        assert(start_atom.flags.alive);
-        start_atom.value = try advance(header, start_atom.size, start_atom.alignment);
+        assert(start_atom.alive.load(.seq_cst));
+        start_atom.value = try advance(header, start_atom.size, start_atom.alignment.load(.seq_cst));
         i += 1;
 
         while (i < atoms.len and
@@ -26,8 +26,8 @@ pub fn createThunks(sect_id: u8, macho_file: *MachO) !void {
         {
             const atom_index = atoms[i];
             const atom = macho_file.getAtom(atom_index).?;
-            assert(atom.flags.alive);
-            atom.value = try advance(header, atom.size, atom.alignment);
+            assert(atom.alive.load(.seq_cst));
+            atom.value = try advance(header, atom.size, atom.alignment.load(.seq_cst));
         }
 
         // Insert a thunk at the group end
@@ -43,7 +43,7 @@ pub fn createThunks(sect_id: u8, macho_file: *MachO) !void {
             for (atom.getRelocs(macho_file)) |rel| {
                 if (rel.type != .branch) continue;
                 if (isReachable(atom, rel, macho_file)) continue;
-                try thunk.symbols.put(gpa, rel.target, {});
+                try thunk.symbols.put(gpa, rel.target.load(.seq_cst), {});
             }
             try atom.addExtra(.{ .thunk = thunk_index }, macho_file);
             atom.flags.thunk = true;

@@ -51,7 +51,7 @@ fn addObjcMethnameSection(self: *InternalObject, methname: []const u8, macho_fil
     atom.atom_index = atom_index;
     atom.file = self.index;
     atom.size = methname.len + 1;
-    atom.alignment = 0;
+    atom.alignment.store(0, .seq_cst);
 
     const n_sect = try self.addSection(gpa, "__TEXT", "__objc_methname");
     const sect = &self.sections.items(.header)[n_sect];
@@ -77,7 +77,7 @@ fn addObjcSelrefsSection(self: *InternalObject, methname_atom_index: Atom.Index,
     atom.atom_index = atom_index;
     atom.file = self.index;
     atom.size = @sizeOf(u64);
-    atom.alignment = 3;
+    atom.alignment.store(3, .seq_cst);
 
     const n_sect = try self.addSection(gpa, "__DATA", "__objc_selrefs");
     const sect = &self.sections.items(.header)[n_sect];
@@ -93,7 +93,7 @@ fn addObjcSelrefsSection(self: *InternalObject, methname_atom_index: Atom.Index,
     relocs.appendAssumeCapacity(.{
         .tag = .local,
         .offset = 0,
-        .target = methname_atom_index,
+        .target = std.atomic.Value(u32).init(methname_atom_index),
         .addend = 0,
         .type = .unsigned,
         .meta = .{
@@ -136,7 +136,7 @@ pub fn resolveLiterals(self: InternalObject, lp: *MachO.LiteralPool, macho_file:
             assert(relocs.len == 1);
             const rel = relocs[0];
             assert(rel.tag == .local);
-            const target = macho_file.getAtom(rel.target).?;
+            const target = macho_file.getAtom(rel.target.load(.seq_cst)).?;
             const addend = std.math.cast(u32, rel.addend) orelse return error.Overflow;
             try buffer.ensureUnusedCapacity(target.size);
             buffer.resize(target.size) catch unreachable;
@@ -158,7 +158,7 @@ pub fn dedupLiterals(self: InternalObject, lp: MachO.LiteralPool, macho_file: *M
 
     for (self.atoms.items) |atom_index| {
         const atom = macho_file.getAtom(atom_index) orelse continue;
-        if (!atom.flags.alive) continue;
+        if (!atom.alive.load(.seq_cst)) continue;
         if (!atom.flags.relocs) continue;
 
         const relocs = blk: {
@@ -168,13 +168,13 @@ pub fn dedupLiterals(self: InternalObject, lp: MachO.LiteralPool, macho_file: *M
         };
         for (relocs) |*rel| switch (rel.tag) {
             .local => {
-                const target = macho_file.getAtom(rel.target).?;
+                const target = macho_file.getAtom(rel.target.load(.seq_cst)).?;
                 if (target.getLiteralPoolIndex(macho_file)) |lp_index| {
                     const lp_atom = lp.getAtom(lp_index, macho_file);
                     if (target.atom_index != lp_atom.atom_index) {
-                        lp_atom.alignment = @max(lp_atom.alignment, target.alignment);
-                        target.flags.alive = false;
-                        rel.target = lp_atom.atom_index;
+                        _ = lp_atom.alignment.fetchMax(target.alignment.load(.seq_cst), .seq_cst);
+                        _ = target.alive.swap(false, .seq_cst);
+                        _ = rel.target.swap(lp_atom.atom_index, .seq_cst);
                     }
                 }
             },
@@ -184,8 +184,10 @@ pub fn dedupLiterals(self: InternalObject, lp: MachO.LiteralPool, macho_file: *M
                     if (target_atom.getLiteralPoolIndex(macho_file)) |lp_index| {
                         const lp_atom = lp.getAtom(lp_index, macho_file);
                         if (target_atom.atom_index != lp_atom.atom_index) {
-                            lp_atom.alignment = @max(lp_atom.alignment, target_atom.alignment);
-                            target_atom.flags.alive = false;
+                            _ = lp_atom.alignment.fetchMax(target_atom.alignment.load(.seq_cst), .seq_cst);
+                            _ = target_atom.alive.swap(false, .seq_cst);
+                            target_sym.mutex.lock();
+                            defer target_sym.mutex.unlock();
                             target_sym.atom = lp_atom.atom_index;
                         }
                     }
@@ -202,9 +204,11 @@ pub fn dedupLiterals(self: InternalObject, lp: MachO.LiteralPool, macho_file: *M
         if (atom.getLiteralPoolIndex(macho_file)) |lp_index| {
             const lp_atom = lp.getAtom(lp_index, macho_file);
             if (atom.atom_index != lp_atom.atom_index) {
-                lp_atom.alignment = @max(lp_atom.alignment, atom.alignment);
-                atom.flags.alive = false;
+                _ = lp_atom.alignment.fetchMax(atom.alignment.load(.seq_cst), .seq_cst);
+                _ = atom.alive.swap(false, .seq_cst);
                 extra.objc_selrefs = lp_atom.atom_index;
+                sym.mutex.lock();
+                defer sym.mutex.unlock();
                 sym.setExtra(extra, macho_file);
             }
         }

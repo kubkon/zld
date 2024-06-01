@@ -11,7 +11,7 @@ file: File.Index = 0,
 size: u64 = 0,
 
 /// Alignment of this atom as a power of two.
-alignment: u32 = 0,
+alignment: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
 /// Index of the input section.
 n_sect: u32 = 0,
@@ -25,6 +25,12 @@ off: u64 = 0,
 
 /// Index of this atom in the linker's atoms table.
 atom_index: Index = 0,
+
+/// Specifies whether this atom is alive or has been garbage collected.
+alive: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
+
+/// Specifies if the atom has been visited during garbage collection.
+visited: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
 flags: Flags = .{},
 
@@ -325,7 +331,7 @@ fn reportUndefSymbol(self: Atom, rel: Relocation, macho_file: *MachO) !bool {
         macho_file.undefs_mutex.lock();
         defer macho_file.undefs_mutex.unlock();
         const gpa = macho_file.base.allocator;
-        const gop = try macho_file.undefs.getOrPut(gpa, rel.target);
+        const gop = try macho_file.undefs.getOrPut(gpa, rel.target.load(.seq_cst));
         if (!gop.found_existing) {
             gop.value_ptr.* = .{};
         }
@@ -468,7 +474,7 @@ fn resolveRelocInner(
                 .aarch64 => {
                     const disp: i28 = math.cast(i28, S + A - P) orelse blk: {
                         const thunk = self.getThunk(macho_file);
-                        const S_: i64 = @intCast(thunk.getTargetAddress(rel.target, macho_file));
+                        const S_: i64 = @intCast(thunk.getTargetAddress(rel.target.load(.seq_cst), macho_file));
                         break :blk math.cast(i28, S_ + A - P) orelse return error.Overflow;
                     };
                     aarch64.writeBranchImm(disp, code[rel_offset..][0..4]);
@@ -856,11 +862,11 @@ fn format2(
     const atom = ctx.atom;
     const macho_file = ctx.macho_file;
     try writer.print("atom({d}) : {s} : @{x} : sect({d}) : align({x}) : size({x})", .{
-        atom.atom_index, atom.getName(macho_file), atom.getAddress(macho_file),
-        atom.out_n_sect, atom.alignment,           atom.size,
+        atom.atom_index, atom.getName(macho_file),      atom.getAddress(macho_file),
+        atom.out_n_sect, atom.alignment.load(.seq_cst), atom.size,
     });
     if (atom.flags.thunk) try writer.print(" : thunk({d})", .{atom.getExtra(macho_file).?.thunk});
-    if (!atom.flags.alive) try writer.writeAll(" : [*]");
+    if (!atom.alive.load(.seq_cst)) try writer.writeAll(" : [*]");
     if (atom.flags.unwind) {
         try writer.writeAll(" : unwind{ ");
         const extra = atom.getExtra(macho_file).?;
@@ -877,12 +883,6 @@ fn format2(
 pub const Index = u32;
 
 pub const Flags = packed struct {
-    /// Specifies whether this atom is alive or has been garbage collected.
-    alive: bool = true,
-
-    /// Specifies if the atom has been visited during garbage collection.
-    visited: bool = false,
-
     /// Whether this atom has a range extension thunk.
     thunk: bool = false,
 

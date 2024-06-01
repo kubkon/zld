@@ -319,7 +319,7 @@ pub fn updateSize(self: *Trie, macho_file: *MachO) error{OutOfMemory}!void {
         for (macho_file.getFile(index).?.getSymbols()) |sym_index| {
             const sym = macho_file.getSymbol(sym_index);
             if (!sym.flags.@"export") continue;
-            if (sym.getAtom(macho_file)) |atom| if (!atom.flags.alive) continue;
+            if (sym.getAtom(macho_file)) |atom| if (!atom.alive.load(.seq_cst)) continue;
             if (sym.getFile(macho_file).?.getIndex() != index) continue;
             var flags: u64 = if (sym.flags.abs)
                 macho.EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE

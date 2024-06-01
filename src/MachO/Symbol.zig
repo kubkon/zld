@@ -30,6 +30,8 @@ visibility: Visibility = .local,
 
 extra: u32 = 0,
 
+mutex: std.Thread.Mutex = .{},
+
 pub fn isLocal(symbol: Symbol) bool {
     return !(symbol.flags.import or symbol.flags.@"export");
 }
@@ -150,7 +152,7 @@ pub fn getObjcSelrefsAddress(symbol: Symbol, macho_file: *MachO) u64 {
     if (!symbol.getSectionFlags().objc_stubs) return 0;
     const extra = symbol.getExtra(macho_file);
     const atom = macho_file.getAtom(extra.objc_selrefs).?;
-    assert(atom.flags.alive);
+    assert(atom.alive.load(.seq_cst));
     return atom.getAddress(macho_file);
 }
 

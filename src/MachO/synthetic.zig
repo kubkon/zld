@@ -581,7 +581,7 @@ pub const DataInCode = struct {
                     dices[next_dice].offset < end_off) : (next_dice += 1)
                 {}
 
-                if (atom.flags.alive) for (dices[start_dice..next_dice]) |d| {
+                if (atom.alive.load(.seq_cst)) for (dices[start_dice..next_dice]) |d| {
                     dice.entries.appendAssumeCapacity(.{
                         .offset = @intCast(atom.getAddress(macho_file) + d.offset - start_off - base_address),
                         .length = d.length,

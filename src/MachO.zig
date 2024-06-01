@@ -1259,11 +1259,16 @@ pub fn dedupLiterals(self: *MachO) !void {
         try object.resolveLiterals(&lp, self);
     }
 
-    for (self.objects.items) |index| {
-        self.getFile(index).?.object.dedupLiterals(lp, self);
-    }
-    if (self.getInternalObject()) |object| {
-        object.dedupLiterals(lp, self);
+    var wg: WaitGroup = .{};
+    {
+        wg.reset();
+        defer wg.wait();
+        for (self.objects.items) |index| {
+            self.base.thread_pool.spawnWg(&wg, Object.dedupLiterals, .{ self.getFile(index).?.object.*, lp, self });
+        }
+        if (self.getInternalObject()) |object| {
+            self.base.thread_pool.spawnWg(&wg, InternalObject.dedupLiterals, .{ object.*, lp, self });
+        }
     }
 }
 
@@ -1650,14 +1655,14 @@ pub fn sortSections(self: *MachO) !void {
     for (self.objects.items) |index| {
         for (self.getFile(index).?.object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
-            if (!atom.flags.alive) continue;
+            if (!atom.alive.load(.seq_cst)) continue;
             atom.out_n_sect = backlinks[atom.out_n_sect];
         }
     }
     if (self.getInternalObject()) |object| {
         for (object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
-            if (!atom.flags.alive) continue;
+            if (!atom.alive.load(.seq_cst)) continue;
             atom.out_n_sect = backlinks[atom.out_n_sect];
         }
     }
@@ -1687,7 +1692,7 @@ pub fn addAtomsToSections(self: *MachO) !void {
         const object = self.getFile(index).?.object;
         for (object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
-            if (!atom.flags.alive) continue;
+            if (!atom.alive.load(.seq_cst)) continue;
             const atoms = &self.sections.items(.atoms)[atom.out_n_sect];
             try atoms.append(self.base.allocator, atom_index);
         }
@@ -1695,7 +1700,7 @@ pub fn addAtomsToSections(self: *MachO) !void {
     if (self.getInternalObject()) |object| {
         for (object.atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index) orelse continue;
-            if (!atom.flags.alive) continue;
+            if (!atom.alive.load(.seq_cst)) continue;
             const atoms = &self.sections.items(.atoms)[atom.out_n_sect];
             try atoms.append(self.base.allocator, atom_index);
         }
@@ -1798,12 +1803,13 @@ fn calcSectionSizeWorker(self: *MachO, sect_id: u8) void {
         fn doWork(macho_file: *MachO, header: *macho.section_64, atoms: []const Atom.Index) !void {
             for (atoms) |atom_index| {
                 const atom = macho_file.getAtom(atom_index).?;
-                const atom_alignment = try math.powi(u32, 2, atom.alignment);
+                const p2align = atom.alignment.load(.seq_cst);
+                const atom_alignment = try math.powi(u32, 2, p2align);
                 const offset = mem.alignForward(u64, header.size, atom_alignment);
                 const padding = offset - header.size;
                 atom.value = offset;
                 header.size += padding + atom.size;
-                header.@"align" = @max(header.@"align", atom.alignment);
+                header.@"align" = @max(header.@"align", p2align);
             }
         }
     }.doWork;
@@ -2225,6 +2231,7 @@ fn writeSections(self: *MachO) !void {
         @memset(out.items, padding_byte);
 
         const chunk_size: usize = atoms.items.len; //500_000;
+        // const chunk_size: usize = 1_000_000;
         const num_chunks = std.math.cast(usize, @divTrunc(atoms.items.len, chunk_size)) orelse
             return error.Overflow;
         const actual_num_chunks = if (@rem(atoms.items.len, chunk_size) > 0) num_chunks + 1 else num_chunks;
