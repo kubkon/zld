@@ -149,13 +149,12 @@ const CreateSymlinksStep = struct {
         return self;
     }
 
-    fn make(step: *std.Build.Step, prog_node: *std.Progress.Node) anyerror!void {
+    fn make(step: *std.Build.Step, prog_node: std.Progress.Node) anyerror!void {
         const self: *CreateSymlinksStep = @fieldParentPtr("step", step);
         const install_path = self.install.artifact.getEmittedBin().getPath(self.builder);
         const rel_source = fs.path.basename(install_path);
 
         var node = prog_node.start("creating symlinks", self.targets.len);
-        node.activate();
         defer node.end();
         for (self.targets, 0..) |target, i| {
             const target_path = self.builder.getInstallPath(.bin, target);

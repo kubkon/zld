@@ -349,8 +349,8 @@ pub fn getAllErrorsAlloc(base: *Zld) !ErrorBundle {
 }
 
 fn renderWarningToStdErr(eb: ErrorBundle) void {
-    std.debug.getStderrMutex().lock();
-    defer std.debug.getStderrMutex().unlock();
+    std.debug.lockStdErr();
+    defer std.debug.unlockStdErr();
     const stderr = std.io.getStdErr();
     return renderWarningToWriter(eb, stderr.writer()) catch return;
 }
