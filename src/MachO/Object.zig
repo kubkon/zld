@@ -14,7 +14,6 @@ strtab: std.ArrayListUnmanaged(u8) = .{},
 symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
 
-platform: ?MachO.Options.Platform = null,
 compile_unit: ?CompileUnit = null,
 stab_files: std.ArrayListUnmanaged(StabFile) = .{},
 
@@ -69,6 +68,20 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
         if (amt != @sizeOf(macho.mach_header_64)) return error.InputOutput;
     }
     self.header = @as(*align(1) const macho.mach_header_64, @ptrCast(&header_buffer)).*;
+
+    const cpu_arch: std.Target.Cpu.Arch = switch (self.header.?.cputype) {
+        macho.CPU_TYPE_ARM64 => .aarch64,
+        macho.CPU_TYPE_X86_64 => .x86_64,
+        else => unreachable,
+    };
+    if (macho_file.options.cpu_arch.? != cpu_arch) {
+        macho_file.base.fatal("{}: invalid architecture '{s}', expected '{s}'", .{
+            self.fmtPath(),
+            @tagName(cpu_arch),
+            @tagName(macho_file.options.cpu_arch.?),
+        });
+        return error.ParseFailed;
+    }
 
     const lc_buffer = try gpa.alloc(u8, self.header.?.sizeofcmds);
     defer gpa.free(lc_buffer);
@@ -137,8 +150,26 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
         .VERSION_MIN_IPHONEOS,
         .VERSION_MIN_TVOS,
         .VERSION_MIN_WATCHOS,
-        => if (self.platform == null) {
-            self.platform = MachO.Options.Platform.fromLoadCommand(lc);
+        => if (macho_file.options.platform) |plat| {
+            const this_plat = MachO.Options.Platform.fromLoadCommand(lc);
+            if (this_plat.platform != plat.platform) {
+                macho_file.base.fatal("{}: object file was built for different platform: expected {s}, got {s}", .{
+                    self.fmtPath(),
+                    @tagName(plat.platform),
+                    @tagName(this_plat.platform),
+                });
+                return error.ParseFailed;
+            }
+            if (this_plat.version.value > plat.version.value) {
+                macho_file.base.warn(
+                    "{s}: object file was built for newer platform version: expected {}, got {}",
+                    .{
+                        self.path,
+                        plat.version,
+                        this_plat.version,
+                    },
+                );
+            }
         },
         else => {},
     };

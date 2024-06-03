@@ -587,49 +587,6 @@ fn inferCpuArchAndPlatform(self: *MachO, obj: LinkObject, platforms: anytype) !v
     } else null;
 }
 
-fn validateCpuArch(self: *MachO, index: File.Index, cputype: macho.cpu_type_t) void {
-    const cpu_arch: std.Target.Cpu.Arch = switch (cputype) {
-        macho.CPU_TYPE_ARM64 => .aarch64,
-        macho.CPU_TYPE_X86_64 => .x86_64,
-        else => unreachable,
-    };
-    if (self.options.cpu_arch.? != cpu_arch) {
-        return self.base.fatal("{}: invalid architecture '{s}', expected '{s}'", .{
-            self.getFile(index).?.fmtPath(),
-            @tagName(cpu_arch),
-            @tagName(self.options.cpu_arch.?),
-        });
-    }
-}
-
-fn validatePlatform(self: *MachO, index: File.Index) void {
-    const self_platform = self.options.platform orelse return;
-    const file = self.getFile(index).?;
-    const other_platform: ?Options.Platform = switch (file) {
-        .object => |x| x.platform,
-        .dylib => |x| x.platform,
-        else => null,
-    };
-    if (other_platform) |platform| {
-        if (self_platform.platform != platform.platform) {
-            return self.base.fatal(
-                "{}: object file was built for different platform: expected {s}, got {s}",
-                .{ file.fmtPath(), @tagName(self_platform.platform), @tagName(platform.platform) },
-            );
-        }
-        if (self_platform.version.value < platform.version.value) {
-            return self.base.warn(
-                "{}: object file was built for newer platform version: expected {}, got {}",
-                .{
-                    file.fmtPath(),
-                    self_platform.version,
-                    platform.version,
-                },
-            );
-        }
-    }
-}
-
 fn addUndefinedGlobals(self: *MachO) !void {
     const gpa = self.base.allocator;
 
@@ -676,9 +633,9 @@ fn parsePositional(self: *MachO, obj: LinkObject) !void {
     if (readMachHeader(file, offset) catch null) |h| blk: {
         if (h.magic != macho.MH_MAGIC_64) break :blk;
         switch (h.filetype) {
-            macho.MH_OBJECT => try self.parseObject(obj, fh, h, offset),
+            macho.MH_OBJECT => try self.parseObject(obj, fh, offset),
             macho.MH_DYLIB => if (self.options.cpu_arch) |_| {
-                _ = try self.parseDylib(obj, fh, h, offset, true);
+                _ = try self.parseDylib(obj, fh, offset, true);
             } else {
                 self.base.fatal("{s}: ignoring library as no architecture specified", .{obj.path});
             },
@@ -746,7 +703,7 @@ pub fn readArMagic(file: std.fs.File, offset: usize, buffer: *[Archive.SARMAG]u8
     return buffer[0..Archive.SARMAG];
 }
 
-fn parseObject(self: *MachO, obj: LinkObject, handle: File.HandleIndex, hdr: macho.mach_header_64, offset: u64) !void {
+fn parseObject(self: *MachO, obj: LinkObject, handle: File.HandleIndex, offset: u64) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -768,8 +725,6 @@ fn parseObject(self: *MachO, obj: LinkObject, handle: File.HandleIndex, hdr: mac
     const object = &self.files.items(.data)[index].object;
     try object.parse(self);
     try self.objects.append(gpa, index);
-    self.validateCpuArch(index, hdr.cputype);
-    self.validatePlatform(index);
 }
 
 fn parseArchive(self: *MachO, obj: LinkObject, handle: File.HandleIndex, fat_arch: ?fat.Arch) !void {
@@ -793,15 +748,11 @@ fn parseArchive(self: *MachO, obj: LinkObject, handle: File.HandleIndex, fat_arc
         object.parse(self) catch |err| switch (err) {
             error.ParseFailed => {
                 has_parse_error = true;
-                // TODO see below
-                // continue;
+                continue;
             },
             else => |e| return e,
         };
         try self.objects.append(gpa, index);
-        // TODO this should come before reporting any parse errors
-        self.validateCpuArch(index, object.header.?.cputype);
-        self.validatePlatform(index);
 
         // Finally, we do a post-parse check for -ObjC to see if we need to force load this member
         // anyhow.
@@ -818,14 +769,7 @@ const DylibOpts = struct {
     reexport: bool = false,
 };
 
-fn parseDylib(
-    self: *MachO,
-    obj: LinkObject,
-    handle: File.HandleIndex,
-    hdr: macho.mach_header_64,
-    offset: u64,
-    explicit: bool,
-) anyerror!File.Index {
+fn parseDylib(self: *MachO, obj: LinkObject, handle: File.HandleIndex, offset: u64, explicit: bool) anyerror!File.Index {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -843,10 +787,7 @@ fn parseDylib(
     } });
     const dylib = &self.files.items(.data)[index].dylib;
     try dylib.parse(self, file, offset);
-
     try self.dylibs.append(gpa, index);
-    self.validateCpuArch(index, hdr.cputype);
-    self.validatePlatform(index);
 
     return index;
 }
@@ -867,9 +808,8 @@ fn parseTbd(self: *MachO, obj: LinkObject, lib_stub: LibStub, explicit: bool) an
         .explicit = explicit,
     } });
     const dylib = &self.files.items(.data)[index].dylib;
-    try dylib.parseTbd(self.options.cpu_arch.?, self.options.platform, lib_stub, self);
+    try dylib.parseTbd(lib_stub, self);
     try self.dylibs.append(gpa, index);
-    self.validatePlatform(index);
 
     return index;
 }
@@ -986,7 +926,7 @@ fn parseDependentDylibs(
                 if (readMachHeader(file, offset) catch null) |h| blk: {
                     if (h.magic != macho.MH_MAGIC_64) break :blk;
                     switch (h.filetype) {
-                        macho.MH_DYLIB => break :file_index try self.parseDylib(link_obj, fh, h, offset, false),
+                        macho.MH_DYLIB => break :file_index try self.parseDylib(link_obj, fh, offset, false),
                         else => break :file_index @as(File.Index, 0),
                     }
                 }

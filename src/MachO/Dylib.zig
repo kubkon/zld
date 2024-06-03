@@ -10,7 +10,6 @@ symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 dependents: std.ArrayListUnmanaged(Id) = .{},
 rpaths: std.StringArrayHashMapUnmanaged(void) = .{},
 umbrella: File.Index = 0,
-platform: ?MachO.Options.Platform = null,
 
 needed: bool,
 weak: bool,
@@ -50,6 +49,20 @@ pub fn parse(self: *Dylib, macho_file: *MachO, file: std.fs.File, offset: u64) !
         if (amt != @sizeOf(macho.mach_header_64)) return error.InputOutput;
     }
     const header = @as(*align(1) const macho.mach_header_64, @ptrCast(&header_buffer)).*;
+
+    const cpu_arch: std.Target.Cpu.Arch = switch (header.cputype) {
+        macho.CPU_TYPE_ARM64 => .aarch64,
+        macho.CPU_TYPE_X86_64 => .x86_64,
+        else => unreachable,
+    };
+    if (macho_file.options.cpu_arch.? != cpu_arch) {
+        macho_file.base.fatal("{s}: invalid architecture '{s}', expected '{s}'", .{
+            self.path,
+            @tagName(cpu_arch),
+            @tagName(macho_file.options.cpu_arch.?),
+        });
+        return error.ParseFailed;
+    }
 
     const lc_buffer = try gpa.alloc(u8, header.sizeofcmds);
     defer gpa.free(lc_buffer);
@@ -95,8 +108,26 @@ pub fn parse(self: *Dylib, macho_file: *MachO, file: std.fs.File, offset: u64) !
         .VERSION_MIN_IPHONEOS,
         .VERSION_MIN_TVOS,
         .VERSION_MIN_WATCHOS,
-        => {
-            self.platform = MachO.Options.Platform.fromLoadCommand(lc);
+        => if (macho_file.options.platform) |plat| {
+            const this_plat = MachO.Options.Platform.fromLoadCommand(lc);
+            if (this_plat.platform != plat.platform) {
+                macho_file.base.fatal("{s}: object file was built for different platform: expected {s}, got {s}", .{
+                    self.path,
+                    @tagName(plat.platform),
+                    @tagName(this_plat.platform),
+                });
+                return error.ParseFailed;
+            }
+            if (this_plat.version.value > plat.version.value) {
+                macho_file.base.warn(
+                    "{s}: object file was built for newer platform version: expected {}, got {}",
+                    .{
+                        self.path,
+                        plat.version,
+                        this_plat.version,
+                    },
+                );
+            }
         },
         else => {},
     };
@@ -210,13 +241,7 @@ fn parseTrie(self: *Dylib, data: []const u8, macho_file: *MachO) !void {
     try self.parseTrieNode(&it, gpa, arena.allocator(), "");
 }
 
-pub fn parseTbd(
-    self: *Dylib,
-    cpu_arch: std.Target.Cpu.Arch,
-    platform: ?MachO.Options.Platform,
-    lib_stub: LibStub,
-    macho_file: *MachO,
-) !void {
+pub fn parseTbd(self: *Dylib, lib_stub: LibStub, macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
     const gpa = macho_file.base.allocator;
@@ -241,12 +266,13 @@ pub fn parseTbd(
 
     log.debug("  (install_name '{s}')", .{umbrella_lib.installName()});
 
-    self.platform = platform orelse .{
+    const cpu_arch = macho_file.options.cpu_arch.?;
+    const platform: MachO.Options.Platform = macho_file.options.platform orelse .{
         .platform = .MACOS,
         .version = .{ .value = 0 },
     };
 
-    var matcher = try TargetMatcher.init(gpa, cpu_arch, self.platform.?.platform);
+    var matcher = try TargetMatcher.init(gpa, cpu_arch, platform.platform);
     defer matcher.deinit();
 
     for (lib_stub.inner, 0..) |elem, stub_index| {

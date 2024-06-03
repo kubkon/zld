@@ -120,7 +120,11 @@ pub fn parse(self: *Archive, macho_file: *MachO, path: []const u8, file_handle: 
             .ar_name = try gpa.dupe(u8, path),
         };
 
-        log.debug("extracting object '{s}' from archive '{s}'", .{ object.path, path });
+        log.debug("extracting object '{s}' from archive '{s}' at offset 0x{x}", .{
+            object.path,
+            path,
+            pos,
+        });
 
         try self.objects.append(gpa, object);
     }
