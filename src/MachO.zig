@@ -661,74 +661,126 @@ fn addUndefinedGlobals(self: *MachO) !void {
 }
 
 fn parsePositional(self: *MachO, obj: LinkObject) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     log.debug("parsing positional {}", .{obj});
 
-    if (try self.parseObject(obj)) return;
-    if (try self.parseArchive(obj)) return;
-    if (try self.parseDylib(obj, true)) |_| return;
-    if (try self.parseTbd(obj, true)) |_| return;
+    const file = try std.fs.cwd().openFile(obj.path, .{});
+    const fh = try self.addFileHandle(file);
+    var buffer: [Archive.SARMAG]u8 = undefined;
+
+    const fat_arch: ?fat.Arch = try self.parseFatFile(obj, file);
+    const offset = if (fat_arch) |fa| fa.offset else 0;
+
+    if (readMachHeader(file, offset) catch null) |h| blk: {
+        if (h.magic != macho.MH_MAGIC_64) break :blk;
+        switch (h.filetype) {
+            macho.MH_OBJECT => try self.parseObject(obj, fh, h, offset),
+            macho.MH_DYLIB => if (self.options.cpu_arch) |_| {
+                _ = try self.parseDylib(obj, fh, h, offset, true);
+            } else {
+                self.base.fatal("{s}: ignoring library as no architecture specified", .{obj.path});
+            },
+            else => self.base.fatal("{s}: unsupported input file type: {x}", .{ obj.path, h.filetype }),
+        }
+        return;
+    }
+    if (readArMagic(file, offset, &buffer) catch null) |ar_magic| blk: {
+        if (!mem.eql(u8, ar_magic, Archive.ARMAG)) break :blk;
+        if (self.options.cpu_arch) |_| {
+            try self.parseArchive(obj, fh, fat_arch);
+        } else {
+            self.base.fatal("{s}: ignoring library as no architecture specified", .{obj.path});
+        }
+        return;
+    }
+    blk: {
+        var lib_stub = LibStub.loadFromFile(self.base.allocator, file) catch break :blk;
+        defer lib_stub.deinit();
+        if (lib_stub.inner.len == 0) break :blk;
+        if (self.options.cpu_arch == null) {
+            self.base.fatal("{s}: ignoring library as no architecture specified", .{obj.path});
+        } else {
+            _ = try self.parseTbd(obj, lib_stub, true);
+        }
+        return;
+    }
 
     self.base.fatal("unknown filetype for positional argument: '{s}'", .{obj.path});
 }
 
-fn parseObject(self: *MachO, obj: LinkObject) !bool {
+fn parseFatFile(self: *MachO, obj: LinkObject, file: std.fs.File) !?fat.Arch {
+    const fat_h = fat.readFatHeader(file) catch return null;
+    if (fat_h.magic != macho.FAT_MAGIC and fat_h.magic != macho.FAT_MAGIC_64) return null;
+    var fat_archs_buffer: [2]fat.Arch = undefined;
+    const fat_archs = try fat.parseArchs(file, fat_h, &fat_archs_buffer);
+    const fat_arch = if (self.options.cpu_arch) |cpu_arch| arch: {
+        for (fat_archs) |arch| {
+            if (arch.tag == cpu_arch) break :arch arch;
+        }
+        self.base.fatal("{s}: missing arch in universal file: expected {s}", .{ obj.path, @tagName(cpu_arch) });
+        return error.MissingArch;
+    } else {
+        const err = try self.base.addErrorWithNotes(1 + fat_archs.len);
+        try err.addMsg("{s}: ignoring universal file as no architecture specified", .{obj.path});
+        for (fat_archs) |arch| {
+            try err.addNote("universal file built for {s}", .{@tagName(arch.tag)});
+        }
+        return error.NoArchSpecified;
+    };
+    return fat_arch;
+}
+
+pub fn readMachHeader(file: std.fs.File, offset: usize) !macho.mach_header_64 {
+    var buffer: [@sizeOf(macho.mach_header_64)]u8 = undefined;
+    const nread = try file.preadAll(&buffer, offset);
+    if (nread != buffer.len) return error.InputOutput;
+    const hdr = @as(*align(1) const macho.mach_header_64, @ptrCast(&buffer)).*;
+    return hdr;
+}
+
+pub fn readArMagic(file: std.fs.File, offset: usize, buffer: *[Archive.SARMAG]u8) ![]const u8 {
+    const nread = try file.preadAll(buffer, offset);
+    if (nread != buffer.len) return error.InputOutput;
+    return buffer[0..Archive.SARMAG];
+}
+
+fn parseObject(self: *MachO, obj: LinkObject, handle: File.HandleIndex, hdr: macho.mach_header_64, offset: u64) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
     const gpa = self.base.allocator;
-    const file = try std.fs.cwd().openFile(obj.path, .{});
-    const fh = try self.addFileHandle(file);
-
-    const header = file.reader().readStruct(macho.mach_header_64) catch return false;
-    try file.seekTo(0);
-
-    if (header.filetype != macho.MH_OBJECT) return false;
-
     const mtime: u64 = mtime: {
+        const file = self.getFileHandle(handle);
         const stat = file.stat() catch break :mtime 0;
         break :mtime @as(u64, @intCast(@divFloor(stat.mtime, 1_000_000_000)));
     };
 
     const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
     self.files.set(index, .{ .object = .{
+        .offset = offset,
         .path = try gpa.dupe(u8, obj.path),
-        .file_handle = fh,
+        .file_handle = handle,
         .index = index,
         .mtime = mtime,
     } });
     const object = &self.files.items(.data)[index].object;
     try object.parse(self);
     try self.objects.append(gpa, index);
-    self.validateCpuArch(index, header.cputype);
+    self.validateCpuArch(index, hdr.cputype);
     self.validatePlatform(index);
-
-    return true;
 }
 
-fn parseArchive(self: *MachO, obj: LinkObject) !bool {
+fn parseArchive(self: *MachO, obj: LinkObject, handle: File.HandleIndex, fat_arch: ?fat.Arch) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
     const gpa = self.base.allocator;
-    const file = try std.fs.cwd().openFile(obj.path, .{});
-    const fh = try self.addFileHandle(file);
-
-    const fat_arch: ?fat.Arch = if (fat.isFatLibrary(file)) blk: {
-        break :blk self.parseFatLibrary(obj.path, file) catch |err| switch (err) {
-            error.NoArchSpecified, error.MissingArch => return false,
-            else => |e| return e,
-        };
-    } else null;
-    const offset = if (fat_arch) |ar| ar.offset else 0;
-    try file.seekTo(offset);
-
-    const magic = file.reader().readBytesNoEof(Archive.SARMAG) catch return false;
-    if (!mem.eql(u8, &magic, Archive.ARMAG)) return false;
-    try file.seekTo(0);
 
     var archive = Archive{};
     defer archive.deinit(gpa);
-    try archive.parse(self, obj.path, fh, fat_arch);
+    try archive.parse(self, obj.path, handle, fat_arch);
 
     var has_parse_error = false;
     for (archive.objects.items) |extracted| {
@@ -756,26 +808,6 @@ fn parseArchive(self: *MachO, obj: LinkObject) !bool {
         object.alive = object.alive or (self.options.force_load_objc and object.hasObjc());
     }
     if (has_parse_error) return error.ParseFailed;
-
-    return true;
-}
-
-fn parseFatLibrary(self: *MachO, path: []const u8, file: fs.File) !fat.Arch {
-    var buffer: [2]fat.Arch = undefined;
-    const fat_archs = try fat.parseArchs(file, &buffer);
-    const cpu_arch = self.options.cpu_arch orelse {
-        const err = try self.base.addErrorWithNotes(1 + fat_archs.len);
-        try err.addMsg("{s}: ignoring universal file as no architecture specified", .{path});
-        for (fat_archs) |arch| {
-            try err.addNote("universal file built for {s}", .{@tagName(arch.tag)});
-        }
-        return error.NoArchSpecified;
-    };
-    for (fat_archs) |arch| {
-        if (arch.tag == cpu_arch) return arch;
-    }
-    self.base.fatal("{s}: missing arch in universal file: expected {s}", .{ path, @tagName(cpu_arch) });
-    return error.MissingArch;
 }
 
 const DylibOpts = struct {
@@ -786,33 +818,19 @@ const DylibOpts = struct {
     reexport: bool = false,
 };
 
-fn parseDylib(self: *MachO, obj: LinkObject, explicit: bool) anyerror!?File.Index {
+fn parseDylib(
+    self: *MachO,
+    obj: LinkObject,
+    handle: File.HandleIndex,
+    hdr: macho.mach_header_64,
+    offset: u64,
+    explicit: bool,
+) anyerror!File.Index {
     const tracy = trace(@src());
     defer tracy.end();
 
     const gpa = self.base.allocator;
-
-    if (self.options.cpu_arch == null) {
-        self.base.fatal("{s}: ignoring library as no architecture specified", .{obj.path});
-        return null;
-    }
-
-    const file = try std.fs.cwd().openFile(obj.path, .{});
-    defer file.close();
-
-    const fat_arch = if (fat.isFatLibrary(file)) blk: {
-        break :blk self.parseFatLibrary(obj.path, file) catch |err| switch (err) {
-            error.NoArchSpecified, error.MissingArch => return null,
-            else => |e| return e,
-        };
-    } else null;
-    const offset = if (fat_arch) |ar| ar.offset else 0;
-    try file.seekTo(offset);
-
-    const header = file.reader().readStruct(macho.mach_header_64) catch return null;
-    try file.seekTo(offset);
-
-    if (header.filetype != macho.MH_DYLIB) return null;
+    const file = self.getFileHandle(handle);
 
     const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
     self.files.set(index, .{ .dylib = .{
@@ -824,32 +842,20 @@ fn parseDylib(self: *MachO, obj: LinkObject, explicit: bool) anyerror!?File.Inde
         .explicit = explicit,
     } });
     const dylib = &self.files.items(.data)[index].dylib;
-    try dylib.parse(self, file, fat_arch);
+    try dylib.parse(self, file, offset);
 
     try self.dylibs.append(gpa, index);
-    self.validateCpuArch(index, header.cputype);
+    self.validateCpuArch(index, hdr.cputype);
     self.validatePlatform(index);
 
     return index;
 }
 
-fn parseTbd(self: *MachO, obj: LinkObject, explicit: bool) anyerror!?File.Index {
+fn parseTbd(self: *MachO, obj: LinkObject, lib_stub: LibStub, explicit: bool) anyerror!File.Index {
     const tracy = trace(@src());
     defer tracy.end();
 
     const gpa = self.base.allocator;
-    const file = try std.fs.cwd().openFile(obj.path, .{});
-    defer file.close();
-
-    var lib_stub = LibStub.loadFromFile(gpa, file) catch return null; // TODO actually handle different errors
-    defer lib_stub.deinit();
-
-    if (lib_stub.inner.len == 0) return null;
-
-    const cpu_arch = self.options.cpu_arch orelse {
-        self.base.fatal("{s}: ignoring library as no architecture specified", .{obj.path});
-        return null;
-    };
 
     const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
     self.files.set(index, .{ .dylib = .{
@@ -861,7 +867,7 @@ fn parseTbd(self: *MachO, obj: LinkObject, explicit: bool) anyerror!?File.Index 
         .explicit = explicit,
     } });
     const dylib = &self.files.items(.data)[index].dylib;
-    try dylib.parseTbd(cpu_arch, self.options.platform, lib_stub, self);
+    try dylib.parseTbd(self.options.cpu_arch.?, self.options.platform, lib_stub, self);
     try self.dylibs.append(gpa, index);
     self.validatePlatform(index);
 
@@ -970,10 +976,24 @@ fn parseDependentDylibs(
                 .tag = .obj,
                 .weak = is_weak,
             };
+            const file = try std.fs.cwd().openFile(link_obj.path, .{});
+            const fh = try self.addFileHandle(file);
+
+            const fat_arch = try self.parseFatFile(link_obj, file);
+            const offset = if (fat_arch) |fa| fa.offset else 0;
+
             const file_index = file_index: {
-                if (try self.parseDylib(link_obj, false)) |file| break :file_index file;
-                if (try self.parseTbd(link_obj, false)) |file| break :file_index file;
-                break :file_index @as(File.Index, 0);
+                if (readMachHeader(file, offset) catch null) |h| blk: {
+                    if (h.magic != macho.MH_MAGIC_64) break :blk;
+                    switch (h.filetype) {
+                        macho.MH_DYLIB => break :file_index try self.parseDylib(link_obj, fh, h, offset, false),
+                        else => break :file_index @as(File.Index, 0),
+                    }
+                }
+                var lib_stub = LibStub.loadFromFile(gpa, file) catch break :file_index @as(File.Index, 0);
+                defer lib_stub.deinit();
+                if (lib_stub.inner.len == 0) break :file_index @as(File.Index, 0);
+                break :file_index try self.parseTbd(link_obj, lib_stub, false);
             };
             dependents.appendAssumeCapacity(file_index);
         }

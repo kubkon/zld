@@ -70,21 +70,17 @@ pub fn parse(self: *Archive, macho_file: *MachO, path: []const u8, file_handle: 
 
     const file = macho_file.getFileHandle(file_handle);
     const offset = if (fat_arch) |ar| ar.offset else 0;
-    const size = if (fat_arch) |ar| ar.size else (try file.stat()).size;
-    try file.seekTo(offset);
+    const end_pos = if (fat_arch) |ar| ar.offset + ar.size else (try file.stat()).size;
 
-    const reader = file.reader();
-    _ = try reader.readBytesNoEof(Archive.SARMAG);
-
-    var pos: usize = Archive.SARMAG;
+    var pos: usize = Archive.SARMAG + offset;
     while (true) {
-        if (pos >= size) break;
-        if (!mem.isAligned(pos, 2)) {
-            try file.seekBy(1);
-            pos += 1;
-        }
+        if (pos >= end_pos) break;
+        if (!mem.isAligned(pos, 2)) pos += 1;
 
-        const hdr = try reader.readStruct(ar_hdr);
+        var buffer: [@sizeOf(ar_hdr)]u8 = undefined;
+        var nread = try file.preadAll(&buffer, pos);
+        if (nread != buffer.len) return error.InputOutput;
+        const hdr = @as(*align(1) const ar_hdr, @ptrCast(&buffer)).*;
         pos += @sizeOf(ar_hdr);
 
         if (!mem.eql(u8, &hdr.ar_fmag, ARFMAG)) {
@@ -100,30 +96,28 @@ pub fn parse(self: *Archive, macho_file: *MachO, path: []const u8, file_handle: 
             if (try hdr.nameLength()) |len| {
                 hdr_size -= len;
                 const buf = try arena.allocator().alloc(u8, len);
-                try reader.readNoEof(buf);
+                nread = try file.preadAll(buf, pos);
+                if (nread != len) return error.InputOutput;
                 pos += len;
                 const actual_len = mem.indexOfScalar(u8, buf, @as(u8, 0)) orelse len;
                 break :name buf[0..actual_len];
             }
             unreachable;
         };
-        defer {
-            _ = file.seekBy(hdr_size) catch {};
-            pos += hdr_size;
-        }
+        defer pos += hdr_size;
 
         if (mem.eql(u8, name, "__.SYMDEF") or mem.eql(u8, name, "__.SYMDEF SORTED")) continue;
 
+        // TODO validate we are dealing with object files.
+
         const object = Object{
-            .archive = .{
-                .path = try gpa.dupe(u8, path),
-                .offset = offset + pos,
-            },
             .path = try gpa.dupe(u8, name),
             .file_handle = file_handle,
             .index = undefined,
             .alive = false,
             .mtime = hdr.date() catch 0,
+            .offset = pos,
+            .ar_name = try gpa.dupe(u8, path),
         };
 
         log.debug("extracting object '{s}' from archive '{s}'", .{ object.path, path });

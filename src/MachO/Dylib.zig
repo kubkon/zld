@@ -36,12 +36,11 @@ pub fn deinit(self: *Dylib, allocator: Allocator) void {
     self.rpaths.deinit(allocator);
 }
 
-pub fn parse(self: *Dylib, macho_file: *MachO, file: std.fs.File, fat_arch: ?fat.Arch) !void {
+pub fn parse(self: *Dylib, macho_file: *MachO, file: std.fs.File, offset: u64) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
     const gpa = macho_file.base.allocator;
-    const offset = if (fat_arch) |ar| ar.offset else 0;
 
     log.debug("parsing dylib from binary", .{});
 
@@ -813,7 +812,6 @@ const Export = struct {
 };
 
 const assert = std.debug.assert;
-const fat = @import("fat.zig");
 const fs = std.fs;
 const fmt = std.fmt;
 const log = std.log.scoped(.link);
