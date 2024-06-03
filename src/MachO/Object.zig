@@ -90,6 +90,9 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
         if (amt != self.header.?.sizeofcmds) return error.InputOutput;
     }
 
+    var platforms = std.ArrayList(MachO.Options.Platform).init(gpa);
+    defer platforms.deinit();
+
     var it = LoadCommandIterator{
         .ncmds = self.header.?.ncmds,
         .buffer = lc_buffer,
@@ -150,16 +153,15 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
         .VERSION_MIN_IPHONEOS,
         .VERSION_MIN_TVOS,
         .VERSION_MIN_WATCHOS,
-        => if (macho_file.options.platform) |plat| {
-            const this_plat = MachO.Options.Platform.fromLoadCommand(lc);
-            if (this_plat.platform != plat.platform) {
-                macho_file.base.fatal("{}: object file was built for different platform: expected {s}, got {s}", .{
-                    self.fmtPath(),
-                    @tagName(plat.platform),
-                    @tagName(this_plat.platform),
-                });
-                return error.ParseFailed;
-            }
+        => try platforms.append(MachO.Options.Platform.fromLoadCommand(lc)),
+        else => {},
+    };
+
+    if (macho_file.options.platform) |plat| {
+        const match = for (platforms.items) |this_plat| {
+            if (this_plat.platform == plat.platform) break this_plat;
+        } else null;
+        if (match) |this_plat| {
             if (this_plat.version.value > plat.version.value) {
                 macho_file.base.warn(
                     "{s}: object file was built for newer platform version: expected {}, got {}",
@@ -170,9 +172,18 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
                     },
                 );
             }
-        },
-        else => {},
-    };
+        } else {
+            const err = try macho_file.base.addErrorWithNotes(1 + platforms.items.len);
+            try err.addMsg("{}: object file was built for different platforms than required {s}", .{
+                self.fmtPath(),
+                @tagName(plat.platform),
+            });
+            for (platforms.items) |this_plat| {
+                try err.addNote("object file built for {s}", .{@tagName(this_plat.platform)});
+            }
+            return error.ParseFailed;
+        }
+    }
 
     const NlistIdx = struct {
         nlist: macho.nlist_64,

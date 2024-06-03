@@ -576,6 +576,7 @@ fn inferCpuArchAndPlatform(self: *MachO, obj: LinkObject, platforms: anytype) !v
         .ncmds = header.ncmds,
         .buffer = cmds_buffer,
     };
+    // An input object file may have more than one build LC but we take the first one and bail.
     out[1] = while (it.next()) |cmd| switch (cmd.cmd()) {
         .BUILD_VERSION,
         .VERSION_MIN_MACOSX,
