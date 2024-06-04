@@ -216,6 +216,7 @@ pub fn flush(self: *MachO) !void {
     }
 
     // Resolve link objects
+    var has_resolve_error = false;
     var resolved_objects = std.ArrayList(LinkObject).init(arena);
     try resolved_objects.ensureTotalCapacityPrecise(self.options.positionals.len);
     for (self.options.positionals) |obj| {
@@ -226,6 +227,7 @@ pub fn flush(self: *MachO) !void {
                     const full_path = std.fs.realpath(obj.path, &buffer) catch |err| switch (err) {
                         error.FileNotFound => {
                             self.base.fatal("file not found {}", .{obj});
+                            has_resolve_error = true;
                             continue;
                         },
                         else => |e| return e,
@@ -237,6 +239,7 @@ pub fn flush(self: *MachO) !void {
                         const err = try self.base.addErrorWithNotes(lib_dirs.items.len);
                         try err.addMsg("library not found for {}", .{obj});
                         for (lib_dirs.items) |dir| try err.addNote("tried {s}", .{dir});
+                        has_resolve_error = true;
                         continue;
                     };
                     break :blk full_path;
@@ -246,6 +249,7 @@ pub fn flush(self: *MachO) !void {
                         const err = try self.base.addErrorWithNotes(framework_dirs.items.len);
                         try err.addMsg("framework not found for {}", .{obj});
                         for (framework_dirs.items) |dir| try err.addNote("tried {s}", .{dir});
+                        has_resolve_error = true;
                         continue;
                     };
                     break :blk full_path;
@@ -262,6 +266,8 @@ pub fn flush(self: *MachO) !void {
             .must_link = obj.must_link,
         });
     }
+
+    if (has_resolve_error) return error.ResolveFailed;
 
     if (self.options.cpu_arch == null) {
         var has_parse_error = false;
