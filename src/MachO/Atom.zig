@@ -137,24 +137,25 @@ const AddExtraOpts = struct {
 };
 
 pub fn addExtra(atom: *Atom, opts: AddExtraOpts, macho_file: *MachO) !void {
-    if (atom.getExtra(macho_file) == null) {
-        atom.extra = try macho_file.addAtomExtra(.{});
+    const file = atom.getFile(macho_file);
+    if (file.getAtomExtra(atom.extra) == null) {
+        atom.extra = try file.addAtomExtra(macho_file.base.allocator, .{});
     }
-    var extra = atom.getExtra(macho_file).?;
+    var extra = file.getAtomExtra(atom.extra).?;
     inline for (@typeInfo(@TypeOf(opts)).Struct.fields) |field| {
         if (@field(opts, field.name)) |x| {
             @field(extra, field.name) = x;
         }
     }
-    atom.setExtra(extra, macho_file);
+    file.setAtomExtra(atom.extra, extra);
 }
 
 pub inline fn getExtra(atom: Atom, macho_file: *MachO) ?Extra {
-    return macho_file.getAtomExtra(atom.extra);
+    return atom.getFile(macho_file).getAtomExtra(atom.extra);
 }
 
 pub inline fn setExtra(atom: Atom, extra: Extra, macho_file: *MachO) void {
-    macho_file.setAtomExtra(atom.extra, extra);
+    atom.getFile(macho_file).setAtomExtra(atom.extra, extra);
 }
 
 pub fn initOutputSection(sect: macho.section_64, macho_file: *MachO) !u8 {
@@ -334,7 +335,7 @@ fn reportUndefSymbol(self: Atom, rel: Relocation, macho_file: *MachO) !bool {
         if (!gop.found_existing) {
             gop.value_ptr.* = .{};
         }
-        try gop.value_ptr.append(gpa, self.atom_index);
+        try gop.value_ptr.append(gpa, .{ .atom = self.atom_index, .file = self.file });
         return true;
     }
 
@@ -398,10 +399,13 @@ fn resolveRelocInner(
     const rel_offset = rel.offset - self.off;
     const P = @as(i64, @intCast(self.getAddress(macho_file))) + @as(i64, @intCast(rel_offset));
     const A = rel.addend + rel.getRelocAddend(cpu_arch);
-    const S: i64 = @intCast(rel.getTargetAddress(macho_file));
+    const S: i64 = @intCast(rel.getTargetAddress(self, macho_file));
     const G: i64 = @intCast(rel.getGotTargetAddress(macho_file));
     const TLS = @as(i64, @intCast(macho_file.getTlsAddress()));
-    const SUB = if (subtractor) |sub| @as(i64, @intCast(sub.getTargetAddress(macho_file))) else 0;
+    const SUB = if (subtractor) |sub|
+        @as(i64, @intCast(sub.getTargetAddress(self, macho_file)))
+    else
+        0;
 
     const divExact = struct {
         fn divExact(atom: Atom, r: Relocation, num: u12, den: u12, ctx: *MachO) !u12 {
@@ -424,7 +428,7 @@ fn resolveRelocInner(
             rel_offset,
             @tagName(rel.type),
             S + A - SUB,
-            rel.getTargetAtom(macho_file).atom_index,
+            rel.getTargetAtom(self, macho_file).atom_index,
         }),
         .@"extern" => relocs_log.debug("  {x}<+{d}>: {s}: [=> {x}] G({x}) ({s})", .{
             P,
@@ -717,7 +721,7 @@ pub fn writeRelocs(self: Atom, macho_file: *MachO, code: []u8, buffer: *std.Arra
         const r_address: i32 = math.cast(i32, self.value + rel_offset) orelse return error.Overflow;
         const r_symbolnum = r_symbolnum: {
             const r_symbolnum: u32 = switch (rel.tag) {
-                .local => rel.getTargetAtom(macho_file).out_n_sect + 1,
+                .local => rel.getTargetAtom(self, macho_file).out_n_sect + 1,
                 .@"extern" => rel.getTargetSymbol(macho_file).getOutputSymtabIndex(macho_file).?,
             };
             break :r_symbolnum math.cast(u24, r_symbolnum) orelse return error.Overflow;
@@ -725,7 +729,7 @@ pub fn writeRelocs(self: Atom, macho_file: *MachO, code: []u8, buffer: *std.Arra
         const r_extern = rel.tag == .@"extern";
         var addend = rel.addend + rel.getRelocAddend(cpu_arch);
         if (rel.tag == .local) {
-            const target: i64 = @intCast(rel.getTargetAddress(macho_file));
+            const target: i64 = @intCast(rel.getTargetAddress(self, macho_file));
             addend += target;
         }
 

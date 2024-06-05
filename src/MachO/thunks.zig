@@ -9,14 +9,14 @@ pub fn createThunks(sect_id: u8, macho_file: *MachO) !void {
     const atoms = slice.items(.atoms)[sect_id].items;
     assert(atoms.len > 0);
 
-    for (atoms) |atom_index| {
-        macho_file.getAtom(atom_index).?.value = @bitCast(@as(i64, -1));
+    for (atoms) |ref| {
+        ref.getAtom(macho_file).?.value = @bitCast(@as(i64, -1));
     }
 
     var i: usize = 0;
     while (i < atoms.len) {
         const start = i;
-        const start_atom = macho_file.getAtom(atoms[start]).?;
+        const start_atom = atoms[start].getAtom(macho_file).?;
         assert(start_atom.alive.load(.seq_cst));
         start_atom.value = try advance(header, start_atom.size, start_atom.alignment.load(.seq_cst));
         i += 1;
@@ -24,8 +24,7 @@ pub fn createThunks(sect_id: u8, macho_file: *MachO) !void {
         while (i < atoms.len and
             header.size - start_atom.value < max_allowed_distance) : (i += 1)
         {
-            const atom_index = atoms[i];
-            const atom = macho_file.getAtom(atom_index).?;
+            const atom = atoms[i].getAtom(macho_file).?;
             assert(atom.alive.load(.seq_cst));
             atom.value = try advance(header, atom.size, atom.alignment.load(.seq_cst));
         }
@@ -37,9 +36,9 @@ pub fn createThunks(sect_id: u8, macho_file: *MachO) !void {
         try thnks.append(gpa, thunk_index);
 
         // Scan relocs in the group and create trampolines for any unreachable callsite
-        for (atoms[start..i]) |atom_index| {
-            const atom = macho_file.getAtom(atom_index).?;
-            log.debug("atom({d}) {s}", .{ atom_index, atom.getName(macho_file) });
+        for (atoms[start..i]) |ref| {
+            const atom = ref.getAtom(macho_file).?;
+            log.debug("atom({d}) {s}", .{ atom.atom_index, atom.getName(macho_file) });
             for (atom.getRelocs(macho_file)) |rel| {
                 if (rel.type != .branch) continue;
                 if (isReachable(atom, rel, macho_file)) continue;
@@ -71,7 +70,7 @@ fn isReachable(atom: *const Atom, rel: Relocation, macho_file: *MachO) bool {
     const target_atom = target.getAtom(macho_file).?;
     if (target_atom.value == @as(u64, @bitCast(@as(i64, -1)))) return false;
     const saddr = @as(i64, @intCast(atom.getAddress(macho_file))) + @as(i64, @intCast(rel.offset - atom.off));
-    const taddr: i64 = @intCast(rel.getTargetAddress(macho_file));
+    const taddr: i64 = @intCast(rel.getTargetAddress(atom.*, macho_file));
     _ = math.cast(i28, taddr + rel.addend - saddr) orelse return false;
     return true;
 }

@@ -67,7 +67,11 @@ pub fn getName(symbol: Symbol, macho_file: *MachO) [:0]const u8 {
 }
 
 pub fn getAtom(symbol: Symbol, macho_file: *MachO) ?*Atom {
-    return macho_file.getAtom(symbol.atom);
+    const file = symbol.getFile(macho_file) orelse return null;
+    return switch (file) {
+        .dylib => null,
+        inline else => |x| x.getAtom(symbol.atom),
+    };
 }
 
 pub fn getOutputSectionIndex(symbol: Symbol, macho_file: *MachO) u8 {
@@ -151,7 +155,7 @@ pub fn getObjcStubsAddress(symbol: Symbol, macho_file: *MachO) u64 {
 pub fn getObjcSelrefsAddress(symbol: Symbol, macho_file: *MachO) u64 {
     if (!symbol.getSectionFlags().objc_stubs) return 0;
     const extra = symbol.getExtra(macho_file);
-    const atom = macho_file.getAtom(extra.objc_selrefs).?;
+    const atom = symbol.getFile(macho_file).?.getAtom(extra.objc_selrefs).?;
     assert(atom.alive.load(.seq_cst));
     return atom.getAddress(macho_file);
 }

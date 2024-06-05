@@ -12,7 +12,9 @@ symtab: std.MultiArrayList(Nlist) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
 
 symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
-atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
+atoms: std.ArrayListUnmanaged(Atom) = .{},
+atoms_indexes: std.ArrayListUnmanaged(Atom.Index) = .{},
+atoms_extra: std.ArrayListUnmanaged(u32) = .{},
 
 compile_unit: ?CompileUnit = null,
 stab_files: std.ArrayListUnmanaged(StabFile) = .{},
@@ -42,6 +44,8 @@ pub fn deinit(self: *Object, allocator: Allocator) void {
     self.strtab.deinit(allocator);
     self.symbols.deinit(allocator);
     self.atoms.deinit(allocator);
+    self.atoms_indexes.deinit(allocator);
+    self.atoms_extra.deinit(allocator);
     self.cies.deinit(allocator);
     self.fdes.deinit(allocator);
     self.eh_frame_data.deinit(allocator);
@@ -51,6 +55,12 @@ pub fn deinit(self: *Object, allocator: Allocator) void {
     }
     self.stab_files.deinit(allocator);
     self.data_in_code.deinit(allocator);
+}
+
+pub fn init(self: *Object, allocator: Allocator) !void {
+    // Atom at index 0 is reserved as null atom
+    try self.atoms.append(allocator, .{});
+    try self.atoms_extra.append(allocator, 0);
 }
 
 pub fn parse(self: *Object, macho_file: *MachO) !void {
@@ -246,8 +256,8 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
         try self.parseUnwindRecords(macho_file);
     }
 
-    for (self.atoms.items) |atom_index| {
-        const atom = macho_file.getAtom(atom_index).?;
+    for (self.getAtoms()) |atom_index| {
+        const atom = self.getAtom(atom_index) orelse continue;
         const isec = atom.getInputSection(macho_file);
         if (mem.eql(u8, isec.sectName(), "__eh_frame") or
             mem.eql(u8, isec.sectName(), "__compact_unwind") or
@@ -297,13 +307,14 @@ fn initSubsections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
             const name = try std.fmt.allocPrintZ(gpa, "{s}${s}", .{ sect.segName(), sect.sectName() });
             defer gpa.free(name);
             const size = if (nlist_start == nlist_end) sect.size else nlists[nlist_start].nlist.n_value - sect.addr;
-            const atom_index = try self.addAtom(.{
+            const atom_index = try self.addAtom(gpa, .{
                 .name = try self.addString(gpa, name),
                 .n_sect = @intCast(n_sect),
                 .off = 0,
                 .size = size,
                 .alignment = sect.@"align",
-            }, macho_file);
+            });
+            try self.atoms_indexes.append(gpa, atom_index);
             try subsections.append(gpa, .{
                 .atom = atom_index,
                 .off = 0,
@@ -327,13 +338,14 @@ fn initSubsections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
                 @min(@ctz(nlist.nlist.n_value), sect.@"align")
             else
                 sect.@"align";
-            const atom_index = try self.addAtom(.{
+            const atom_index = try self.addAtom(gpa, .{
                 .name = nlist.nlist.n_strx,
                 .n_sect = @intCast(n_sect),
                 .off = nlist.nlist.n_value - sect.addr,
                 .size = size,
                 .alignment = alignment,
-            }, macho_file);
+            });
+            try self.atoms_indexes.append(gpa, atom_index);
             try subsections.append(gpa, .{
                 .atom = atom_index,
                 .off = nlist.nlist.n_value - sect.addr,
@@ -353,6 +365,7 @@ fn initSections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
     const slice = self.sections.slice();
 
     try self.atoms.ensureUnusedCapacity(gpa, self.sections.items(.header).len);
+    try self.atoms_indexes.ensureUnusedCapacity(gpa, self.sections.items(.header).len);
 
     for (slice.items(.header), 0..) |sect, n_sect| {
         if (isCstringLiteral(sect)) continue;
@@ -362,13 +375,14 @@ fn initSections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
         const name = try std.fmt.allocPrintZ(gpa, "{s}${s}", .{ sect.segName(), sect.sectName() });
         defer gpa.free(name);
 
-        const atom_index = try self.addAtom(.{
+        const atom_index = try self.addAtom(gpa, .{
             .name = try self.addString(gpa, name),
             .n_sect = @intCast(n_sect),
             .off = 0,
             .size = sect.size,
             .alignment = sect.@"align",
-        }, macho_file);
+        });
+        try self.atoms_indexes.append(gpa, atom_index);
         try slice.items(.subsections)[n_sect].append(gpa, .{ .atom = atom_index, .off = 0 });
 
         const nlist_start = for (nlists, 0..) |nlist, i| {
@@ -398,29 +412,6 @@ fn initSections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
     }
 }
 
-const AddAtomArgs = struct {
-    name: u32,
-    n_sect: u8,
-    off: u64,
-    size: u64,
-    alignment: u32,
-};
-
-fn addAtom(self: *Object, args: AddAtomArgs, macho_file: *MachO) !Atom.Index {
-    const gpa = macho_file.base.allocator;
-    const atom_index = try macho_file.addAtom();
-    const atom = macho_file.getAtom(atom_index).?;
-    atom.file = self.index;
-    atom.atom_index = atom_index;
-    atom.name = args.name;
-    atom.n_sect = args.n_sect;
-    atom.size = args.size;
-    atom.alignment.store(args.alignment, .seq_cst);
-    atom.off = args.off;
-    try self.atoms.append(gpa, atom_index);
-    return atom_index;
-}
-
 fn initCstringLiterals(self: *Object, macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
@@ -448,13 +439,14 @@ fn initCstringLiterals(self: *Object, macho_file: *MachO) !void {
             }
             end += 1;
 
-            const atom_index = try self.addAtom(.{
+            const atom_index = try self.addAtom(gpa, .{
                 .name = 0,
                 .n_sect = @intCast(n_sect),
                 .off = start,
                 .size = end - start,
                 .alignment = sect.@"align",
-            }, macho_file);
+            });
+            try self.atoms_indexes.append(gpa, atom_index);
             try slice.items(.subsections)[n_sect].append(gpa, .{
                 .atom = atom_index,
                 .off = start,
@@ -492,13 +484,14 @@ fn initFixedSizeLiterals(self: *Object, macho_file: *MachO) !void {
 
         var pos: u32 = 0;
         while (pos < sect.size) : (pos += rec_size) {
-            const atom_index = try self.addAtom(.{
+            const atom_index = try self.addAtom(gpa, .{
                 .name = 0,
                 .n_sect = @intCast(n_sect),
                 .off = pos,
                 .size = rec_size,
                 .alignment = sect.@"align",
-            }, macho_file);
+            });
+            try self.atoms_indexes.append(gpa, atom_index);
             try slice.items(.subsections)[n_sect].append(gpa, .{
                 .atom = atom_index,
                 .off = pos,
@@ -530,13 +523,14 @@ fn initPointerLiterals(self: *Object, macho_file: *MachO) !void {
 
         for (0..num_ptrs) |i| {
             const pos: u32 = @as(u32, @intCast(i)) * rec_size;
-            const atom_index = try self.addAtom(.{
+            const atom_index = try self.addAtom(gpa, .{
                 .name = 0,
                 .n_sect = @intCast(n_sect),
                 .off = pos,
                 .size = rec_size,
                 .alignment = sect.@"align",
-            }, macho_file);
+            });
+            try self.atoms_indexes.append(gpa, atom_index);
             try slice.items(.subsections)[n_sect].append(gpa, .{
                 .atom = atom_index,
                 .off = pos,
@@ -545,7 +539,7 @@ fn initPointerLiterals(self: *Object, macho_file: *MachO) !void {
     }
 }
 
-pub fn resolveLiterals(self: Object, lp: *MachO.LiteralPool, macho_file: *MachO) !void {
+pub fn resolveLiterals(self: *Object, lp: *MachO.LiteralPool, macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -561,7 +555,7 @@ pub fn resolveLiterals(self: Object, lp: *MachO.LiteralPool, macho_file: *MachO)
             defer gpa.free(data);
 
             for (subs.items) |sub| {
-                const atom = macho_file.getAtom(sub.atom).?;
+                const atom = self.getAtom(sub.atom).?;
                 const atom_data = data[atom.off..][0..atom.size];
                 const res = try lp.insert(gpa, header.type(), atom_data);
                 if (!res.found_existing) {
@@ -572,19 +566,18 @@ pub fn resolveLiterals(self: Object, lp: *MachO.LiteralPool, macho_file: *MachO)
             }
         } else if (isPtrLiteral(header)) {
             for (subs.items) |sub| {
-                const atom = macho_file.getAtom(sub.atom).?;
+                const atom = self.getAtom(sub.atom).?;
                 const relocs = atom.getRelocs(macho_file);
                 assert(relocs.len == 1);
                 const rel = relocs[0];
                 const target = switch (rel.tag) {
-                    .local => rel.target.load(.seq_cst),
-                    .@"extern" => rel.getTargetSymbol(macho_file).atom,
+                    .local => rel.getTargetAtom(atom.*, macho_file),
+                    .@"extern" => rel.getTargetSymbol(macho_file).getAtom(macho_file).?,
                 };
                 const addend = math.cast(u32, rel.addend) orelse return error.Overflow;
-                const target_atom = macho_file.getAtom(target).?;
-                try buffer.ensureUnusedCapacity(target_atom.size);
-                buffer.resize(target_atom.size) catch unreachable;
-                try target_atom.getCode(macho_file, buffer.items);
+                try buffer.ensureUnusedCapacity(target.size);
+                buffer.resize(target.size) catch unreachable;
+                try target.getCode(macho_file, buffer.items);
                 const res = try lp.insert(gpa, header.type(), buffer.items[addend..]);
                 buffer.clearRetainingCapacity();
                 if (!res.found_existing) {
@@ -597,50 +590,49 @@ pub fn resolveLiterals(self: Object, lp: *MachO.LiteralPool, macho_file: *MachO)
     }
 }
 
-pub fn dedupLiterals(self: Object, lp: MachO.LiteralPool, macho_file: *MachO) void {
-    const tracy = trace(@src());
-    defer tracy.end();
+// pub fn dedupLiterals(self: Object, lp: MachO.LiteralPool, macho_file: *MachO) void {
+//     const tracy = trace(@src());
+//     defer tracy.end();
 
-    for (self.atoms.items) |atom_index| {
-        const atom = macho_file.getAtom(atom_index) orelse continue;
-        if (!atom.alive.load(.seq_cst)) continue;
-        if (!atom.flags.relocs) continue;
+//     for (self.getAtoms()) |*atom| {
+//         if (!atom.alive.load(.seq_cst)) continue;
+//         if (!atom.flags.relocs) continue;
 
-        const relocs = blk: {
-            const extra = atom.getExtra(macho_file).?;
-            const relocs = self.sections.items(.relocs)[atom.n_sect].items;
-            break :blk relocs[extra.rel_index..][0..extra.rel_count];
-        };
-        for (relocs) |*rel| switch (rel.tag) {
-            .local => {
-                const target = macho_file.getAtom(rel.target.load(.seq_cst)).?;
-                if (target.getLiteralPoolIndex(macho_file)) |lp_index| {
-                    const lp_atom = lp.getAtom(lp_index, macho_file);
-                    if (target.atom_index != lp_atom.atom_index) {
-                        _ = lp_atom.alignment.fetchMax(target.alignment.load(.seq_cst), .seq_cst);
-                        _ = target.alive.swap(false, .seq_cst);
-                        _ = rel.target.swap(lp_atom.atom_index, .seq_cst);
-                    }
-                }
-            },
-            .@"extern" => {
-                const target_sym = rel.getTargetSymbol(macho_file);
-                if (target_sym.getAtom(macho_file)) |target_atom| {
-                    if (target_atom.getLiteralPoolIndex(macho_file)) |lp_index| {
-                        const lp_atom = lp.getAtom(lp_index, macho_file);
-                        if (target_atom.atom_index != lp_atom.atom_index) {
-                            _ = lp_atom.alignment.fetchMax(target_atom.alignment.load(.seq_cst), .seq_cst);
-                            _ = target_atom.alive.swap(false, .seq_cst);
-                            target_sym.mutex.lock();
-                            defer target_sym.mutex.unlock();
-                            target_sym.atom = lp_atom.atom_index;
-                        }
-                    }
-                }
-            },
-        };
-    }
-}
+//         const relocs = blk: {
+//             const extra = atom.getExtra(macho_file).?;
+//             const relocs = self.sections.items(.relocs)[atom.n_sect].items;
+//             break :blk relocs[extra.rel_index..][0..extra.rel_count];
+//         };
+//         for (relocs) |*rel| switch (rel.tag) {
+//             .local => {
+//                 const target = macho_file.getAtom(rel.target.load(.seq_cst)).?;
+//                 if (target.getLiteralPoolIndex(macho_file)) |lp_index| {
+//                     const lp_atom = lp.getAtom(lp_index, macho_file);
+//                     if (target.atom_index != lp_atom.atom_index) {
+//                         _ = lp_atom.alignment.fetchMax(target.alignment.load(.seq_cst), .seq_cst);
+//                         _ = target.alive.swap(false, .seq_cst);
+//                         _ = rel.target.swap(lp_atom.atom_index, .seq_cst);
+//                     }
+//                 }
+//             },
+//             .@"extern" => {
+//                 const target_sym = rel.getTargetSymbol(macho_file);
+//                 if (target_sym.getAtom(macho_file)) |target_atom| {
+//                     if (target_atom.getLiteralPoolIndex(macho_file)) |lp_index| {
+//                         const lp_atom = lp.getAtom(lp_index, macho_file);
+//                         if (target_atom.atom_index != lp_atom.atom_index) {
+//                             _ = lp_atom.alignment.fetchMax(target_atom.alignment.load(.seq_cst), .seq_cst);
+//                             _ = target_atom.alive.swap(false, .seq_cst);
+//                             target_sym.mutex.lock();
+//                             defer target_sym.mutex.unlock();
+//                             target_sym.atom = lp_atom.atom_index;
+//                         }
+//                     }
+//                 }
+//             },
+//         };
+//     }
+// }
 
 pub fn findAtom(self: Object, addr: u64) ?Atom.Index {
     const tracy = trace(@src());
@@ -742,7 +734,7 @@ fn initSymbols(self: *Object, macho_file: *MachO) !void {
             .file = self.index,
         };
 
-        if (macho_file.getAtom(atom_index)) |atom| {
+        if (self.getAtom(atom_index)) |atom| {
             assert(!nlist.abs());
             symbol.value -= atom.getInputAddress(macho_file);
             symbol.atom = atom_index;
@@ -851,12 +843,19 @@ fn initSymbolStabs(self: *Object, nlists: anytype, macho_file: *MachO) !void {
 }
 
 fn sortAtoms(self: *Object, macho_file: *MachO) !void {
-    const lessThanAtom = struct {
-        fn lessThanAtom(ctx: *MachO, lhs: Atom.Index, rhs: Atom.Index) bool {
-            return ctx.getAtom(lhs).?.getInputAddress(ctx) < ctx.getAtom(rhs).?.getInputAddress(ctx);
+    const Ctx = struct {
+        object: *Object,
+        m_file: *MachO,
+
+        fn lessThanAtom(ctx: @This(), lhs: Atom.Index, rhs: Atom.Index) bool {
+            return ctx.object.getAtom(lhs).?.getInputAddress(ctx.m_file) <
+                ctx.object.getAtom(rhs).?.getInputAddress(ctx.m_file);
         }
-    }.lessThanAtom;
-    mem.sort(Atom.Index, self.atoms.items, macho_file, lessThanAtom);
+    };
+    mem.sort(Atom.Index, self.atoms_indexes.items, Ctx{
+        .object = self,
+        .m_file = macho_file,
+    }, Ctx.lessThanAtom);
 }
 
 fn initRelocs(self: *Object, macho_file: *MachO) !void {
@@ -887,7 +886,7 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
 
         var next_reloc: usize = 0;
         for (subsections.items) |subsection| {
-            const atom = macho_file.getAtom(subsection.atom).?;
+            const atom = self.getAtom(subsection.atom).?;
             if (!atom.alive.load(.seq_cst)) continue;
             if (next_reloc >= relocs.items.len) break;
             const end_addr = atom.off + atom.size;
@@ -1176,7 +1175,7 @@ fn parseUnwindRecords(self: *Object, macho_file: *MachO) !void {
             // Create a null record
             const rec_index = try macho_file.addUnwindRecord();
             const rec = macho_file.getUnwindRecord(rec_index);
-            const atom = macho_file.getAtom(meta.atom).?;
+            const atom = self.getAtom(meta.atom).?;
             try self.unwind_records.append(gpa, rec_index);
             rec.length = @intCast(meta.size);
             rec.atom = meta.atom;
@@ -1357,7 +1356,7 @@ pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
         if (!nlist.ext()) continue;
         if (nlist.undf() and !nlist.tentative()) continue;
         if (nlist.sect()) {
-            const atom = macho_file.getAtom(atom_index).?;
+            const atom = self.getAtom(atom_index).?;
             if (!atom.alive.load(.seq_cst)) continue;
         }
 
@@ -1368,7 +1367,7 @@ pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
             .tentative = nlist.tentative(),
         }) < symbol.getSymbolRank(macho_file)) {
             const value = if (nlist.sect()) blk: {
-                const atom = macho_file.getAtom(atom_index).?;
+                const atom = self.getAtom(atom_index).?;
                 break :blk nlist.n_value - atom.getInputAddress(macho_file);
             } else nlist.n_value;
             symbol.value = value;
@@ -1433,12 +1432,12 @@ pub fn markLive(self: *Object, macho_file: *MachO) void {
     }
 }
 
-pub fn scanRelocs(self: Object, macho_file: *MachO) !void {
+pub fn scanRelocs(self: *Object, macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    for (self.atoms.items) |atom_index| {
-        const atom = macho_file.getAtom(atom_index).?;
+    for (self.getAtoms()) |atom_index| {
+        const atom = self.getAtom(atom_index) orelse continue;
         if (!atom.alive.load(.seq_cst)) continue;
         const sect = atom.getInputSection(macho_file);
         if (sect.isZerofill()) continue;
@@ -1473,25 +1472,24 @@ pub fn convertTentativeDefinitions(self: *Object, macho_file: *MachO) !void {
         const nlist = &self.symtab.items(.nlist)[nlist_idx];
         const nlist_atom = &self.symtab.items(.atom)[nlist_idx];
 
-        const atom_index = try macho_file.addAtom();
-        try self.atoms.append(gpa, atom_index);
-
-        const alignment = (nlist.n_desc >> 8) & 0x0f;
         const name = try std.fmt.allocPrintZ(gpa, "__DATA$__common${s}", .{sym.getName(macho_file)});
         defer gpa.free(name);
-        const atom = macho_file.getAtom(atom_index).?;
-        atom.atom_index = atom_index;
-        atom.name = try self.addString(gpa, name);
-        atom.file = self.index;
-        atom.size = nlist.n_value;
-        atom.alignment.store(alignment, .seq_cst);
 
+        const alignment = (nlist.n_desc >> 8) & 0x0f;
         const n_sect = try self.addSection(gpa, "__DATA", "__common");
+        const atom_index = try self.addAtom(gpa, .{
+            .name = try self.addString(gpa, name),
+            .n_sect = n_sect,
+            .off = 0,
+            .size = nlist.n_value,
+            .alignment = alignment,
+        });
+        try self.atoms_indexes.append(gpa, atom_index);
+
         const sect = &self.sections.items(.header)[n_sect];
         sect.flags = macho.S_ZEROFILL;
-        sect.size = atom.size;
+        sect.size = nlist.n_value;
         sect.@"align" = alignment;
-        atom.n_sect = n_sect;
 
         sym.value = 0;
         sym.atom = atom_index;
@@ -1509,8 +1507,8 @@ pub fn convertTentativeDefinitions(self: *Object, macho_file: *MachO) !void {
     }
 }
 
-fn addSection(self: *Object, allocator: Allocator, segname: []const u8, sectname: []const u8) !u32 {
-    const n_sect = @as(u32, @intCast(try self.sections.addOne(allocator)));
+fn addSection(self: *Object, allocator: Allocator, segname: []const u8, sectname: []const u8) !u8 {
+    const n_sect = @as(u8, @intCast(try self.sections.addOne(allocator)));
     self.sections.set(n_sect, .{
         .header = .{
             .sectname = MachO.makeStaticString(sectname),
@@ -1957,6 +1955,83 @@ pub fn asFile(self: *Object) File {
     return .{ .object = self };
 }
 
+const AddAtomArgs = struct {
+    name: u32,
+    n_sect: u8,
+    off: u64,
+    size: u64,
+    alignment: u32,
+};
+
+fn addAtom(self: *Object, allocator: Allocator, args: AddAtomArgs) !Atom.Index {
+    const atom_index: Atom.Index = @intCast(self.atoms.items.len);
+    const atom = try self.atoms.addOne(allocator);
+    atom.* = .{
+        .file = self.index,
+        .atom_index = atom_index,
+        .name = args.name,
+        .n_sect = args.n_sect,
+        .size = args.size,
+        .off = args.off,
+    };
+    atom.alignment.store(args.alignment, .seq_cst);
+    return atom_index;
+}
+
+pub fn getAtom(self: *Object, atom_index: Atom.Index) ?*Atom {
+    if (atom_index == 0) return null;
+    assert(atom_index < self.atoms.items.len);
+    return &self.atoms.items[atom_index];
+}
+
+pub fn getAtoms(self: *Object) []const Atom.Index {
+    return self.atoms_indexes.items;
+}
+
+pub fn addAtomExtra(self: *Object, allocator: Allocator, extra: Atom.Extra) !u32 {
+    const fields = @typeInfo(Atom.Extra).Struct.fields;
+    try self.atoms_extra.ensureUnusedCapacity(allocator, fields.len);
+    return self.addAtomExtraAssumeCapacity(extra);
+}
+
+pub fn addAtomExtraAssumeCapacity(self: *Object, extra: Atom.Extra) u32 {
+    const index = @as(u32, @intCast(self.atoms_extra.items.len));
+    const fields = @typeInfo(Atom.Extra).Struct.fields;
+    inline for (fields) |field| {
+        self.atoms_extra.appendAssumeCapacity(switch (field.type) {
+            u32 => @field(extra, field.name),
+            else => @compileError("bad field type"),
+        });
+    }
+    return index;
+}
+
+pub fn getAtomExtra(self: Object, index: u32) ?Atom.Extra {
+    if (index == 0) return null;
+    const fields = @typeInfo(Atom.Extra).Struct.fields;
+    var i: usize = index;
+    var result: Atom.Extra = undefined;
+    inline for (fields) |field| {
+        @field(result, field.name) = switch (field.type) {
+            u32 => self.atoms_extra.items[i],
+            else => @compileError("bad field type"),
+        };
+        i += 1;
+    }
+    return result;
+}
+
+pub fn setAtomExtra(self: *Object, index: u32, extra: Atom.Extra) void {
+    assert(index > 0);
+    const fields = @typeInfo(Atom.Extra).Struct.fields;
+    inline for (fields, 0..) |field, i| {
+        self.atoms_extra.items[index + i] = switch (field.type) {
+            u32 => @field(extra, field.name),
+            else => @compileError("bad field type"),
+        };
+    }
+}
+
 pub fn format(
     self: *Object,
     comptime unused_fmt_string: []const u8,
@@ -1991,10 +2066,11 @@ fn formatAtoms(
     _ = unused_fmt_string;
     _ = options;
     const object = ctx.object;
+    const macho_file = ctx.macho_file;
     try writer.writeAll("  atoms\n");
-    for (object.atoms.items) |atom_index| {
-        const atom = ctx.macho_file.getAtom(atom_index).?;
-        try writer.print("    {}\n", .{atom.fmt(ctx.macho_file)});
+    for (object.getAtoms()) |atom_index| {
+        const atom = object.getAtom(atom_index) orelse continue;
+        try writer.print("    {}\n", .{atom.fmt(macho_file)});
     }
 }
 
@@ -2174,7 +2250,7 @@ const CompileUnit = struct {
 
 const x86_64 = struct {
     fn parseRelocs(
-        self: *const Object,
+        self: *Object,
         n_sect: u8,
         sect: macho.section_64,
         out: *std.ArrayListUnmanaged(Relocation),
@@ -2227,7 +2303,7 @@ const x86_64 = struct {
                     });
                     return error.ParseFailed;
                 };
-                addend = taddr - @as(i64, @intCast(macho_file.getAtom(target).?.getInputAddress(macho_file)));
+                addend = taddr - @as(i64, @intCast(self.getAtom(target).?.getInputAddress(macho_file)));
                 break :blk target;
             } else self.symbols.items[rel.r_symbolnum];
 
@@ -2332,7 +2408,7 @@ const x86_64 = struct {
 
 const aarch64 = struct {
     fn parseRelocs(
-        self: *const Object,
+        self: *Object,
         n_sect: u8,
         sect: macho.section_64,
         out: *std.ArrayListUnmanaged(Relocation),
@@ -2408,7 +2484,7 @@ const aarch64 = struct {
                     });
                     return error.ParseFailed;
                 };
-                addend = taddr - @as(i64, @intCast(macho_file.getAtom(target).?.getInputAddress(macho_file)));
+                addend = taddr - @as(i64, @intCast(self.getAtom(target).?.getInputAddress(macho_file)));
                 break :blk target;
             } else self.symbols.items[rel.r_symbolnum];
 

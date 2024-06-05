@@ -25,7 +25,7 @@ symbols_extra: std.ArrayListUnmanaged(u32) = .{},
 globals: std.AutoHashMapUnmanaged(u32, Symbol.Index) = .{},
 /// This table will be populated after `scanRelocs` has run.
 /// Key is symbol index.
-undefs: std.AutoHashMapUnmanaged(Symbol.Index, std.ArrayListUnmanaged(Atom.Index)) = .{},
+undefs: std.AutoHashMapUnmanaged(Symbol.Index, std.ArrayListUnmanaged(AtomRef)) = .{},
 undefs_mutex: std.Thread.Mutex = .{},
 /// Global symbols we need to resolve for the link to succeed.
 undefined_symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
@@ -72,8 +72,6 @@ export_trie: ExportTrie = .{},
 unwind_info: UnwindInfo = .{},
 data_in_code: DataInCode = .{},
 
-atoms: std.ArrayListUnmanaged(Atom) = .{},
-atoms_extra: std.ArrayListUnmanaged(u32) = .{},
 thunks: std.ArrayListUnmanaged(Thunk) = .{},
 unwind_records: std.ArrayListUnmanaged(UnwindInfo.Record) = .{},
 
@@ -148,8 +146,6 @@ pub fn deinit(self: *MachO) void {
         out.deinit(gpa);
     }
     self.sections.deinit(gpa);
-    self.atoms.deinit(gpa);
-    self.atoms_extra.deinit(gpa);
     self.thunks.deinit(gpa);
 
     self.symtab.deinit(gpa);
@@ -175,9 +171,6 @@ pub fn flush(self: *MachO) !void {
 
     const gpa = self.base.allocator;
 
-    // Atom at index 0 is reserved as null atom
-    try self.atoms.append(gpa, .{});
-    try self.atoms_extra.append(gpa, 0);
     // Append empty string to string tables
     try self.string_intern.buffer.append(gpa, 0);
     try self.strtab.append(gpa, 0);
@@ -367,6 +360,7 @@ pub fn flush(self: *MachO) !void {
         const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
         self.files.set(index, .{ .internal = .{ .index = index } });
         self.internal_object_index = index;
+        try self.getInternalObject().?.init(gpa);
     }
 
     try self.addUndefinedGlobals();
@@ -379,7 +373,7 @@ pub fn flush(self: *MachO) !void {
 
     try self.convertTentativeDefinitions();
     try self.createObjcSections();
-    try self.dedupLiterals();
+    // try self.dedupLiterals();
     try self.claimUnresolved();
 
     if (self.options.dead_strip) {
@@ -730,6 +724,7 @@ fn parseObject(self: *MachO, obj: LinkObject, handle: File.HandleIndex, offset: 
         .mtime = mtime,
     } });
     const object = &self.files.items(.data)[index].object;
+    try object.init(gpa);
     try object.parse(self);
     try self.objects.append(gpa, index);
 }
@@ -1226,17 +1221,17 @@ pub fn dedupLiterals(self: *MachO) !void {
         try object.resolveLiterals(&lp, self);
     }
 
-    var wg: WaitGroup = .{};
-    {
-        wg.reset();
-        defer wg.wait();
-        for (self.objects.items) |index| {
-            self.base.thread_pool.spawnWg(&wg, Object.dedupLiterals, .{ self.getFile(index).?.object.*, lp, self });
-        }
-        if (self.getInternalObject()) |object| {
-            self.base.thread_pool.spawnWg(&wg, InternalObject.dedupLiterals, .{ object.*, lp, self });
-        }
-    }
+    // var wg: WaitGroup = .{};
+    // {
+    //     wg.reset();
+    //     defer wg.wait();
+    //     for (self.objects.items) |index| {
+    //         self.base.thread_pool.spawnWg(&wg, Object.dedupLiterals, .{ self.getFile(index).?.object.*, lp, self });
+    //     }
+    //     if (self.getInternalObject()) |object| {
+    //         self.base.thread_pool.spawnWg(&wg, InternalObject.dedupLiterals, .{ object.*, lp, self });
+    //     }
+    // }
 }
 
 fn claimUnresolved(self: *MachO) error{OutOfMemory}!void {
@@ -1327,7 +1322,7 @@ fn scanRelocs(self: *MachO) !void {
     }
 }
 
-fn scanRelocsWorker(self: *MachO, object: *const Object) void {
+fn scanRelocsWorker(self: *MachO, object: *Object) void {
     object.scanRelocs(self) catch |err| {
         self.base.fatal("failed to scan relocations in {}: {s}", .{
             object.fmtPath(),
@@ -1365,8 +1360,9 @@ fn reportUndefs(self: *MachO) !void {
 
         var inote: usize = 0;
         while (inote < @min(notes.items.len, max_notes)) : (inote += 1) {
-            const atom = self.getAtom(notes.items[inote]).?;
-            const file = atom.getFile(self);
+            const note = notes.items[inote];
+            const file = note.getFile(self);
+            const atom = note.getAtom(self).?;
             try err.addNote("referenced by {}:{s}", .{ file.fmtPath(), atom.getName(self) });
         }
 
@@ -1620,15 +1616,16 @@ pub fn sortSections(self: *MachO) !void {
     }
 
     for (self.objects.items) |index| {
-        for (self.getFile(index).?.object.atoms.items) |atom_index| {
-            const atom = self.getAtom(atom_index) orelse continue;
+        const file = self.getFile(index).?;
+        for (file.getAtoms()) |atom_index| {
+            const atom = file.getAtom(atom_index) orelse continue;
             if (!atom.alive.load(.seq_cst)) continue;
             atom.out_n_sect = backlinks[atom.out_n_sect];
         }
     }
     if (self.getInternalObject()) |object| {
-        for (object.atoms.items) |atom_index| {
-            const atom = self.getAtom(atom_index) orelse continue;
+        for (object.getAtoms()) |atom_index| {
+            const atom = object.getAtom(atom_index) orelse continue;
             if (!atom.alive.load(.seq_cst)) continue;
             atom.out_n_sect = backlinks[atom.out_n_sect];
         }
@@ -1656,20 +1653,20 @@ pub fn addAtomsToSections(self: *MachO) !void {
     defer tracy.end();
 
     for (self.objects.items) |index| {
-        const object = self.getFile(index).?.object;
-        for (object.atoms.items) |atom_index| {
-            const atom = self.getAtom(atom_index) orelse continue;
+        const file = self.getFile(index).?;
+        for (file.getAtoms()) |atom_index| {
+            const atom = file.getAtom(atom_index) orelse continue;
             if (!atom.alive.load(.seq_cst)) continue;
             const atoms = &self.sections.items(.atoms)[atom.out_n_sect];
-            try atoms.append(self.base.allocator, atom_index);
+            try atoms.append(self.base.allocator, .{ .atom = atom.atom_index, .file = index });
         }
     }
     if (self.getInternalObject()) |object| {
-        for (object.atoms.items) |atom_index| {
-            const atom = self.getAtom(atom_index) orelse continue;
+        for (object.getAtoms()) |atom_index| {
+            const atom = object.getAtom(atom_index) orelse continue;
             if (!atom.alive.load(.seq_cst)) continue;
             const atoms = &self.sections.items(.atoms)[atom.out_n_sect];
-            try atoms.append(self.base.allocator, atom_index);
+            try atoms.append(self.base.allocator, .{ .atom = atom.atom_index, .file = object.index });
         }
     }
 }
@@ -1767,9 +1764,13 @@ fn calcSectionSizeWorker(self: *MachO, sect_id: u8) void {
     const tracy = trace(@src());
     defer tracy.end();
     const doWork = struct {
-        fn doWork(macho_file: *MachO, header: *macho.section_64, atoms: []const Atom.Index) !void {
-            for (atoms) |atom_index| {
-                const atom = macho_file.getAtom(atom_index).?;
+        fn doWork(
+            macho_file: *MachO,
+            header: *macho.section_64,
+            atoms: []const AtomRef,
+        ) !void {
+            for (atoms) |ref| {
+                const atom = ref.getAtom(macho_file).?;
                 const p2align = atom.alignment.load(.seq_cst);
                 const atom_alignment = try math.powi(u32, 2, p2align);
                 const offset = mem.alignForward(u64, header.size, atom_alignment);
@@ -2223,13 +2224,17 @@ fn writeSectionsToFile(self: *MachO) !void {
     }
 }
 
-fn writeAtomsWorker(self: *MachO, atoms: []const Atom.Index, out: []u8) void {
+fn writeAtomsWorker(
+    self: *MachO,
+    atoms: []const AtomRef,
+    out: []u8,
+) void {
     const tracy = trace(@src());
     defer tracy.end();
     const doWork = struct {
-        fn doWork(as: []const Atom.Index, buffer: []u8, macho_file: *MachO) !void {
-            for (as) |atom_index| {
-                const atom = macho_file.getAtom(atom_index).?;
+        fn doWork(as: []const AtomRef, buffer: []u8, macho_file: *MachO) !void {
+            for (as) |ref| {
+                const atom = ref.getAtom(macho_file).?;
                 const off = atom.value;
                 try atom.getCode(macho_file, buffer[off..][0..atom.size]);
                 try atom.resolveRelocs(macho_file, buffer[off..][0..atom.size]);
@@ -2852,63 +2857,6 @@ pub fn getFileHandle(self: MachO, index: File.HandleIndex) File.Handle {
     return self.file_handles.items[index];
 }
 
-pub fn addAtom(self: *MachO) !Atom.Index {
-    const index = @as(Atom.Index, @intCast(self.atoms.items.len));
-    const atom = try self.atoms.addOne(self.base.allocator);
-    atom.* = .{};
-    return index;
-}
-
-pub fn getAtom(self: *MachO, atom_index: Atom.Index) ?*Atom {
-    if (atom_index == 0) return null;
-    assert(atom_index < self.atoms.items.len);
-    return &self.atoms.items[atom_index];
-}
-
-pub fn addAtomExtra(self: *MachO, extra: Atom.Extra) !u32 {
-    const fields = @typeInfo(Atom.Extra).Struct.fields;
-    try self.atoms_extra.ensureUnusedCapacity(self.base.allocator, fields.len);
-    return self.addAtomExtraAssumeCapacity(extra);
-}
-
-pub fn addAtomExtraAssumeCapacity(self: *MachO, extra: Atom.Extra) u32 {
-    const index = @as(u32, @intCast(self.atoms_extra.items.len));
-    const fields = @typeInfo(Atom.Extra).Struct.fields;
-    inline for (fields) |field| {
-        self.atoms_extra.appendAssumeCapacity(switch (field.type) {
-            u32 => @field(extra, field.name),
-            else => @compileError("bad field type"),
-        });
-    }
-    return index;
-}
-
-pub fn getAtomExtra(self: *MachO, index: u32) ?Atom.Extra {
-    if (index == 0) return null;
-    const fields = @typeInfo(Atom.Extra).Struct.fields;
-    var i: usize = index;
-    var result: Atom.Extra = undefined;
-    inline for (fields) |field| {
-        @field(result, field.name) = switch (field.type) {
-            u32 => self.atoms_extra.items[i],
-            else => @compileError("bad field type"),
-        };
-        i += 1;
-    }
-    return result;
-}
-
-pub fn setAtomExtra(self: *MachO, index: u32, extra: Atom.Extra) void {
-    assert(index > 0);
-    const fields = @typeInfo(Atom.Extra).Struct.fields;
-    inline for (fields, 0..) |field, i| {
-        self.atoms_extra.items[index + i] = switch (field.type) {
-            u32 => @field(extra, field.name),
-            else => @compileError("bad field type"),
-        };
-    }
-}
-
 pub fn addSymbol(self: *MachO) !Symbol.Index {
     const index = @as(Symbol.Index, @intCast(self.symbols.items.len));
     const symbol = try self.symbols.addOne(self.base.allocator);
@@ -3289,7 +3237,7 @@ pub const LiteralPool = struct {
 const Section = struct {
     header: macho.section_64,
     segment_id: u8,
-    atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
+    atoms: std.ArrayListUnmanaged(AtomRef) = .{},
     thunks: std.ArrayListUnmanaged(Thunk.Index) = .{},
     out: std.ArrayListUnmanaged(u8) = .{},
 };
@@ -3325,9 +3273,22 @@ pub const Job = union(enum) {
     export_trie_size: void,
     data_in_code_size: void,
     calc_symtab_size: void,
-    write_atoms: struct { []const Atom.Index, []u8 },
+    write_atoms: struct { []const AtomRef, []u8 },
     write_thunk: struct { *const Thunk, []u8 },
     write_synthetic_section: struct { u8, []u8 },
+};
+
+const AtomRef = struct {
+    atom: Atom.Index,
+    file: File.Index,
+
+    pub fn getFile(ref: AtomRef, macho_file: *MachO) File {
+        return macho_file.getFile(ref.file).?;
+    }
+
+    pub fn getAtom(ref: AtomRef, macho_file: *MachO) ?*Atom {
+        return ref.getFile(macho_file).getAtom(ref.atom);
+    }
 };
 
 pub const base_tag = Zld.Tag.macho;

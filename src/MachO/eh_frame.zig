@@ -224,11 +224,11 @@ pub const Fde = struct {
     }
 
     pub fn getAtom(fde: Fde, macho_file: *MachO) *Atom {
-        return macho_file.getAtom(fde.atom).?;
+        return fde.getObject(macho_file).getAtom(fde.atom).?;
     }
 
     pub fn getLsdaAtom(fde: Fde, macho_file: *MachO) ?*Atom {
-        return macho_file.getAtom(fde.lsda);
+        return fde.getObject(macho_file).getAtom(fde.lsda);
     }
 
     pub fn format(

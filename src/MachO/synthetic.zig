@@ -568,9 +568,10 @@ pub const DataInCode = struct {
             try dice.entries.ensureUnusedCapacity(gpa, dices.len);
 
             var next_dice: usize = 0;
-            for (object.atoms.items) |atom_index| {
+            for (object.getAtoms()) |atom_index| {
                 if (next_dice >= dices.len) break;
-                const atom = macho_file.getAtom(atom_index) orelse continue;
+                const atom = object.getAtom(atom_index) orelse continue;
+                if (!atom.alive.load(.seq_cst)) continue;
                 const start_off = atom.getInputAddress(macho_file);
                 const end_off = start_off + atom.size;
                 const start_dice = next_dice;

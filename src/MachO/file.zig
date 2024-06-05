@@ -85,10 +85,38 @@ pub const File = union(enum) {
         };
     }
 
+    pub fn getAtom(file: File, atom_index: Atom.Index) ?*Atom {
+        return switch (file) {
+            .dylib => unreachable,
+            inline else => |x| x.getAtom(atom_index),
+        };
+    }
+
     pub fn getAtoms(file: File) []const Atom.Index {
         return switch (file) {
             .dylib => unreachable,
-            inline else => |x| x.atoms.items,
+            inline else => |x| x.getAtoms(),
+        };
+    }
+
+    pub fn addAtomExtra(file: File, allocator: Allocator, extra: Atom.Extra) !u32 {
+        return switch (file) {
+            .dylib => unreachable,
+            inline else => |x| x.addAtomExtra(allocator, extra),
+        };
+    }
+
+    pub fn getAtomExtra(file: File, index: u32) ?Atom.Extra {
+        return switch (file) {
+            .dylib => unreachable,
+            inline else => |x| x.getAtomExtra(index),
+        };
+    }
+
+    pub fn setAtomExtra(file: File, index: u32, extra: Atom.Extra) void {
+        return switch (file) {
+            .dylib => unreachable,
+            inline else => |x| x.setAtomExtra(index, extra),
         };
     }
 
@@ -96,7 +124,7 @@ pub const File = union(enum) {
         const tracy = trace(@src());
         defer tracy.end();
         for (file.getAtoms()) |atom_index| {
-            const atom = macho_file.getAtom(atom_index) orelse continue;
+            const atom = file.getAtom(atom_index) orelse continue;
             if (!atom.alive.load(.seq_cst)) continue;
             atom.out_n_sect = try Atom.initOutputSection(atom.getInputSection(macho_file), macho_file);
         }

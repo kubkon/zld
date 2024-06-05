@@ -15,14 +15,14 @@ pub fn getTargetSymbol(rel: Relocation, macho_file: *MachO) *Symbol {
     return macho_file.getSymbol(rel.target.load(.seq_cst));
 }
 
-pub fn getTargetAtom(rel: Relocation, macho_file: *MachO) *Atom {
+pub fn getTargetAtom(rel: Relocation, atom: Atom, macho_file: *MachO) *Atom {
     assert(rel.tag == .local);
-    return macho_file.getAtom(rel.target.load(.seq_cst)).?;
+    return atom.getFile(macho_file).getAtom(rel.target.load(.seq_cst)).?;
 }
 
-pub fn getTargetAddress(rel: Relocation, macho_file: *MachO) u64 {
+pub fn getTargetAddress(rel: Relocation, atom: Atom, macho_file: *MachO) u64 {
     return switch (rel.tag) {
-        .local => rel.getTargetAtom(macho_file).getAddress(macho_file),
+        .local => rel.getTargetAtom(atom, macho_file).getAddress(macho_file),
         .@"extern" => rel.getTargetSymbol(macho_file).getAddress(.{}, macho_file),
     };
 }

@@ -97,9 +97,9 @@ fn claimUnresolved(macho_file: *MachO) void {
 
 fn initOutputSections(macho_file: *MachO) !void {
     for (macho_file.objects.items) |index| {
-        const object = macho_file.getFile(index).?.object;
-        for (object.atoms.items) |atom_index| {
-            const atom = macho_file.getAtom(atom_index) orelse continue;
+        const file = macho_file.getFile(index).?;
+        for (file.getAtoms()) |atom_index| {
+            const atom = file.getAtom(atom_index) orelse continue;
             if (!atom.alive.load(.seq_cst)) continue;
             atom.out_n_sect = try Atom.initOutputSection(atom.getInputSection(macho_file), macho_file);
         }
@@ -191,8 +191,8 @@ fn calcSectionSizes(macho_file: *MachO) !void {
     const slice = macho_file.sections.slice();
     for (slice.items(.header), slice.items(.atoms)) |*header, atoms| {
         if (atoms.items.len == 0) continue;
-        for (atoms.items) |atom_index| {
-            const atom = macho_file.getAtom(atom_index).?;
+        for (atoms.items) |ref| {
+            const atom = ref.getAtom(macho_file).?;
             const p2align = atom.alignment.load(.seq_cst);
             const atom_alignment = try math.powi(u32, 2, p2align);
             const offset = mem.alignForward(u64, header.size, atom_alignment);
@@ -315,8 +315,8 @@ fn writeAtoms(macho_file: *MachO) !void {
 
         try relocs.ensureTotalCapacity(header.nreloc);
 
-        for (atoms.items) |atom_index| {
-            const atom = macho_file.getAtom(atom_index).?;
+        for (atoms.items) |ref| {
+            const atom = ref.getAtom(macho_file).?;
             assert(atom.alive.load(.seq_cst));
             const off = atom.value;
             try atom.getCode(macho_file, code[off..][0..atom.size]);

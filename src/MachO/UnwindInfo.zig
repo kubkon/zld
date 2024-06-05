@@ -48,8 +48,8 @@ pub fn generate(info: *UnwindInfo, macho_file: *MachO) !void {
 
     // Collect all unwind records
     for (macho_file.sections.items(.atoms)) |atoms| {
-        for (atoms.items) |atom_index| {
-            const atom = macho_file.getAtom(atom_index) orelse continue;
+        for (atoms.items) |ref| {
+            const atom = ref.getAtom(macho_file) orelse continue;
             if (!atom.alive.load(.seq_cst)) continue;
             const recs = atom.getUnwindRecords(macho_file);
             try info.records.ensureUnusedCapacity(gpa, recs.len);
@@ -464,11 +464,11 @@ pub const Record = struct {
     }
 
     pub fn getAtom(rec: Record, macho_file: *MachO) *Atom {
-        return macho_file.getAtom(rec.atom).?;
+        return rec.getObject(macho_file).getAtom(rec.atom).?;
     }
 
     pub fn getLsdaAtom(rec: Record, macho_file: *MachO) ?*Atom {
-        return macho_file.getAtom(rec.lsda);
+        return rec.getObject(macho_file).getAtom(rec.lsda);
     }
 
     pub fn getPersonality(rec: Record, macho_file: *MachO) ?*Symbol {

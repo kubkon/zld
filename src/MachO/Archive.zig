@@ -110,7 +110,7 @@ pub fn parse(self: *Archive, macho_file: *MachO, path: []const u8, file_handle: 
 
         // TODO validate we are dealing with object files.
 
-        const object = Object{
+        var object = Object{
             .path = try gpa.dupe(u8, name),
             .file_handle = file_handle,
             .index = undefined,
@@ -119,6 +119,7 @@ pub fn parse(self: *Archive, macho_file: *MachO, path: []const u8, file_handle: 
             .offset = pos,
             .ar_name = try gpa.dupe(u8, path),
         };
+        try object.init(gpa);
 
         log.debug("extracting object '{s}' from archive '{s}' at offset 0x{x}", .{
             object.path,
