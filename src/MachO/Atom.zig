@@ -331,7 +331,7 @@ fn reportUndefSymbol(self: Atom, rel: Relocation, macho_file: *MachO) !bool {
         macho_file.undefs_mutex.lock();
         defer macho_file.undefs_mutex.unlock();
         const gpa = macho_file.base.allocator;
-        const gop = try macho_file.undefs.getOrPut(gpa, rel.target.load(.seq_cst));
+        const gop = try macho_file.undefs.getOrPut(gpa, rel.target);
         if (!gop.found_existing) {
             gop.value_ptr.* = .{};
         }
@@ -477,7 +477,7 @@ fn resolveRelocInner(
                 .aarch64 => {
                     const disp: i28 = math.cast(i28, S + A - P) orelse blk: {
                         const thunk = self.getThunk(macho_file);
-                        const S_: i64 = @intCast(thunk.getTargetAddress(rel.target.load(.seq_cst), macho_file));
+                        const S_: i64 = @intCast(thunk.getTargetAddress(rel.target, macho_file));
                         break :blk math.cast(i28, S_ + A - P) orelse return error.Overflow;
                     };
                     aarch64.writeBranchImm(disp, code[rel_offset..][0..4]);

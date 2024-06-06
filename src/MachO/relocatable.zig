@@ -6,7 +6,7 @@ pub fn flush(macho_file: *MachO) !void {
     try macho_file.sortSections();
     try macho_file.addAtomsToSections();
     try calcSectionSizes(macho_file);
-    try calcSymtabSize(macho_file);
+    calcSymtabSize(macho_file);
     try macho_file.data_in_code.updateSize(macho_file);
 
     {
@@ -123,11 +123,9 @@ fn initOutputSections(macho_file: *MachO) !void {
     }
 }
 
-fn calcSymtabSize(macho_file: *MachO) !void {
+fn calcSymtabSize(macho_file: *MachO) void {
     const tracy = trace(@src());
     defer tracy.end();
-
-    const gpa = macho_file.base.allocator;
 
     var nlocals: u32 = 0;
     var nstabs: u32 = 0;
@@ -135,24 +133,15 @@ fn calcSymtabSize(macho_file: *MachO) !void {
     var nimports: u32 = 0;
     var strsize: u32 = 0;
 
-    var files = std.ArrayList(File.Index).init(gpa);
-    defer files.deinit();
-    try files.ensureTotalCapacityPrecise(macho_file.objects.items.len + macho_file.dylibs.items.len + 1);
-    for (macho_file.objects.items) |index| files.appendAssumeCapacity(index);
-    for (macho_file.dylibs.items) |index| files.appendAssumeCapacity(index);
-    if (macho_file.internal_object_index) |index| files.appendAssumeCapacity(index);
-
-    for (files.items) |index| {
-        const file = macho_file.getFile(index).?;
-        const ctx = switch (file) {
-            inline else => |x| &x.output_symtab_ctx,
-        };
+    for (macho_file.objects.items) |index| {
+        const object = macho_file.getFile(index).?.object;
+        const ctx = &object.output_symtab_ctx;
         ctx.ilocal = nlocals;
         ctx.istab = nstabs;
         ctx.iexport = nexports;
         ctx.iimport = nimports;
         ctx.stroff = strsize;
-        file.calcSymtabSize(macho_file);
+        object.calcSymtabSize(macho_file);
         nlocals += ctx.nlocals;
         nstabs += ctx.nstabs;
         nexports += ctx.nexports;
@@ -160,11 +149,9 @@ fn calcSymtabSize(macho_file: *MachO) !void {
         strsize += ctx.strsize;
     }
 
-    for (files.items) |index| {
-        const file = macho_file.getFile(index).?;
-        const ctx = switch (file) {
-            inline else => |x| &x.output_symtab_ctx,
-        };
+    for (macho_file.objects.items) |index| {
+        const object = macho_file.getFile(index).?.object;
+        const ctx = &object.output_symtab_ctx;
         ctx.istab += nlocals;
         ctx.iexport += nlocals + nstabs;
         ctx.iimport += nlocals + nstabs + nexports;

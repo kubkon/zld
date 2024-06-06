@@ -61,7 +61,7 @@ pub const Bind = struct {
                     const sym = rel.getTargetSymbol(macho_file);
                     if (sym.isTlvInit(macho_file)) continue;
                     const entry = Entry{
-                        .target = rel.target.load(.seq_cst),
+                        .target = rel.target,
                         .offset = atom_addr + rel_offset - seg.vmaddr,
                         .segment_id = seg_id,
                         .addend = addend,
@@ -315,7 +315,7 @@ pub const WeakBind = struct {
                     const sym = rel.getTargetSymbol(macho_file);
                     if (sym.isTlvInit(macho_file)) continue;
                     const entry = Entry{
-                        .target = rel.target.load(.seq_cst),
+                        .target = rel.target,
                         .offset = atom_addr + rel_offset - seg.vmaddr,
                         .segment_id = seg_id,
                         .addend = addend,

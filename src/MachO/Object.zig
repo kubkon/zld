@@ -559,7 +559,30 @@ pub fn resolveLiterals(self: *Object, lp: *MachO.LiteralPool, macho_file: *MachO
                 const atom_data = data[atom.off..][0..atom.size];
                 const res = try lp.insert(gpa, header.type(), atom_data);
                 if (!res.found_existing) {
-                    res.atom.* = sub.atom;
+                    const name = try self.addString(gpa, "lWAX");
+                    const nlist_index: u32 = @intCast(try self.symtab.addOne(gpa));
+                    self.symtab.set(nlist_index, .{
+                        .nlist = .{
+                            .n_strx = name,
+                            .n_type = macho.N_SECT,
+                            .n_sect = @intCast(atom.n_sect + 1),
+                            .n_desc = 0,
+                            .n_value = atom.getInputAddress(macho_file),
+                        },
+                        .size = atom.size,
+                        .atom = sub.atom,
+                    });
+                    const sym_index = try macho_file.addSymbol();
+                    try self.symbols.append(gpa, sym_index);
+                    const sym = macho_file.getSymbol(sym_index);
+                    sym.* = .{
+                        .name = name,
+                        .atom = sub.atom,
+                        .file = self.index,
+                        .nlist_idx = nlist_index,
+                        .extra = try macho_file.addSymbolExtra(.{}),
+                    };
+                    res.symbol.* = sym_index;
                 }
                 atom.flags.literal_pool = true;
                 try atom.addExtra(.{ .literal_index = res.index }, macho_file);
@@ -581,7 +604,30 @@ pub fn resolveLiterals(self: *Object, lp: *MachO.LiteralPool, macho_file: *MachO
                 const res = try lp.insert(gpa, header.type(), buffer.items[addend..]);
                 buffer.clearRetainingCapacity();
                 if (!res.found_existing) {
-                    res.atom.* = sub.atom;
+                    const name = try self.addString(gpa, "lWAZ");
+                    const nlist_index: u32 = @intCast(try self.symtab.addOne(gpa));
+                    self.symtab.set(nlist_index, .{
+                        .nlist = .{
+                            .n_strx = name,
+                            .n_type = macho.N_SECT,
+                            .n_sect = @intCast(atom.n_sect + 1),
+                            .n_desc = 0,
+                            .n_value = atom.getInputAddress(macho_file),
+                        },
+                        .size = atom.size,
+                        .atom = sub.atom,
+                    });
+                    const sym_index = try macho_file.addSymbol();
+                    try self.symbols.append(gpa, sym_index);
+                    const sym = macho_file.getSymbol(sym_index);
+                    sym.* = .{
+                        .name = name,
+                        .atom = sub.atom,
+                        .file = self.index,
+                        .nlist_idx = nlist_index,
+                        .extra = try macho_file.addSymbolExtra(.{}),
+                    };
+                    res.symbol.* = sym_index;
                 }
                 atom.flags.literal_pool = true;
                 try atom.addExtra(.{ .literal_index = res.index }, macho_file);
@@ -590,49 +636,55 @@ pub fn resolveLiterals(self: *Object, lp: *MachO.LiteralPool, macho_file: *MachO
     }
 }
 
-// pub fn dedupLiterals(self: Object, lp: MachO.LiteralPool, macho_file: *MachO) void {
-//     const tracy = trace(@src());
-//     defer tracy.end();
+pub fn dedupLiterals(self: *Object, lp: MachO.LiteralPool, macho_file: *MachO) void {
+    const tracy = trace(@src());
+    defer tracy.end();
 
-//     for (self.getAtoms()) |*atom| {
-//         if (!atom.alive.load(.seq_cst)) continue;
-//         if (!atom.flags.relocs) continue;
+    for (self.getAtoms()) |atom_index| {
+        const atom = self.getAtom(atom_index) orelse continue;
+        if (!atom.alive.load(.seq_cst)) continue;
+        if (!atom.flags.relocs) continue;
 
-//         const relocs = blk: {
-//             const extra = atom.getExtra(macho_file).?;
-//             const relocs = self.sections.items(.relocs)[atom.n_sect].items;
-//             break :blk relocs[extra.rel_index..][0..extra.rel_count];
-//         };
-//         for (relocs) |*rel| switch (rel.tag) {
-//             .local => {
-//                 const target = macho_file.getAtom(rel.target.load(.seq_cst)).?;
-//                 if (target.getLiteralPoolIndex(macho_file)) |lp_index| {
-//                     const lp_atom = lp.getAtom(lp_index, macho_file);
-//                     if (target.atom_index != lp_atom.atom_index) {
-//                         _ = lp_atom.alignment.fetchMax(target.alignment.load(.seq_cst), .seq_cst);
-//                         _ = target.alive.swap(false, .seq_cst);
-//                         _ = rel.target.swap(lp_atom.atom_index, .seq_cst);
-//                     }
-//                 }
-//             },
-//             .@"extern" => {
-//                 const target_sym = rel.getTargetSymbol(macho_file);
-//                 if (target_sym.getAtom(macho_file)) |target_atom| {
-//                     if (target_atom.getLiteralPoolIndex(macho_file)) |lp_index| {
-//                         const lp_atom = lp.getAtom(lp_index, macho_file);
-//                         if (target_atom.atom_index != lp_atom.atom_index) {
-//                             _ = lp_atom.alignment.fetchMax(target_atom.alignment.load(.seq_cst), .seq_cst);
-//                             _ = target_atom.alive.swap(false, .seq_cst);
-//                             target_sym.mutex.lock();
-//                             defer target_sym.mutex.unlock();
-//                             target_sym.atom = lp_atom.atom_index;
-//                         }
-//                     }
-//                 }
-//             },
-//         };
-//     }
-// }
+        const relocs = blk: {
+            const extra = atom.getExtra(macho_file).?;
+            const relocs = self.sections.items(.relocs)[atom.n_sect].items;
+            break :blk relocs[extra.rel_index..][0..extra.rel_count];
+        };
+        for (relocs) |*rel| switch (rel.tag) {
+            .local => {
+                const target = rel.getTargetAtom(atom.*, macho_file);
+                if (target.getLiteralPoolIndex(macho_file)) |lp_index| {
+                    const lp_sym = lp.getSymbol(lp_index, macho_file);
+                    if (target.atom_index != lp_sym.atom or self.index != lp_sym.file) {
+                        const lp_atom = lp_sym.getAtom(macho_file).?;
+                        _ = lp_atom.alignment.fetchMax(target.alignment.load(.seq_cst), .seq_cst);
+                        _ = target.alive.swap(false, .seq_cst);
+                        rel.mutex.lock();
+                        defer rel.mutex.unlock();
+                        rel.target = lp.getSymbolIndex(lp_index);
+                        rel.tag = .@"extern";
+                    }
+                }
+            },
+            .@"extern" => {
+                const target_sym = rel.getTargetSymbol(macho_file);
+                if (target_sym.getAtom(macho_file)) |target_atom| {
+                    if (target_atom.getLiteralPoolIndex(macho_file)) |lp_index| {
+                        const lp_sym = lp.getSymbol(lp_index, macho_file);
+                        if (target_atom.atom_index != lp_sym.atom or target_atom.file != lp_sym.file) {
+                            const lp_atom = lp_sym.getAtom(macho_file).?;
+                            _ = lp_atom.alignment.fetchMax(target_atom.alignment.load(.seq_cst), .seq_cst);
+                            _ = target_atom.alive.swap(false, .seq_cst);
+                            rel.mutex.lock();
+                            defer rel.mutex.unlock();
+                            rel.target = lp.getSymbolIndex(lp_index);
+                        }
+                    }
+                }
+            },
+        };
+    }
+}
 
 pub fn findAtom(self: Object, addr: u64) ?Atom.Index {
     const tracy = trace(@src());
@@ -990,7 +1042,7 @@ fn initEhFrameRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
                     });
                     return error.ParseFailed;
                 };
-                cie.personality = .{ .index = @intCast(rel.target.load(.seq_cst)), .offset = rel.offset - cie.offset };
+                cie.personality = .{ .index = @intCast(rel.target), .offset = rel.offset - cie.offset };
             },
             else => {},
         }
@@ -1067,7 +1119,7 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
                 },
                 16 => switch (rel.tag) { // personality function
                     .@"extern" => {
-                        out.personality = rel.target.load(.seq_cst);
+                        out.personality = rel.target;
                     },
                     .local => if (sym_lookup.find(rec.personalityFunction)) |sym_index| {
                         out.personality = sym_index;
@@ -1536,11 +1588,11 @@ pub fn calcSymtabSize(self: *Object, macho_file: *MachO) void {
         if (name.len > 0 and
             (name[0] == 'L' or name[0] == 'l' or
             mem.startsWith(u8, name, "_OBJC_SELECTOR_REFERENCES_")) and
-            !is_relocatable) continue;
+            !is_relocatable)
+            continue;
         sym.flags.output_symtab = true;
         if (sym.isLocal()) {
             sym.addExtra(.{ .symtab = self.output_symtab_ctx.nlocals }, macho_file);
-
             self.output_symtab_ctx.nlocals += 1;
         } else if (sym.flags.@"export") {
             sym.addExtra(.{ .symtab = self.output_symtab_ctx.nexports }, macho_file);
@@ -2162,6 +2214,16 @@ fn formatSymtab(
         const sym = ctx.macho_file.getSymbol(index);
         try writer.print("    {}\n", .{sym.fmt(ctx.macho_file)});
     }
+    for (object.stab_files.items) |sf| {
+        try writer.print("  stabs({s},{s},{s})\n", .{
+            sf.getCompDir(object),
+            sf.getTuName(object),
+            sf.getOsoPath(object),
+        });
+        for (sf.stabs.items) |stab| {
+            try writer.print("    {}", .{stab.fmt(ctx.macho_file)});
+        }
+    }
 }
 
 pub fn fmtPath(self: Object) std.fmt.Formatter(formatPath) {
@@ -2231,6 +2293,44 @@ const StabFile = struct {
 
         fn getSymbol(stab: Stab, macho_file: *MachO) ?*Symbol {
             return if (stab.symbol) |s| macho_file.getSymbol(s) else null;
+        }
+
+        pub fn format(
+            stab: Stab,
+            comptime unused_fmt_string: []const u8,
+            options: std.fmt.FormatOptions,
+            writer: anytype,
+        ) !void {
+            _ = stab;
+            _ = unused_fmt_string;
+            _ = options;
+            _ = writer;
+            @compileError("do not format stabs directly");
+        }
+
+        const StabFormatContext = struct { Stab, *MachO };
+
+        pub fn fmt(stab: Stab, macho_file: *MachO) std.fmt.Formatter(format2) {
+            return .{ .data = .{ stab, macho_file } };
+        }
+
+        fn format2(
+            ctx: StabFormatContext,
+            comptime unused_fmt_string: []const u8,
+            options: std.fmt.FormatOptions,
+            writer: anytype,
+        ) !void {
+            _ = unused_fmt_string;
+            _ = options;
+            const stab, const macho_file = ctx;
+            const sym = stab.getSymbol(macho_file).?;
+            if (stab.is_func) {
+                try writer.print("func(%{d})", .{stab.symbol.?});
+            } else if (sym.visibility == .global) {
+                try writer.print("gsym(%{d})", .{stab.symbol.?});
+            } else {
+                try writer.print("stsym(%{d})", .{stab.symbol.?});
+            }
         }
     };
 };
@@ -2344,7 +2444,7 @@ const x86_64 = struct {
             out.appendAssumeCapacity(.{
                 .tag = if (rel.r_extern == 1) .@"extern" else .local,
                 .offset = @as(u32, @intCast(rel.r_address)),
-                .target = std.atomic.Value(u32).init(target),
+                .target = target,
                 .addend = addend,
                 .type = @"type",
                 .meta = .{
@@ -2525,7 +2625,7 @@ const aarch64 = struct {
             out.appendAssumeCapacity(.{
                 .tag = if (rel.r_extern == 1) .@"extern" else .local,
                 .offset = @as(u32, @intCast(rel.r_address)),
-                .target = std.atomic.Value(u32).init(target),
+                .target = target,
                 .addend = addend,
                 .type = @"type",
                 .meta = .{

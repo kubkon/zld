@@ -1,6 +1,6 @@
-tag: enum { @"extern", local },
+tag: Tag,
 offset: u32,
-target: std.atomic.Value(u32),
+target: u32,
 addend: i64,
 type: Type,
 meta: packed struct {
@@ -9,15 +9,16 @@ meta: packed struct {
     length: u2,
     symbolnum: u24,
 },
+mutex: std.Thread.Mutex = .{},
 
 pub fn getTargetSymbol(rel: Relocation, macho_file: *MachO) *Symbol {
     assert(rel.tag == .@"extern");
-    return macho_file.getSymbol(rel.target.load(.seq_cst));
+    return macho_file.getSymbol(rel.target);
 }
 
 pub fn getTargetAtom(rel: Relocation, atom: Atom, macho_file: *MachO) *Atom {
     assert(rel.tag == .local);
-    return atom.getFile(macho_file).getAtom(rel.target.load(.seq_cst)).?;
+    return atom.getFile(macho_file).getAtom(rel.target).?;
 }
 
 pub fn getTargetAddress(rel: Relocation, atom: Atom, macho_file: *MachO) u64 {
@@ -144,6 +145,8 @@ pub const Type = enum {
     /// Absolute relocation (X86_64_RELOC_UNSIGNED or ARM64_RELOC_UNSIGNED)
     unsigned,
 };
+
+const Tag = enum { local, @"extern" };
 
 const assert = std.debug.assert;
 const macho = std.macho;

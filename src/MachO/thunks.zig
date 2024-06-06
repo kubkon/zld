@@ -42,7 +42,7 @@ pub fn createThunks(sect_id: u8, macho_file: *MachO) !void {
             for (atom.getRelocs(macho_file)) |rel| {
                 if (rel.type != .branch) continue;
                 if (isReachable(atom, rel, macho_file)) continue;
-                try thunk.symbols.put(gpa, rel.target.load(.seq_cst), {});
+                try thunk.symbols.put(gpa, rel.target, {});
             }
             try atom.addExtra(.{ .thunk = thunk_index }, macho_file);
             atom.flags.thunk = true;

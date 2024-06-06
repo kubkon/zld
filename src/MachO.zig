@@ -373,7 +373,7 @@ pub fn flush(self: *MachO) !void {
 
     try self.convertTentativeDefinitions();
     try self.createObjcSections();
-    // try self.dedupLiterals();
+    try self.dedupLiterals();
     try self.claimUnresolved();
 
     if (self.options.dead_strip) {
@@ -1221,17 +1221,17 @@ pub fn dedupLiterals(self: *MachO) !void {
         try object.resolveLiterals(&lp, self);
     }
 
-    // var wg: WaitGroup = .{};
-    // {
-    //     wg.reset();
-    //     defer wg.wait();
-    //     for (self.objects.items) |index| {
-    //         self.base.thread_pool.spawnWg(&wg, Object.dedupLiterals, .{ self.getFile(index).?.object.*, lp, self });
-    //     }
-    //     if (self.getInternalObject()) |object| {
-    //         self.base.thread_pool.spawnWg(&wg, InternalObject.dedupLiterals, .{ object.*, lp, self });
-    //     }
-    // }
+    var wg: WaitGroup = .{};
+    {
+        wg.reset();
+        defer wg.wait();
+        for (self.objects.items) |index| {
+            self.base.thread_pool.spawnWg(&wg, Object.dedupLiterals, .{ self.getFile(index).?.object, lp, self });
+        }
+        if (self.getInternalObject()) |object| {
+            self.base.thread_pool.spawnWg(&wg, InternalObject.dedupLiterals, .{ object, lp, self });
+        }
+    }
 }
 
 fn claimUnresolved(self: *MachO) error{OutOfMemory}!void {
@@ -3156,7 +3156,7 @@ const default_pagezero_vmsize: u64 = 0x100000000;
 pub const LiteralPool = struct {
     table: std.AutoArrayHashMapUnmanaged(void, void) = .{},
     keys: std.ArrayListUnmanaged(Key) = .{},
-    values: std.ArrayListUnmanaged(Atom.Index) = .{},
+    values: std.ArrayListUnmanaged(Symbol.Index) = .{},
     data: std.ArrayListUnmanaged(u8) = .{},
 
     pub fn deinit(lp: *LiteralPool, allocator: Allocator) void {
@@ -3169,12 +3169,16 @@ pub const LiteralPool = struct {
     const InsertResult = struct {
         found_existing: bool,
         index: Index,
-        atom: *Atom.Index,
+        symbol: *Symbol.Index,
     };
 
-    pub fn getAtom(lp: LiteralPool, index: Index, macho_file: *MachO) *Atom {
+    pub fn getSymbolIndex(lp: LiteralPool, index: Index) Symbol.Index {
         assert(index < lp.values.items.len);
-        return macho_file.getAtom(lp.values.items[index]).?;
+        return lp.values.items[index];
+    }
+
+    pub fn getSymbol(lp: LiteralPool, index: Index, macho_file: *MachO) *Symbol {
+        return macho_file.getSymbol(lp.getSymbolIndex(index));
     }
 
     pub fn insert(lp: *LiteralPool, allocator: Allocator, @"type": u8, string: []const u8) !InsertResult {
@@ -3192,7 +3196,7 @@ pub const LiteralPool = struct {
         return .{
             .found_existing = gop.found_existing,
             .index = @intCast(gop.index),
-            .atom = &lp.values.items[gop.index],
+            .symbol = &lp.values.items[gop.index],
         };
     }
 

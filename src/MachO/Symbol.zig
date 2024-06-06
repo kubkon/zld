@@ -155,9 +155,7 @@ pub fn getObjcStubsAddress(symbol: Symbol, macho_file: *MachO) u64 {
 pub fn getObjcSelrefsAddress(symbol: Symbol, macho_file: *MachO) u64 {
     if (!symbol.getSectionFlags().objc_stubs) return 0;
     const extra = symbol.getExtra(macho_file);
-    const atom = symbol.getFile(macho_file).?.getAtom(extra.objc_selrefs).?;
-    assert(atom.alive.load(.seq_cst));
-    return atom.getAddress(macho_file);
+    return macho_file.getSymbol(extra.objc_selrefs).getAddress(.{}, macho_file);
 }
 
 pub fn getTlvPtrAddress(symbol: Symbol, macho_file: *MachO) u64 {
