@@ -1587,10 +1587,10 @@ pub fn calcSymtabSize(self: *Object, macho_file: *MachO) void {
         if (sym.getAtom(macho_file)) |atom| if (!atom.alive.load(.seq_cst)) continue;
         if (sym.isSymbolStab(macho_file)) continue;
         const name = sym.getName(macho_file);
+        if (name.len == 0) continue;
         // TODO in -r mode, we actually want to merge symbol names and emit only one
         // work it out when emitting relocs
-        if (name.len > 0 and
-            (name[0] == 'L' or name[0] == 'l' or
+        if ((name[0] == 'L' or name[0] == 'l' or
             mem.startsWith(u8, name, "_OBJC_SELECTOR_REFERENCES_")) and
             !is_relocatable)
             continue;

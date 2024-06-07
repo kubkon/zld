@@ -131,7 +131,7 @@ fn calcSymtabSize(macho_file: *MachO) void {
     var nstabs: u32 = 0;
     var nexports: u32 = 0;
     var nimports: u32 = 0;
-    var strsize: u32 = 0;
+    var strsize: u32 = 1;
 
     for (macho_file.objects.items) |index| {
         const object = macho_file.getFile(index).?.object;
@@ -160,7 +160,7 @@ fn calcSymtabSize(macho_file: *MachO) void {
     {
         const cmd = &macho_file.symtab_cmd;
         cmd.nsyms = nlocals + nstabs + nexports + nimports;
-        cmd.strsize = strsize + 1;
+        cmd.strsize = strsize;
     }
 
     {
@@ -448,6 +448,7 @@ fn writeSymtab(macho_file: *MachO) !void {
 
     try macho_file.symtab.resize(gpa, cmd.nsyms);
     try macho_file.strtab.resize(gpa, cmd.strsize);
+    macho_file.strtab.items[0] = 0;
 
     for (macho_file.objects.items) |index| {
         macho_file.getFile(index).?.writeSymtab(macho_file);

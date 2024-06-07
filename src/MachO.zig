@@ -2412,7 +2412,7 @@ fn calcSymtabSizeImpl(self: *MachO) !void {
     var nstabs: u32 = 0;
     var nexports: u32 = 0;
     var nimports: u32 = 0;
-    var strsize: u32 = 0;
+    var strsize: u32 = 1;
 
     for (files.items) |index| {
         const file = self.getFile(index).?;
@@ -2446,7 +2446,7 @@ fn calcSymtabSizeImpl(self: *MachO) !void {
     {
         const cmd = &self.symtab_cmd;
         cmd.nsyms = nlocals + nstabs + nexports + nimports;
-        cmd.strsize = strsize + 1;
+        cmd.strsize = strsize;
     }
 
     {
@@ -2466,6 +2466,7 @@ fn calcSymtabSizeImpl(self: *MachO) !void {
         const cmd = self.symtab_cmd;
         try self.symtab.resize(gpa, cmd.nsyms);
         try self.strtab.resize(gpa, cmd.strsize);
+        self.strtab.items[0] = 0;
         for (self.objects.items) |index| {
             self.base.thread_pool.spawnWg(&wg, writeSymtabWorker, .{ self, self.getFile(index).? });
         }
