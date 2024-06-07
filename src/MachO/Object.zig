@@ -559,11 +559,10 @@ pub fn resolveLiterals(self: *Object, lp: *MachO.LiteralPool, macho_file: *MachO
                 const atom_data = data[atom.off..][0..atom.size];
                 const res = try lp.insert(gpa, header.type(), atom_data);
                 if (!res.found_existing) {
-                    const name = try self.addString(gpa, "lWAX");
                     const nlist_index: u32 = @intCast(try self.symtab.addOne(gpa));
                     self.symtab.set(nlist_index, .{
                         .nlist = .{
-                            .n_strx = name,
+                            .n_strx = 0,
                             .n_type = macho.N_SECT,
                             .n_sect = @intCast(atom.n_sect + 1),
                             .n_desc = 0,
@@ -576,7 +575,6 @@ pub fn resolveLiterals(self: *Object, lp: *MachO.LiteralPool, macho_file: *MachO
                     try self.symbols.append(gpa, sym_index);
                     const sym = macho_file.getSymbol(sym_index);
                     sym.* = .{
-                        .name = name,
                         .atom_ref = .{ .atom = sub.atom, .file = self.index },
                         .file = self.index,
                         .nlist_idx = nlist_index,
@@ -604,11 +602,10 @@ pub fn resolveLiterals(self: *Object, lp: *MachO.LiteralPool, macho_file: *MachO
                 const res = try lp.insert(gpa, header.type(), buffer.items[addend..]);
                 buffer.clearRetainingCapacity();
                 if (!res.found_existing) {
-                    const name = try self.addString(gpa, "lWAZ");
                     const nlist_index: u32 = @intCast(try self.symtab.addOne(gpa));
                     self.symtab.set(nlist_index, .{
                         .nlist = .{
-                            .n_strx = name,
+                            .n_strx = 0,
                             .n_type = macho.N_SECT,
                             .n_sect = @intCast(atom.n_sect + 1),
                             .n_desc = 0,
@@ -621,7 +618,6 @@ pub fn resolveLiterals(self: *Object, lp: *MachO.LiteralPool, macho_file: *MachO
                     try self.symbols.append(gpa, sym_index);
                     const sym = macho_file.getSymbol(sym_index);
                     sym.* = .{
-                        .name = name,
                         .atom_ref = .{ .atom = sub.atom, .file = self.index },
                         .file = self.index,
                         .nlist_idx = nlist_index,

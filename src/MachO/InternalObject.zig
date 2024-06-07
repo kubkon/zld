@@ -5,7 +5,6 @@ atoms: std.ArrayListUnmanaged(Atom) = .{},
 atoms_indexes: std.ArrayListUnmanaged(Atom.Index) = .{},
 atoms_extra: std.ArrayListUnmanaged(u32) = .{},
 symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
-strtab: std.ArrayListUnmanaged(u8) = .{},
 
 objc_methnames: std.ArrayListUnmanaged(u8) = .{},
 objc_selrefs: [@sizeOf(u64)]u8 = [_]u8{0} ** @sizeOf(u64),
@@ -22,7 +21,6 @@ pub fn deinit(self: *InternalObject, allocator: Allocator) void {
     self.atoms_indexes.deinit(allocator);
     self.atoms_extra.deinit(allocator);
     self.symbols.deinit(allocator);
-    self.strtab.deinit(allocator);
     self.objc_methnames.deinit(allocator);
 }
 
@@ -46,14 +44,6 @@ pub fn addSymbol(self: *InternalObject, name: [:0]const u8, macho_file: *MachO) 
     sym.flags = .{ .global = true };
     sym.extra = try macho_file.addSymbolExtra(.{});
     return gop.index;
-}
-
-fn addString(self: *InternalObject, allocator: Allocator, name: [:0]const u8) error{OutOfMemory}!u32 {
-    const off: u32 = @intCast(self.strtab.items.len);
-    try self.strtab.ensureUnusedCapacity(allocator, name.len + 1);
-    self.strtab.appendSliceAssumeCapacity(name);
-    self.strtab.appendAssumeCapacity(0);
-    return off;
 }
 
 /// Creates a fake input sections __TEXT,__objc_methname and __DATA,__objc_selrefs.
@@ -125,7 +115,6 @@ fn addObjcSelrefsSection(self: *InternalObject, methname_atom_index: Atom.Index,
     const sym = macho_file.getSymbol(sym_index);
     try self.symbols.append(gpa, sym_index);
     sym.* = .{
-        .name = try self.addString(gpa, "lFU"),
         .atom_ref = .{ .atom = atom_index, .file = self.index },
         .file = self.index,
         .extra = try macho_file.addSymbolExtra(.{}),
@@ -153,7 +142,6 @@ pub fn resolveLiterals(self: *InternalObject, lp: *MachO.LiteralPool, macho_file
                 try self.symbols.append(gpa, sym_index);
                 const sym = macho_file.getSymbol(sym_index);
                 sym.* = .{
-                    .name = try self.addString(gpa, "lCK"),
                     .atom_ref = .{ .atom = atom_index, .file = self.index },
                     .file = self.index,
                     .extra = try macho_file.addSymbolExtra(.{}),
@@ -180,7 +168,6 @@ pub fn resolveLiterals(self: *InternalObject, lp: *MachO.LiteralPool, macho_file
                 try self.symbols.append(gpa, sym_index);
                 const sym = macho_file.getSymbol(sym_index);
                 sym.* = .{
-                    .name = try self.addString(gpa, "lCK"),
                     .atom_ref = .{ .atom = atom_index, .file = self.index },
                     .file = self.index,
                     .extra = try macho_file.addSymbolExtra(.{}),
