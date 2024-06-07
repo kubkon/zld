@@ -577,7 +577,7 @@ pub fn resolveLiterals(self: *Object, lp: *MachO.LiteralPool, macho_file: *MachO
                     const sym = macho_file.getSymbol(sym_index);
                     sym.* = .{
                         .name = name,
-                        .atom = sub.atom,
+                        .atom_ref = .{ .atom = sub.atom, .file = self.index },
                         .file = self.index,
                         .nlist_idx = nlist_index,
                         .extra = try macho_file.addSymbolExtra(.{}),
@@ -622,7 +622,7 @@ pub fn resolveLiterals(self: *Object, lp: *MachO.LiteralPool, macho_file: *MachO
                     const sym = macho_file.getSymbol(sym_index);
                     sym.* = .{
                         .name = name,
-                        .atom = sub.atom,
+                        .atom_ref = .{ .atom = sub.atom, .file = self.index },
                         .file = self.index,
                         .nlist_idx = nlist_index,
                         .extra = try macho_file.addSymbolExtra(.{}),
@@ -655,7 +655,8 @@ pub fn dedupLiterals(self: *Object, lp: MachO.LiteralPool, macho_file: *MachO) v
                 const target = rel.getTargetAtom(atom.*, macho_file);
                 if (target.getLiteralPoolIndex(macho_file)) |lp_index| {
                     const lp_sym = lp.getSymbol(lp_index, macho_file);
-                    if (target.atom_index != lp_sym.atom or self.index != lp_sym.file) {
+                    const lp_atom_ref = lp_sym.atom_ref;
+                    if (target.atom_index != lp_atom_ref.atom or self.index != lp_atom_ref.file) {
                         const lp_atom = lp_sym.getAtom(macho_file).?;
                         _ = lp_atom.alignment.fetchMax(target.alignment.load(.seq_cst), .seq_cst);
                         _ = target.alive.swap(false, .seq_cst);
@@ -671,13 +672,14 @@ pub fn dedupLiterals(self: *Object, lp: MachO.LiteralPool, macho_file: *MachO) v
                 if (target_sym.getAtom(macho_file)) |target_atom| {
                     if (target_atom.getLiteralPoolIndex(macho_file)) |lp_index| {
                         const lp_sym = lp.getSymbol(lp_index, macho_file);
-                        if (target_atom.atom_index != lp_sym.atom or target_atom.file != lp_sym.file) {
+                        const lp_atom_ref = lp_sym.atom_ref;
+                        if (target_atom.atom_index != lp_atom_ref.atom or target_atom.file != lp_atom_ref.file) {
                             const lp_atom = lp_sym.getAtom(macho_file).?;
                             _ = lp_atom.alignment.fetchMax(target_atom.alignment.load(.seq_cst), .seq_cst);
                             _ = target_atom.alive.swap(false, .seq_cst);
-                            rel.mutex.lock();
-                            defer rel.mutex.unlock();
-                            rel.target = lp.getSymbolIndex(lp_index);
+                            target_sym.mutex.lock();
+                            defer target_sym.mutex.unlock();
+                            target_sym.atom_ref = lp_atom_ref;
                         }
                     }
                 }

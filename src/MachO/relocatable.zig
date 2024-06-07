@@ -1,5 +1,5 @@
 pub fn flush(macho_file: *MachO) !void {
-    // try macho_file.dedupLiterals();
+    try macho_file.dedupLiterals();
     markExports(macho_file);
     claimUnresolved(macho_file);
     try initOutputSections(macho_file);

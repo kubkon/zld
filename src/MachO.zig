@@ -373,7 +373,7 @@ pub fn flush(self: *MachO) !void {
 
     try self.convertTentativeDefinitions();
     try self.createObjcSections();
-    // try self.dedupLiterals();
+    try self.dedupLiterals();
     try self.claimUnresolved();
 
     if (self.options.dead_strip) {
