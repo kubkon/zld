@@ -73,7 +73,6 @@ unwind_info: UnwindInfo = .{},
 data_in_code: DataInCode = .{},
 
 thunks: std.ArrayListUnmanaged(Thunk) = .{},
-unwind_records: std.ArrayListUnmanaged(UnwindInfo.Record) = .{},
 
 has_tlv: bool = false,
 binds_to_weak: bool = false,
@@ -160,7 +159,6 @@ pub fn deinit(self: *MachO) void {
     self.lazy_bind.deinit(gpa);
     self.export_trie.deinit(gpa);
     self.unwind_info.deinit(gpa);
-    self.unwind_records.deinit(gpa);
     self.data_in_code.deinit(gpa);
     self.work_queue.deinit();
 }
@@ -2935,18 +2933,6 @@ pub fn getOrCreateGlobal(self: *MachO, off: u32) !GetOrCreateGlobalResult {
 pub fn getGlobalByName(self: *MachO, name: []const u8) ?Symbol.Index {
     const off = self.string_intern.getOffset(name) orelse return null;
     return self.globals.get(off);
-}
-
-pub fn addUnwindRecord(self: *MachO) !UnwindInfo.Record.Index {
-    const index = @as(UnwindInfo.Record.Index, @intCast(self.unwind_records.items.len));
-    const rec = try self.unwind_records.addOne(self.base.allocator);
-    rec.* = .{};
-    return index;
-}
-
-pub fn getUnwindRecord(self: *MachO, index: UnwindInfo.Record.Index) *UnwindInfo.Record {
-    assert(index < self.unwind_records.items.len);
-    return &self.unwind_records.items[index];
 }
 
 pub fn addThunk(self: *MachO) !Thunk.Index {

@@ -209,8 +209,8 @@ fn calcCompactUnwindSize(macho_file: *MachO, sect_index: u8) void {
 
     for (macho_file.objects.items) |index| {
         const object = macho_file.getFile(index).?.object;
-        for (object.unwind_records.items) |irec| {
-            const rec = macho_file.getUnwindRecord(irec);
+        for (object.unwind_records_indexes.items) |irec| {
+            const rec = object.getUnwindRecord(irec);
             if (!rec.alive) continue;
             size += @sizeOf(macho.compact_unwind_entry);
             nreloc += 1;
@@ -354,8 +354,8 @@ fn writeCompactUnwind(macho_file: *MachO) !void {
     var offset: i32 = 0;
     for (macho_file.objects.items) |index| {
         const object = macho_file.getFile(index).?.object;
-        for (object.unwind_records.items) |irec| {
-            const rec = macho_file.getUnwindRecord(irec);
+        for (object.unwind_records_indexes.items) |irec| {
+            const rec = object.getUnwindRecord(irec);
             if (!rec.alive) continue;
 
             var out: macho.compact_unwind_entry = .{

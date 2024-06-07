@@ -101,13 +101,14 @@ pub fn getUnwindRecords(self: Atom, macho_file: *MachO) []const UnwindInfo.Recor
     const extra = self.getExtra(macho_file).?;
     return switch (self.getFile(macho_file)) {
         .dylib, .internal => unreachable,
-        .object => |x| x.unwind_records.items[extra.unwind_index..][0..extra.unwind_count],
+        .object => |x| x.unwind_records_indexes.items[extra.unwind_index..][0..extra.unwind_count],
     };
 }
 
 pub fn markUnwindRecordsDead(self: Atom, macho_file: *MachO) void {
+    const object = self.getFile(macho_file).object;
     for (self.getUnwindRecords(macho_file)) |cu_index| {
-        const cu = macho_file.getUnwindRecord(cu_index);
+        const cu = object.getUnwindRecord(cu_index);
         cu.alive = false;
 
         if (cu.getFdePtr(macho_file)) |fde| {
@@ -864,6 +865,7 @@ fn format2(
     _ = unused_fmt_string;
     const atom = ctx.atom;
     const macho_file = ctx.macho_file;
+    const file = atom.getFile(macho_file);
     try writer.print("atom({d}) : {s} : @{x} : sect({d}) : align({x}) : size({x})", .{
         atom.atom_index, atom.getName(macho_file),      atom.getAddress(macho_file),
         atom.out_n_sect, atom.alignment.load(.seq_cst), atom.size,
@@ -874,7 +876,7 @@ fn format2(
         try writer.writeAll(" : unwind{ ");
         const extra = atom.getExtra(macho_file).?;
         for (atom.getUnwindRecords(macho_file), extra.unwind_index..) |index, i| {
-            const rec = macho_file.getUnwindRecord(index);
+            const rec = file.object.getUnwindRecord(index);
             try writer.print("{d}", .{index});
             if (!rec.alive) try writer.writeAll("([*])");
             if (i < extra.unwind_index + extra.unwind_count - 1) try writer.writeAll(", ");
