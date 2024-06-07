@@ -919,6 +919,20 @@ pub const Extra = struct {
     literal_index: u32 = 0,
 };
 
+pub const Ref = struct {
+    atom: Atom.Index = 0,
+    file: File.Index = 0,
+
+    pub fn getFile(ref: Ref, macho_file: *MachO) ?File {
+        return macho_file.getFile(ref.file);
+    }
+
+    pub fn getAtom(ref: Ref, macho_file: *MachO) ?*Atom {
+        const file = ref.getFile(macho_file) orelse return null;
+        return file.getAtom(ref.atom);
+    }
+};
+
 const aarch64 = @import("../aarch64.zig");
 const assert = std.debug.assert;
 const dis_x86_64 = @import("dis_x86_64");

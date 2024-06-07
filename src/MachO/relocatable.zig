@@ -1,5 +1,5 @@
 pub fn flush(macho_file: *MachO) !void {
-    try macho_file.dedupLiterals();
+    // try macho_file.dedupLiterals();
     markExports(macho_file);
     claimUnresolved(macho_file);
     try initOutputSections(macho_file);
@@ -85,7 +85,7 @@ fn claimUnresolved(macho_file: *MachO) void {
             if (sym.getFile(macho_file) != null) continue;
 
             sym.value = 0;
-            sym.atom = 0;
+            sym.atom_ref = .{};
             sym.nlist_idx = nlist_idx;
             sym.file = index;
             sym.flags.weak_ref = nlist.weakRef();

@@ -25,7 +25,7 @@ symbols_extra: std.ArrayListUnmanaged(u32) = .{},
 globals: std.AutoHashMapUnmanaged(u32, Symbol.Index) = .{},
 /// This table will be populated after `scanRelocs` has run.
 /// Key is symbol index.
-undefs: std.AutoHashMapUnmanaged(Symbol.Index, std.ArrayListUnmanaged(AtomRef)) = .{},
+undefs: std.AutoHashMapUnmanaged(Symbol.Index, std.ArrayListUnmanaged(Atom.Ref)) = .{},
 undefs_mutex: std.Thread.Mutex = .{},
 /// Global symbols we need to resolve for the link to succeed.
 undefined_symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
@@ -373,7 +373,7 @@ pub fn flush(self: *MachO) !void {
 
     try self.convertTentativeDefinitions();
     try self.createObjcSections();
-    try self.dedupLiterals();
+    // try self.dedupLiterals();
     try self.claimUnresolved();
 
     if (self.options.dead_strip) {
@@ -1254,7 +1254,7 @@ fn claimUnresolved(self: *MachO) error{OutOfMemory}!void {
             };
             if (is_import) {
                 sym.value = 0;
-                sym.atom = 0;
+                sym.atom_ref = .{};
                 sym.nlist_idx = 0;
                 sym.file = self.internal_object_index.?;
                 sym.flags.weak = false;
@@ -1361,7 +1361,7 @@ fn reportUndefs(self: *MachO) !void {
         var inote: usize = 0;
         while (inote < @min(notes.items.len, max_notes)) : (inote += 1) {
             const note = notes.items[inote];
-            const file = note.getFile(self);
+            const file = note.getFile(self).?;
             const atom = note.getAtom(self).?;
             try err.addNote("referenced by {}:{s}", .{ file.fmtPath(), atom.getName(self) });
         }
@@ -1767,7 +1767,7 @@ fn calcSectionSizeWorker(self: *MachO, sect_id: u8) void {
         fn doWork(
             macho_file: *MachO,
             header: *macho.section_64,
-            atoms: []const AtomRef,
+            atoms: []const Atom.Ref,
         ) !void {
             for (atoms) |ref| {
                 const atom = ref.getAtom(macho_file).?;
@@ -2226,13 +2226,13 @@ fn writeSectionsToFile(self: *MachO) !void {
 
 fn writeAtomsWorker(
     self: *MachO,
-    atoms: []const AtomRef,
+    atoms: []const Atom.Ref,
     out: []u8,
 ) void {
     const tracy = trace(@src());
     defer tracy.end();
     const doWork = struct {
-        fn doWork(as: []const AtomRef, buffer: []u8, macho_file: *MachO) !void {
+        fn doWork(as: []const Atom.Ref, buffer: []u8, macho_file: *MachO) !void {
             for (as) |ref| {
                 const atom = ref.getAtom(macho_file).?;
                 const off = atom.value;
@@ -3241,7 +3241,7 @@ pub const LiteralPool = struct {
 const Section = struct {
     header: macho.section_64,
     segment_id: u8,
-    atoms: std.ArrayListUnmanaged(AtomRef) = .{},
+    atoms: std.ArrayListUnmanaged(Atom.Ref) = .{},
     thunks: std.ArrayListUnmanaged(Thunk.Index) = .{},
     out: std.ArrayListUnmanaged(u8) = .{},
 };
@@ -3277,22 +3277,9 @@ pub const Job = union(enum) {
     export_trie_size: void,
     data_in_code_size: void,
     calc_symtab_size: void,
-    write_atoms: struct { []const AtomRef, []u8 },
+    write_atoms: struct { []const Atom.Ref, []u8 },
     write_thunk: struct { *const Thunk, []u8 },
     write_synthetic_section: struct { u8, []u8 },
-};
-
-const AtomRef = struct {
-    atom: Atom.Index,
-    file: File.Index,
-
-    pub fn getFile(ref: AtomRef, macho_file: *MachO) File {
-        return macho_file.getFile(ref.file).?;
-    }
-
-    pub fn getAtom(ref: AtomRef, macho_file: *MachO) ?*Atom {
-        return ref.getFile(macho_file).getAtom(ref.atom);
-    }
 };
 
 pub const base_tag = Zld.Tag.macho;

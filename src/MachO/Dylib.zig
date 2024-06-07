@@ -511,7 +511,7 @@ pub fn resolveSymbols(self: *Dylib, macho_file: *MachO) void {
             .weak = flags.weak,
         }) < global.getSymbolRank(macho_file)) {
             global.value = 0;
-            global.atom = 0;
+            global.atom_ref = .{};
             global.nlist_idx = 0;
             global.file = self.index;
             global.flags.weak = flags.weak;

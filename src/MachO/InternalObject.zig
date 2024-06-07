@@ -41,7 +41,7 @@ pub fn addSymbol(self: *InternalObject, name: [:0]const u8, macho_file: *MachO) 
     const sym = macho_file.getSymbol(gop.index);
     sym.file = self.index;
     sym.value = 0;
-    sym.atom = 0;
+    sym.atom_ref = .{};
     sym.nlist_idx = 0;
     sym.flags = .{ .global = true };
     sym.extra = try macho_file.addSymbolExtra(.{});
@@ -126,7 +126,7 @@ fn addObjcSelrefsSection(self: *InternalObject, methname_atom_index: Atom.Index,
     try self.symbols.append(gpa, sym_index);
     sym.* = .{
         .name = try self.addString(gpa, "lFU"),
-        .atom = atom_index,
+        .atom_ref = .{ .atom = atom_index, .file = self.index },
         .file = self.index,
         .extra = try macho_file.addSymbolExtra(.{}),
     };

@@ -9,10 +9,9 @@ name: u32 = 0,
 /// File where this symbol is defined.
 file: File.Index = 0,
 
-/// Atom containing this symbol if any.
-/// Index of 0 means there is no associated atom with this symbol.
+/// Reference to Atom containing this symbol if any.
 /// Use `getAtom` to get the pointer to the atom.
-atom: Atom.Index = 0,
+atom_ref: Atom.Ref = .{},
 
 /// Assigned output section index for this symbol.
 out_n_sect: u8 = 0,
@@ -67,11 +66,7 @@ pub fn getName(symbol: Symbol, macho_file: *MachO) [:0]const u8 {
 }
 
 pub fn getAtom(symbol: Symbol, macho_file: *MachO) ?*Atom {
-    const file = symbol.getFile(macho_file) orelse return null;
-    return switch (file) {
-        .dylib => null,
-        inline else => |x| x.getAtom(symbol.atom),
-    };
+    return symbol.atom_ref.getAtom(macho_file);
 }
 
 pub fn getOutputSectionIndex(symbol: Symbol, macho_file: *MachO) u8 {

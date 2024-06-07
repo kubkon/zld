@@ -782,14 +782,13 @@ fn initSymbols(self: *Object, macho_file: *MachO) !void {
             .value = nlist.n_value,
             .name = nlist.n_strx,
             .nlist_idx = @intCast(i),
-            .atom = 0,
             .file = self.index,
         };
 
         if (self.getAtom(atom_index)) |atom| {
             assert(!nlist.abs());
             symbol.value -= atom.getInputAddress(macho_file);
-            symbol.atom = atom_index;
+            symbol.atom_ref = .{ .atom = atom_index, .file = self.index };
         }
 
         symbol.flags.abs = nlist.abs();
@@ -1423,7 +1422,7 @@ pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
                 break :blk nlist.n_value - atom.getInputAddress(macho_file);
             } else nlist.n_value;
             symbol.value = value;
-            symbol.atom = atom_index;
+            symbol.atom_ref = .{ .atom = atom_index, .file = self.index };
             symbol.nlist_idx = nlist_idx;
             symbol.file = self.index;
             symbol.flags.weak = nlist.weakDef();
@@ -1544,7 +1543,7 @@ pub fn convertTentativeDefinitions(self: *Object, macho_file: *MachO) !void {
         sect.@"align" = alignment;
 
         sym.value = 0;
-        sym.atom = atom_index;
+        sym.atom_ref = .{ .atom = atom_index, .file = self.index };
         sym.flags.global = true;
         sym.flags.weak = false;
         sym.flags.weak_ref = false;
