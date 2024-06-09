@@ -231,31 +231,31 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
     mem.sort(NlistIdx, nlists.items, self, NlistIdx.lessThan);
 
     if (self.hasSubsections()) {
-        try self.initSubsections(nlists.items, macho_file);
+        try self.initSubsections(gpa, nlists.items);
     } else {
-        try self.initSections(nlists.items, macho_file);
+        try self.initSections(gpa, nlists.items);
     }
 
-    try self.initCstringLiterals(macho_file);
-    try self.initFixedSizeLiterals(macho_file);
-    try self.initPointerLiterals(macho_file);
+    try self.initCstringLiterals(gpa, file, macho_file);
+    try self.initFixedSizeLiterals(gpa, macho_file);
+    try self.initPointerLiterals(gpa, macho_file);
     try self.linkNlistToAtom(macho_file);
 
     try self.sortAtoms(macho_file);
-    try self.initSymbols(macho_file);
-    try self.initSymbolStabs(nlists.items, macho_file);
-    try self.initRelocs(macho_file);
+    try self.initSymbols(gpa, macho_file);
+    try self.initSymbolStabs(gpa, nlists.items, macho_file);
+    try self.initRelocs(file, cpu_arch, macho_file);
 
     if (self.eh_frame_sect_index) |index| {
-        try self.initEhFrameRecords(index, macho_file);
+        try self.initEhFrameRecords(gpa, index, file, macho_file);
     }
 
     if (self.compact_unwind_sect_index) |index| {
-        try self.initUnwindRecords(index, macho_file);
+        try self.initUnwindRecords(gpa, index, file, macho_file);
     }
 
     if (self.hasUnwindRecords() or self.hasEhFrameRecords()) {
-        try self.parseUnwindRecords(macho_file);
+        try self.parseUnwindRecords(gpa, cpu_arch, macho_file);
     }
 
     for (self.getAtoms()) |atom_index| {
@@ -288,10 +288,9 @@ pub fn isPtrLiteral(sect: macho.section_64) bool {
     return sect.type() == macho.S_LITERAL_POINTERS;
 }
 
-fn initSubsections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
+fn initSubsections(self: *Object, allocator: Allocator, nlists: anytype) !void {
     const tracy = trace(@src());
     defer tracy.end();
-    const gpa = macho_file.base.allocator;
     const slice = self.sections.slice();
     for (slice.items(.header), slice.items(.subsections), 0..) |sect, *subsections, n_sect| {
         if (isCstringLiteral(sect)) continue;
@@ -306,18 +305,18 @@ fn initSubsections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
         } else nlists.len;
 
         if (nlist_start == nlist_end or nlists[nlist_start].nlist.n_value > sect.addr) {
-            const name = try std.fmt.allocPrintZ(gpa, "{s}${s}", .{ sect.segName(), sect.sectName() });
-            defer gpa.free(name);
+            const name = try std.fmt.allocPrintZ(allocator, "{s}${s}", .{ sect.segName(), sect.sectName() });
+            defer allocator.free(name);
             const size = if (nlist_start == nlist_end) sect.size else nlists[nlist_start].nlist.n_value - sect.addr;
-            const atom_index = try self.addAtom(gpa, .{
-                .name = try self.addString(gpa, name),
+            const atom_index = try self.addAtom(allocator, .{
+                .name = try self.addString(allocator, name),
                 .n_sect = @intCast(n_sect),
                 .off = 0,
                 .size = size,
                 .alignment = sect.@"align",
             });
-            try self.atoms_indexes.append(gpa, atom_index);
-            try subsections.append(gpa, .{
+            try self.atoms_indexes.append(allocator, atom_index);
+            try subsections.append(allocator, .{
                 .atom = atom_index,
                 .off = 0,
             });
@@ -340,15 +339,15 @@ fn initSubsections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
                 @min(@ctz(nlist.nlist.n_value), sect.@"align")
             else
                 sect.@"align";
-            const atom_index = try self.addAtom(gpa, .{
+            const atom_index = try self.addAtom(allocator, .{
                 .name = nlist.nlist.n_strx,
                 .n_sect = @intCast(n_sect),
                 .off = nlist.nlist.n_value - sect.addr,
                 .size = size,
                 .alignment = alignment,
             });
-            try self.atoms_indexes.append(gpa, atom_index);
-            try subsections.append(gpa, .{
+            try self.atoms_indexes.append(allocator, atom_index);
+            try subsections.append(allocator, .{
                 .atom = atom_index,
                 .off = nlist.nlist.n_value - sect.addr,
             });
@@ -360,32 +359,31 @@ fn initSubsections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
     }
 }
 
-fn initSections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
+fn initSections(self: *Object, allocator: Allocator, nlists: anytype) !void {
     const tracy = trace(@src());
     defer tracy.end();
-    const gpa = macho_file.base.allocator;
     const slice = self.sections.slice();
 
-    try self.atoms.ensureUnusedCapacity(gpa, self.sections.items(.header).len);
-    try self.atoms_indexes.ensureUnusedCapacity(gpa, self.sections.items(.header).len);
+    try self.atoms.ensureUnusedCapacity(allocator, self.sections.items(.header).len);
+    try self.atoms_indexes.ensureUnusedCapacity(allocator, self.sections.items(.header).len);
 
     for (slice.items(.header), 0..) |sect, n_sect| {
         if (isCstringLiteral(sect)) continue;
         if (isFixedSizeLiteral(sect)) continue;
         if (isPtrLiteral(sect)) continue;
 
-        const name = try std.fmt.allocPrintZ(gpa, "{s}${s}", .{ sect.segName(), sect.sectName() });
-        defer gpa.free(name);
+        const name = try std.fmt.allocPrintZ(allocator, "{s}${s}", .{ sect.segName(), sect.sectName() });
+        defer allocator.free(name);
 
-        const atom_index = try self.addAtom(gpa, .{
-            .name = try self.addString(gpa, name),
+        const atom_index = try self.addAtom(allocator, .{
+            .name = try self.addString(allocator, name),
             .n_sect = @intCast(n_sect),
             .off = 0,
             .size = sect.size,
             .alignment = sect.@"align",
         });
-        try self.atoms_indexes.append(gpa, atom_index);
-        try slice.items(.subsections)[n_sect].append(gpa, .{ .atom = atom_index, .off = 0 });
+        try self.atoms_indexes.append(allocator, atom_index);
+        try slice.items(.subsections)[n_sect].append(allocator, .{ .atom = atom_index, .off = 0 });
 
         const nlist_start = for (nlists, 0..) |nlist, i| {
             if (nlist.nlist.n_sect - 1 == n_sect) break i;
@@ -414,18 +412,17 @@ fn initSections(self: *Object, nlists: anytype, macho_file: *MachO) !void {
     }
 }
 
-fn initCstringLiterals(self: *Object, macho_file: *MachO) !void {
+fn initCstringLiterals(self: *Object, allocator: Allocator, file: File.Handle, macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    const gpa = macho_file.base.allocator;
     const slice = self.sections.slice();
 
     for (slice.items(.header), 0..) |sect, n_sect| {
         if (!isCstringLiteral(sect)) continue;
 
-        const data = try self.getSectionData(@intCast(n_sect), macho_file);
-        defer gpa.free(data);
+        const data = try self.getSectionData(allocator, @intCast(n_sect), file);
+        defer allocator.free(data);
 
         var start: u32 = 0;
         while (start < data.len) {
@@ -441,15 +438,15 @@ fn initCstringLiterals(self: *Object, macho_file: *MachO) !void {
             }
             end += 1;
 
-            const atom_index = try self.addAtom(gpa, .{
+            const atom_index = try self.addAtom(allocator, .{
                 .name = 0,
                 .n_sect = @intCast(n_sect),
                 .off = start,
                 .size = end - start,
                 .alignment = sect.@"align",
             });
-            try self.atoms_indexes.append(gpa, atom_index);
-            try slice.items(.subsections)[n_sect].append(gpa, .{
+            try self.atoms_indexes.append(allocator, atom_index);
+            try slice.items(.subsections)[n_sect].append(allocator, .{
                 .atom = atom_index,
                 .off = start,
             });
@@ -459,11 +456,10 @@ fn initCstringLiterals(self: *Object, macho_file: *MachO) !void {
     }
 }
 
-fn initFixedSizeLiterals(self: *Object, macho_file: *MachO) !void {
+fn initFixedSizeLiterals(self: *Object, allocator: Allocator, macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    const gpa = macho_file.base.allocator;
     const slice = self.sections.slice();
 
     for (slice.items(.header), 0..) |sect, n_sect| {
@@ -486,15 +482,15 @@ fn initFixedSizeLiterals(self: *Object, macho_file: *MachO) !void {
 
         var pos: u32 = 0;
         while (pos < sect.size) : (pos += rec_size) {
-            const atom_index = try self.addAtom(gpa, .{
+            const atom_index = try self.addAtom(allocator, .{
                 .name = 0,
                 .n_sect = @intCast(n_sect),
                 .off = pos,
                 .size = rec_size,
                 .alignment = sect.@"align",
             });
-            try self.atoms_indexes.append(gpa, atom_index);
-            try slice.items(.subsections)[n_sect].append(gpa, .{
+            try self.atoms_indexes.append(allocator, atom_index);
+            try slice.items(.subsections)[n_sect].append(allocator, .{
                 .atom = atom_index,
                 .off = pos,
             });
@@ -502,11 +498,10 @@ fn initFixedSizeLiterals(self: *Object, macho_file: *MachO) !void {
     }
 }
 
-fn initPointerLiterals(self: *Object, macho_file: *MachO) !void {
+fn initPointerLiterals(self: *Object, allocator: Allocator, macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    const gpa = macho_file.base.allocator;
     const slice = self.sections.slice();
 
     for (slice.items(.header), 0..) |sect, n_sect| {
@@ -525,15 +520,15 @@ fn initPointerLiterals(self: *Object, macho_file: *MachO) !void {
 
         for (0..num_ptrs) |i| {
             const pos: u32 = @as(u32, @intCast(i)) * rec_size;
-            const atom_index = try self.addAtom(gpa, .{
+            const atom_index = try self.addAtom(allocator, .{
                 .name = 0,
                 .n_sect = @intCast(n_sect),
                 .off = pos,
                 .size = rec_size,
                 .alignment = sect.@"align",
             });
-            try self.atoms_indexes.append(gpa, atom_index);
-            try slice.items(.subsections)[n_sect].append(gpa, .{
+            try self.atoms_indexes.append(allocator, atom_index);
+            try slice.items(.subsections)[n_sect].append(allocator, .{
                 .atom = atom_index,
                 .off = pos,
             });
@@ -546,6 +541,7 @@ pub fn resolveLiterals(self: *Object, lp: *MachO.LiteralPool, macho_file: *MachO
     defer tracy.end();
 
     const gpa = macho_file.base.allocator;
+    const file = macho_file.getFileHandle(self.file_handle);
 
     var buffer = std.ArrayList(u8).init(gpa);
     defer buffer.deinit();
@@ -553,7 +549,7 @@ pub fn resolveLiterals(self: *Object, lp: *MachO.LiteralPool, macho_file: *MachO
     const slice = self.sections.slice();
     for (slice.items(.header), slice.items(.subsections), 0..) |header, subs, n_sect| {
         if (isCstringLiteral(header) or isFixedSizeLiteral(header)) {
-            const data = try self.getSectionData(@intCast(n_sect), macho_file);
+            const data = try self.getSectionData(gpa, @intCast(n_sect), file);
             defer gpa.free(data);
 
             for (subs.items) |sub| {
@@ -755,18 +751,17 @@ fn linkNlistToAtom(self: *Object, macho_file: *MachO) !void {
     }
 }
 
-fn initSymbols(self: *Object, macho_file: *MachO) !void {
+fn initSymbols(self: *Object, allocator: Allocator, macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
-    const gpa = macho_file.base.allocator;
     const slice = self.symtab.slice();
 
-    try self.symbols.ensureUnusedCapacity(gpa, slice.items(.nlist).len);
+    try self.symbols.ensureUnusedCapacity(allocator, slice.items(.nlist).len);
 
     for (slice.items(.nlist), slice.items(.atom), 0..) |nlist, atom_index, i| {
         if (nlist.ext()) {
             const name = self.getString(nlist.n_strx);
-            const off = try macho_file.string_intern.insert(gpa, name);
+            const off = try macho_file.string_intern.insert(macho_file.base.allocator, name);
             const gop = try macho_file.getOrCreateGlobal(off);
             self.symbols.addOneAssumeCapacity().* = gop.index;
             if (nlist.undf() and nlist.weakRef()) {
@@ -802,7 +797,7 @@ fn initSymbols(self: *Object, macho_file: *MachO) !void {
     }
 }
 
-fn initSymbolStabs(self: *Object, nlists: anytype, macho_file: *MachO) !void {
+fn initSymbolStabs(self: *Object, allocator: Allocator, nlists: anytype, macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -828,14 +823,13 @@ fn initSymbolStabs(self: *Object, nlists: anytype, macho_file: *MachO) !void {
 
     if (start == end) return;
 
-    const gpa = macho_file.base.allocator;
     const syms = self.symtab.items(.nlist);
     const sym_lookup = SymbolLookup{ .ctx = self, .entries = nlists };
 
     // We need to cache nlists by name so that we can properly resolve local N_GSYM stabs.
     // What happens is `ld -r` will emit an N_GSYM stab for a symbol that may be either an
     // external or private external.
-    var addr_lookup = std.StringHashMap(u64).init(gpa);
+    var addr_lookup = std.StringHashMap(u64).init(allocator);
     defer addr_lookup.deinit();
     for (syms) |sym| {
         if (sym.sect() and (sym.ext() or sym.pext())) {
@@ -886,10 +880,10 @@ fn initSymbolStabs(self: *Object, nlists: anytype, macho_file: *MachO) !void {
                     return error.ParseFailed;
                 },
             }
-            try sf.stabs.append(gpa, stab);
+            try sf.stabs.append(allocator, stab);
         }
 
-        try self.stab_files.append(gpa, sf);
+        try self.stab_files.append(allocator, sf);
     }
 }
 
@@ -909,10 +903,9 @@ fn sortAtoms(self: *Object, macho_file: *MachO) !void {
     }, Ctx.lessThanAtom);
 }
 
-fn initRelocs(self: *Object, macho_file: *MachO) !void {
+fn initRelocs(self: *Object, file: File.Handle, cpu_arch: std.Target.Cpu.Arch, macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
-    const cpu_arch = macho_file.options.cpu_arch.?;
     const slice = self.sections.slice();
 
     for (slice.items(.header), slice.items(.relocs), 0..) |sect, *out, n_sect| {
@@ -924,8 +917,8 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
             !mem.eql(u8, sect.sectName(), "__compact_unwind")) continue;
 
         switch (cpu_arch) {
-            .x86_64 => try x86_64.parseRelocs(self, @intCast(n_sect), sect, out, macho_file),
-            .aarch64 => try aarch64.parseRelocs(self, @intCast(n_sect), sect, out, macho_file),
+            .x86_64 => try x86_64.parseRelocs(self, @intCast(n_sect), sect, out, file, macho_file),
+            .aarch64 => try aarch64.parseRelocs(self, @intCast(n_sect), sect, out, file, macho_file),
             else => unreachable,
         }
 
@@ -952,20 +945,19 @@ fn initRelocs(self: *Object, macho_file: *MachO) !void {
     }
 }
 
-fn initEhFrameRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
+fn initEhFrameRecords(self: *Object, allocator: Allocator, sect_id: u8, file: File.Handle, macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
-    const gpa = macho_file.base.allocator;
     const nlists = self.symtab.items(.nlist);
     const slice = self.sections.slice();
     const sect = slice.items(.header)[sect_id];
     const relocs = slice.items(.relocs)[sect_id];
 
     // TODO: read into buffer directly
-    const data = try self.getSectionData(sect_id, macho_file);
-    defer gpa.free(data);
+    const data = try self.getSectionData(allocator, sect_id, file);
+    defer allocator.free(data);
 
-    try self.eh_frame_data.ensureTotalCapacityPrecise(gpa, data.len);
+    try self.eh_frame_data.ensureTotalCapacityPrecise(allocator, data.len);
     self.eh_frame_data.appendSliceAssumeCapacity(data);
 
     // Check for non-personality relocs in FDEs and apply them
@@ -998,12 +990,12 @@ fn initEhFrameRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
     var it = eh_frame.Iterator{ .data = self.eh_frame_data.items };
     while (try it.next()) |rec| {
         switch (rec.tag) {
-            .cie => try self.cies.append(gpa, .{
+            .cie => try self.cies.append(allocator, .{
                 .offset = rec.offset,
                 .size = rec.size,
                 .file = self.index,
             }),
-            .fde => try self.fdes.append(gpa, .{
+            .fde => try self.fdes.append(allocator, .{
                 .offset = rec.offset,
                 .size = rec.size,
                 .cie = undefined,
@@ -1048,7 +1040,7 @@ fn initEhFrameRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
     }
 }
 
-fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
+fn initUnwindRecords(self: *Object, allocator: Allocator, sect_id: u8, file: File.Handle, macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -1064,15 +1056,14 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
         }
     };
 
-    const gpa = macho_file.base.allocator;
-    const data = try self.getSectionData(sect_id, macho_file);
-    defer gpa.free(data);
+    const data = try self.getSectionData(allocator, sect_id, file);
+    defer allocator.free(data);
     const nrecs = @divExact(data.len, @sizeOf(macho.compact_unwind_entry));
     const recs = @as([*]align(1) const macho.compact_unwind_entry, @ptrCast(data.ptr))[0..nrecs];
     const sym_lookup = SymbolLookup{ .ctx = self };
 
-    try self.unwind_records.ensureTotalCapacityPrecise(gpa, nrecs);
-    try self.unwind_records_indexes.ensureTotalCapacityPrecise(gpa, nrecs);
+    try self.unwind_records.ensureTotalCapacityPrecise(allocator, nrecs);
+    try self.unwind_records_indexes.ensureTotalCapacityPrecise(allocator, nrecs);
 
     const header = self.sections.items(.header)[sect_id];
     const relocs = self.sections.items(.relocs)[sect_id].items;
@@ -1152,7 +1143,7 @@ fn initUnwindRecords(self: *Object, sect_id: u8, macho_file: *MachO) !void {
     }
 }
 
-fn parseUnwindRecords(self: *Object, macho_file: *MachO) !void {
+fn parseUnwindRecords(self: *Object, allocator: Allocator, cpu_arch: std.Target.Cpu.Arch, macho_file: *MachO) !void {
     // Synthesise missing unwind records.
     // The logic here is as follows:
     // 1. if an atom has unwind info record that is not DWARF, FDE is marked dead
@@ -1162,8 +1153,7 @@ fn parseUnwindRecords(self: *Object, macho_file: *MachO) !void {
 
     const Superposition = struct { atom: Atom.Index, size: u64, cu: ?UnwindInfo.Record.Index = null, fde: ?Fde.Index = null };
 
-    const gpa = macho_file.base.allocator;
-    var superposition = std.AutoArrayHashMap(u64, Superposition).init(gpa);
+    var superposition = std.AutoArrayHashMap(u64, Superposition).init(allocator);
     defer superposition.deinit();
 
     const slice = self.symtab.slice();
@@ -1209,14 +1199,14 @@ fn parseUnwindRecords(self: *Object, macho_file: *MachO) !void {
                 }
             } else {
                 // Synthesise new unwind info record
-                const rec_index = try self.addUnwindRecord(gpa);
+                const rec_index = try self.addUnwindRecord(allocator);
                 const rec = self.getUnwindRecord(rec_index);
-                try self.unwind_records_indexes.append(gpa, rec_index);
+                try self.unwind_records_indexes.append(allocator, rec_index);
                 rec.length = @intCast(meta.size);
                 rec.atom = fde.atom;
                 rec.atom_offset = fde.atom_offset;
                 rec.fde = fde_index;
-                switch (macho_file.options.cpu_arch.?) {
+                switch (cpu_arch) {
                     .x86_64 => rec.enc.setMode(macho.UNWIND_X86_64_MODE.DWARF),
                     .aarch64 => rec.enc.setMode(macho.UNWIND_ARM64_MODE.DWARF),
                     else => unreachable,
@@ -1224,10 +1214,10 @@ fn parseUnwindRecords(self: *Object, macho_file: *MachO) !void {
             }
         } else if (meta.cu == null and meta.fde == null) {
             // Create a null record
-            const rec_index = try self.addUnwindRecord(gpa);
+            const rec_index = try self.addUnwindRecord(allocator);
             const rec = self.getUnwindRecord(rec_index);
             const atom = self.getAtom(meta.atom).?;
-            try self.unwind_records_indexes.append(gpa, rec_index);
+            try self.unwind_records_indexes.append(allocator, rec_index);
             rec.length = @intCast(meta.size);
             rec.atom = meta.atom;
             rec.atom_offset = @intCast(addr - atom.getInputAddress(macho_file));
@@ -1290,11 +1280,12 @@ pub fn parseDebugInfo(self: *Object, macho_file: *MachO) !void {
 
     if (debug_info_index == null or debug_abbrev_index == null) return;
 
-    const debug_info = try self.getSectionData(@intCast(debug_info_index.?), macho_file);
+    const file = macho_file.getFileHandle(self.file_handle);
+    const debug_info = try self.getSectionData(gpa, @intCast(debug_info_index.?), file);
     defer gpa.free(debug_info);
-    const debug_abbrev = try self.getSectionData(@intCast(debug_abbrev_index.?), macho_file);
+    const debug_abbrev = try self.getSectionData(gpa, @intCast(debug_abbrev_index.?), file);
     defer gpa.free(debug_abbrev);
-    const debug_str = if (debug_str_index) |index| try self.getSectionData(@intCast(index), macho_file) else &[0]u8{};
+    const debug_str = if (debug_str_index) |index| try self.getSectionData(gpa, @intCast(index), file) else &[0]u8{};
     defer gpa.free(debug_str);
 
     self.compile_unit = self.findCompileUnit(.{
@@ -1944,14 +1935,12 @@ pub fn writeStabs(self: *const Object, stroff: u32, macho_file: *MachO) void {
     }
 }
 
-pub fn getSectionData(self: *const Object, index: u32, macho_file: *MachO) ![]u8 {
-    const gpa = macho_file.base.allocator;
+pub fn getSectionData(self: *const Object, allocator: Allocator, index: u32, file: File.Handle) ![]u8 {
     const slice = self.sections.slice();
     assert(index < slice.items(.header).len);
     const sect = slice.items(.header)[index];
-    const file = macho_file.getFileHandle(self.file_handle);
-    const buffer = try gpa.alloc(u8, sect.size);
-    errdefer gpa.free(buffer);
+    const buffer = try allocator.alloc(u8, sect.size);
+    errdefer allocator.free(buffer);
     const amt = try file.preadAll(buffer, sect.offset + self.offset);
     if (amt != buffer.len) return error.InputOutput;
     return buffer;
@@ -2375,11 +2364,11 @@ const x86_64 = struct {
         n_sect: u8,
         sect: macho.section_64,
         out: *std.ArrayListUnmanaged(Relocation),
+        file: File.Handle,
         macho_file: *MachO,
     ) !void {
         const gpa = macho_file.base.allocator;
 
-        const file = macho_file.getFileHandle(self.file_handle);
         const relocs_buffer = try gpa.alloc(u8, sect.nreloc * @sizeOf(macho.relocation_info));
         defer gpa.free(relocs_buffer);
         {
@@ -2388,7 +2377,7 @@ const x86_64 = struct {
         }
         const relocs = @as([*]align(1) const macho.relocation_info, @ptrCast(relocs_buffer.ptr))[0..sect.nreloc];
 
-        const code = try self.getSectionData(@intCast(n_sect), macho_file);
+        const code = try self.getSectionData(gpa, @intCast(n_sect), file);
         defer gpa.free(code);
 
         try out.ensureTotalCapacityPrecise(gpa, relocs.len);
@@ -2533,11 +2522,11 @@ const aarch64 = struct {
         n_sect: u8,
         sect: macho.section_64,
         out: *std.ArrayListUnmanaged(Relocation),
+        file: File.Handle,
         macho_file: *MachO,
     ) !void {
         const gpa = macho_file.base.allocator;
 
-        const file = macho_file.getFileHandle(self.file_handle);
         const relocs_buffer = try gpa.alloc(u8, sect.nreloc * @sizeOf(macho.relocation_info));
         defer gpa.free(relocs_buffer);
         {
@@ -2546,7 +2535,7 @@ const aarch64 = struct {
         }
         const relocs = @as([*]align(1) const macho.relocation_info, @ptrCast(relocs_buffer.ptr))[0..sect.nreloc];
 
-        const code = try self.getSectionData(@intCast(n_sect), macho_file);
+        const code = try self.getSectionData(gpa, @intCast(n_sect), file);
         defer gpa.free(code);
 
         try out.ensureTotalCapacityPrecise(gpa, relocs.len);
