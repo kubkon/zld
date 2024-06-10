@@ -120,6 +120,13 @@ pub const File = union(enum) {
         };
     }
 
+    pub fn getSymbol(file: File, sym_index: Symbol.Index) *Symbol {
+        return switch (file) {
+            .internal => @panic("TODO"),
+            inline else => |x| x.getSymbol(sym_index),
+        };
+    }
+
     pub fn initOutputSections(file: File, macho_file: *MachO) !void {
         const tracy = trace(@src());
         defer tracy.end();

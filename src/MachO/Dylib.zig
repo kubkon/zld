@@ -6,7 +6,9 @@ strtab: std.ArrayListUnmanaged(u8) = .{},
 id: ?Id = null,
 ordinal: u16 = 0,
 
-symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
+symbols: std.ArrayListUnmanaged(Symbol) = .{},
+symbols_refs: std.ArrayListUnmanaged(MachO.Ref) = .{},
+symbols_extra: std.ArrayListUnmanaged(u32) = .{},
 dependents: std.ArrayListUnmanaged(Id) = .{},
 rpaths: std.StringArrayHashMapUnmanaged(void) = .{},
 umbrella: File.Index = 0,
@@ -25,6 +27,8 @@ pub fn deinit(self: *Dylib, allocator: Allocator) void {
     self.strtab.deinit(allocator);
     if (self.id) |*id| id.deinit(allocator);
     self.symbols.deinit(allocator);
+    self.symbols_refs.deinit(allocator);
+    self.symbols_extra.deinit(allocator);
     for (self.dependents.items) |*id| {
         id.deinit(allocator);
     }
@@ -489,13 +493,17 @@ fn addObjCExport(
 pub fn initSymbols(self: *Dylib, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
 
-    try self.symbols.ensureTotalCapacityPrecise(gpa, self.exports.items(.name).len);
+    const nsyms = self.exports.items(.name).len;
+    try self.symbols.ensureTotalCapacityPrecise(gpa, nsyms);
+    try self.symbols_refs.ensureTotalCapacityPrecise(gpa, nsyms);
+    try self.symbols_extra.ensureTotalCapacityPrecise(gpa, nsyms * @sizeOf(Symbol.Extra));
 
     for (self.exports.items(.name)) |noff| {
-        const name = self.getString(noff);
-        const off = try macho_file.string_intern.insert(gpa, name);
-        const gop = try macho_file.getOrCreateGlobal(off);
-        self.symbols.addOneAssumeCapacity().* = gop.index;
+        const index = self.addSymbolAssumeCapacity();
+        const symbol = self.getSymbol(index);
+        self.symbols_refs.addOneAssumeCapacity().* = .{ .index = index, .file = self.index };
+        symbol.name = noff;
+        symbol.extra = self.addSymbolExtraAssumeCapacity(.{});
     }
 }
 
@@ -612,6 +620,65 @@ pub fn asFile(self: *Dylib) File {
     return .{ .dylib = self };
 }
 
+fn addSymbol(self: *Dylib, allocator: Allocator) !Symbol.Index {
+    try self.symbols.ensureUnusedCapacity(allocator, 1);
+    return self.addSymbolAssumeCapacity();
+}
+
+fn addSymbolAssumeCapacity(self: *Dylib) Symbol.Index {
+    const index: Symbol.Index = @intCast(self.symbols.items.len);
+    const symbol = self.symbols.addOneAssumeCapacity();
+    symbol.* = .{ .file = self.index };
+    return index;
+}
+
+pub fn getSymbol(self: *Dylib, index: Symbol.Index) *Symbol {
+    assert(index < self.symbols.items.len);
+    return &self.symbols.items[index];
+}
+
+pub fn addSymbolExtra(self: *Dylib, allocator: Allocator, extra: Symbol.Extra) !u32 {
+    const fields = @typeInfo(Symbol.Extra).Struct.fields;
+    try self.symbols_extra.ensureUnusedCapacity(allocator, fields.len);
+    return self.addSymbolExtraAssumeCapacity(extra);
+}
+
+fn addSymbolExtraAssumeCapacity(self: *Dylib, extra: Symbol.Extra) u32 {
+    const index = @as(u32, @intCast(self.symbols_extra.items.len));
+    const fields = @typeInfo(Symbol.Extra).Struct.fields;
+    inline for (fields) |field| {
+        self.symbols_extra.appendAssumeCapacity(switch (field.type) {
+            u32 => @field(extra, field.name),
+            else => @compileError("bad field type"),
+        });
+    }
+    return index;
+}
+
+pub fn getSymbolExtra(self: Dylib, index: u32) Symbol.Extra {
+    const fields = @typeInfo(Symbol.Extra).Struct.fields;
+    var i: usize = index;
+    var result: Symbol.Extra = undefined;
+    inline for (fields) |field| {
+        @field(result, field.name) = switch (field.type) {
+            u32 => self.symbols_extra.items[i],
+            else => @compileError("bad field type"),
+        };
+        i += 1;
+    }
+    return result;
+}
+
+pub fn setSymbolExtra(self: *Dylib, index: u32, extra: Symbol.Extra) void {
+    const fields = @typeInfo(Symbol.Extra).Struct.fields;
+    inline for (fields, 0..) |field, i| {
+        self.symbols_extra.items[index + i] = switch (field.type) {
+            u32 => @field(extra, field.name),
+            else => @compileError("bad field type"),
+        };
+    }
+}
+
 pub fn format(
     self: *Dylib,
     comptime unused_fmt_string: []const u8,
@@ -647,8 +714,8 @@ fn formatSymtab(
     _ = options;
     const dylib = ctx.dylib;
     try writer.writeAll("  globals\n");
-    for (dylib.symbols.items) |index| {
-        const global = ctx.macho_file.getSymbol(index);
+    for (dylib.symbols_refs.items) |ref| {
+        const global = ref.getSymbol(ctx.macho_file);
         try writer.print("    {}\n", .{global.fmt(ctx.macho_file)});
     }
 }

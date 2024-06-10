@@ -55,6 +55,7 @@ pub fn getInputSection(self: Atom, macho_file: *MachO) macho.section_64 {
 }
 
 pub fn getAddress(self: Atom, macho_file: *MachO) u64 {
+    if (self.out_n_sect == 0) return self.value;
     const header = macho_file.sections.items(.header)[self.out_n_sect];
     return header.addr + self.value;
 }

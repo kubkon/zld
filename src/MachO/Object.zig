@@ -770,12 +770,10 @@ fn initSymbols(self: *Object, allocator: Allocator, macho_file: *MachO) !void {
         const index = self.addSymbolAssumeCapacity();
         const symbol = self.getSymbol(index);
         self.symbols_refs.addOneAssumeCapacity().* = .{ .index = index, .file = self.index };
-        symbol.* = .{
-            .value = nlist.n_value,
-            .name = nlist.n_strx,
-            .nlist_idx = @intCast(i),
-            .extra = self.addSymbolExtraAssumeCapacity(.{}),
-        };
+        symbol.value = nlist.n_value;
+        symbol.name = nlist.n_strx;
+        symbol.nlist_idx = @intCast(i);
+        symbol.extra = self.addSymbolExtraAssumeCapacity(.{});
 
         if (nlist.ext()) {
             if (nlist.undf() and nlist.weakRef()) {
@@ -2283,8 +2281,8 @@ fn formatSymtab(
     _ = options;
     const object = ctx.object;
     try writer.writeAll("  symbols\n");
-    for (object.symbols.items) |index| {
-        const sym = ctx.macho_file.getSymbol(index);
+    for (object.symbols_refs.items) |ref| {
+        const sym = ref.getSymbol(ctx.macho_file);
         try writer.print("    {}\n", .{sym.fmt(ctx.macho_file)});
     }
     for (object.stab_files.items) |sf| {
@@ -2398,11 +2396,11 @@ const StabFile = struct {
             const stab, const macho_file = ctx;
             const sym = stab.getSymbol(macho_file).?;
             if (stab.is_func) {
-                try writer.print("func(%{d})", .{stab.symbol.?});
+                try writer.print("func({})", .{stab.ref.?});
             } else if (sym.visibility == .global) {
-                try writer.print("gsym(%{d})", .{stab.symbol.?});
+                try writer.print("gsym({})", .{stab.ref.?});
             } else {
-                try writer.print("stsym(%{d})", .{stab.symbol.?});
+                try writer.print("stsym({})", .{stab.ref.?});
             }
         }
     };

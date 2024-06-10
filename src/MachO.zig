@@ -341,19 +341,22 @@ pub fn flush(self: *MachO) !void {
         };
     }
     if (has_parse_error) return error.ParseFailed;
+
+    for (self.dylibs.items) |index| {
+        self.getFile(index).?.dylib.umbrella = index;
+    }
+
+    try self.parseDependentDylibs(arena, lib_dirs.items, framework_dirs.items);
+
+    for (self.dylibs.items) |index| {
+        const dylib = self.getFile(index).?.dylib;
+        if (!dylib.explicit and !dylib.hoisted) continue;
+        try dylib.initSymbols(self);
+    }
+
+    state_log.debug("{}", .{self.dumpState()});
+
     return error.ToDo;
-
-    //     for (self.dylibs.items) |index| {
-    //         self.getFile(index).?.dylib.umbrella = index;
-    //     }
-
-    //     try self.parseDependentDylibs(arena, lib_dirs.items, framework_dirs.items);
-
-    //     for (self.dylibs.items) |index| {
-    //         const dylib = self.getFile(index).?.dylib;
-    //         if (!dylib.explicit and !dylib.hoisted) continue;
-    //         try dylib.initSymbols(self);
-    //     }
 
     //     {
     //         const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
@@ -3286,9 +3289,19 @@ pub const Ref = struct {
     }
 
     pub fn getSymbol(ref: Ref, macho_file: *MachO) *Symbol {
-        if (macho_file.getFile(ref.file)) |file| return file.getSymbol(ref.index);
-        // TODO synthetic global
-        unreachable;
+        const file = macho_file.getFile(ref.file).?;
+        return file.getSymbol(ref.index);
+    }
+
+    pub fn format(
+        ref: Ref,
+        comptime unused_fmt_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = unused_fmt_string;
+        _ = options;
+        try writer.print("%{d} in file({d})", .{ ref.index, ref.file });
     }
 };
 
