@@ -354,18 +354,17 @@ pub fn flush(self: *MachO) !void {
         try dylib.initSymbols(self);
     }
 
+    {
+        const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
+        self.files.set(index, .{ .internal = .{ .index = index } });
+        self.internal_object_index = index;
+        const object = self.getInternalObject().?;
+        try object.init(gpa);
+        try object.initSymbols(self);
+    }
+
     state_log.debug("{}", .{self.dumpState()});
-
     return error.ToDo;
-
-    //     {
-    //         const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
-    //         self.files.set(index, .{ .internal = .{ .index = index } });
-    //         self.internal_object_index = index;
-    //         try self.getInternalObject().?.init(gpa);
-    //     }
-
-    //     try self.addUndefinedGlobals();
     //     try self.resolveSymbols();
     //     try self.parseDebugInfo();
 
@@ -588,36 +587,6 @@ fn inferCpuArchAndPlatform(self: *MachO, obj: LinkObject, platforms: anytype) !v
         => break Options.Platform.fromLoadCommand(cmd),
         else => {},
     } else null;
-}
-
-fn addUndefinedGlobals(self: *MachO) !void {
-    const gpa = self.base.allocator;
-
-    try self.undefined_symbols.ensureUnusedCapacity(gpa, self.options.force_undefined_symbols.len);
-    for (self.options.force_undefined_symbols) |name| {
-        const off = try self.string_intern.insert(gpa, name);
-        const gop = try self.getOrCreateGlobal(off);
-        self.undefined_symbols.appendAssumeCapacity(gop.index);
-    }
-
-    if (!self.options.dylib) {
-        const name = self.options.entry orelse "_main";
-        const off = try self.string_intern.insert(gpa, name);
-        const gop = try self.getOrCreateGlobal(off);
-        self.entry_index = gop.index;
-    }
-
-    {
-        const off = try self.string_intern.insert(gpa, "dyld_stub_binder");
-        const gop = try self.getOrCreateGlobal(off);
-        self.dyld_stub_binder_index = gop.index;
-    }
-
-    {
-        const off = try self.string_intern.insert(gpa, "_objc_msgSend");
-        const gop = try self.getOrCreateGlobal(off);
-        self.objc_msg_send_index = gop.index;
-    }
 }
 
 fn parsePositional(self: *MachO, obj: LinkObject) !void {
@@ -3274,7 +3243,7 @@ pub const Job = union(enum) {
 };
 
 /// A reference to atom or symbol in an input file.
-/// If file == 0, symbol is a synthetic global.
+/// If file == 0, symbol is an undefined global.
 pub const Ref = struct {
     index: u32,
     file: File.Index,
