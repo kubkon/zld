@@ -11,7 +11,9 @@ sections: std.MultiArrayList(Section) = .{},
 symtab: std.MultiArrayList(Nlist) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
 
-symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
+symbols: std.ArrayListUnmanaged(Symbol) = .{},
+symbols_refs: std.ArrayListUnmanaged(MachO.Ref) = .{},
+symbols_extra: std.ArrayListUnmanaged(u32) = .{},
 atoms: std.ArrayListUnmanaged(Atom) = .{},
 atoms_indexes: std.ArrayListUnmanaged(Atom.Index) = .{},
 atoms_extra: std.ArrayListUnmanaged(u32) = .{},
@@ -44,6 +46,8 @@ pub fn deinit(self: *Object, allocator: Allocator) void {
     self.symtab.deinit(allocator);
     self.strtab.deinit(allocator);
     self.symbols.deinit(allocator);
+    self.symbols_refs.deinit(allocator);
+    self.symbols_extra.deinit(allocator);
     self.atoms.deinit(allocator);
     self.atoms_indexes.deinit(allocator);
     self.atoms_extra.deinit(allocator);
@@ -573,7 +577,7 @@ pub fn resolveLiterals(self: *Object, lp: *MachO.LiteralPool, macho_file: *MachO
                     try self.symbols.append(gpa, sym_index);
                     const sym = macho_file.getSymbol(sym_index);
                     sym.* = .{
-                        .atom_ref = .{ .atom = sub.atom, .file = self.index },
+                        .atom_ref = .{ .index = sub.atom, .file = self.index },
                         .file = self.index,
                         .nlist_idx = nlist_index,
                         .extra = try macho_file.addSymbolExtra(.{}),
@@ -616,7 +620,7 @@ pub fn resolveLiterals(self: *Object, lp: *MachO.LiteralPool, macho_file: *MachO
                     try self.symbols.append(gpa, sym_index);
                     const sym = macho_file.getSymbol(sym_index);
                     sym.* = .{
-                        .atom_ref = .{ .atom = sub.atom, .file = self.index },
+                        .atom_ref = .{ .index = sub.atom, .file = self.index },
                         .file = self.index,
                         .nlist_idx = nlist_index,
                         .extra = try macho_file.addSymbolExtra(.{}),
@@ -650,7 +654,7 @@ pub fn dedupLiterals(self: *Object, lp: MachO.LiteralPool, macho_file: *MachO) v
                 if (target.getLiteralPoolIndex(macho_file)) |lp_index| {
                     const lp_sym = lp.getSymbol(lp_index, macho_file);
                     const lp_atom_ref = lp_sym.atom_ref;
-                    if (target.atom_index != lp_atom_ref.atom or self.index != lp_atom_ref.file) {
+                    if (target.atom_index != lp_atom_ref.index or self.index != lp_atom_ref.file) {
                         const lp_atom = lp_sym.getAtom(macho_file).?;
                         _ = lp_atom.alignment.fetchMax(target.alignment.load(.seq_cst), .seq_cst);
                         _ = target.alive.swap(false, .seq_cst);
@@ -667,7 +671,7 @@ pub fn dedupLiterals(self: *Object, lp: MachO.LiteralPool, macho_file: *MachO) v
                     if (target_atom.getLiteralPoolIndex(macho_file)) |lp_index| {
                         const lp_sym = lp.getSymbol(lp_index, macho_file);
                         const lp_atom_ref = lp_sym.atom_ref;
-                        if (target_atom.atom_index != lp_atom_ref.atom or target_atom.file != lp_atom_ref.file) {
+                        if (target_atom.atom_index != lp_atom_ref.index or target_atom.file != lp_atom_ref.file) {
                             const lp_atom = lp_sym.getAtom(macho_file).?;
                             _ = lp_atom.alignment.fetchMax(target_atom.alignment.load(.seq_cst), .seq_cst);
                             _ = target_atom.alive.swap(false, .seq_cst);
@@ -754,36 +758,36 @@ fn linkNlistToAtom(self: *Object, macho_file: *MachO) !void {
 fn initSymbols(self: *Object, allocator: Allocator, macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
-    const slice = self.symtab.slice();
 
-    try self.symbols.ensureUnusedCapacity(allocator, slice.items(.nlist).len);
+    const slice = self.symtab.slice();
+    const nsyms = slice.items(.nlist).len;
+
+    try self.symbols.ensureTotalCapacityPrecise(allocator, nsyms);
+    try self.symbols_refs.ensureTotalCapacityPrecise(allocator, nsyms);
+    try self.symbols_extra.ensureTotalCapacityPrecise(allocator, nsyms * @sizeOf(Symbol.Extra));
 
     for (slice.items(.nlist), slice.items(.atom), 0..) |nlist, atom_index, i| {
-        if (nlist.ext()) {
-            const name = self.getString(nlist.n_strx);
-            const off = try macho_file.string_intern.insert(macho_file.base.allocator, name);
-            const gop = try macho_file.getOrCreateGlobal(off);
-            self.symbols.addOneAssumeCapacity().* = gop.index;
-            if (nlist.undf() and nlist.weakRef()) {
-                macho_file.getSymbol(gop.index).flags.weak_ref = true;
-            }
-            continue;
-        }
-
-        const index = try macho_file.addSymbol();
-        self.symbols.appendAssumeCapacity(index);
-        const symbol = macho_file.getSymbol(index);
+        const index = self.addSymbolAssumeCapacity();
+        const symbol = self.getSymbol(index);
+        self.symbols_refs.addOneAssumeCapacity().* = .{ .index = index, .file = self.index };
         symbol.* = .{
             .value = nlist.n_value,
             .name = nlist.n_strx,
             .nlist_idx = @intCast(i),
-            .file = self.index,
+            .extra = self.addSymbolExtraAssumeCapacity(.{}),
         };
+
+        if (nlist.ext()) {
+            if (nlist.undf() and nlist.weakRef()) {
+                symbol.flags.weak_ref = true;
+            }
+            continue;
+        }
 
         if (self.getAtom(atom_index)) |atom| {
             assert(!nlist.abs());
             symbol.value -= atom.getInputAddress(macho_file);
-            symbol.atom_ref = .{ .atom = atom_index, .file = self.index };
+            symbol.atom_ref = .{ .index = atom_index, .file = self.index };
         }
 
         symbol.flags.abs = nlist.abs();
@@ -805,10 +809,10 @@ fn initSymbolStabs(self: *Object, allocator: Allocator, nlists: anytype, macho_f
         ctx: *const Object,
         entries: @TypeOf(nlists),
 
-        fn find(fs: @This(), addr: u64) ?Symbol.Index {
+        fn find(fs: @This(), addr: u64) ?MachO.Ref {
             // TODO binary search since we have the list sorted
             for (fs.entries) |nlist| {
-                if (nlist.nlist.n_value == addr) return fs.ctx.symbols.items[nlist.idx];
+                if (nlist.nlist.n_value == addr) return fs.ctx.symbols_refs.items[nlist.idx];
             }
             return null;
         }
@@ -860,17 +864,17 @@ fn initSymbolStabs(self: *Object, allocator: Allocator, nlists: anytype, macho_f
             switch (nlist.n_type) {
                 macho.N_BNSYM => {
                     stab.is_func = true;
-                    stab.symbol = sym_lookup.find(nlist.n_value);
+                    stab.ref = sym_lookup.find(nlist.n_value);
                     // TODO validate
                     i += 3;
                 },
                 macho.N_GSYM => {
                     stab.is_func = false;
-                    stab.symbol = sym_lookup.find(addr_lookup.get(self.getString(nlist.n_strx)).?);
+                    stab.ref = sym_lookup.find(addr_lookup.get(self.getString(nlist.n_strx)).?);
                 },
                 macho.N_STSYM => {
                     stab.is_func = false;
-                    stab.symbol = sym_lookup.find(nlist.n_value);
+                    stab.ref = sym_lookup.find(nlist.n_value);
                 },
                 else => {
                     macho_file.base.fatal("{}: unhandled symbol stab type 0x{x}", .{
@@ -1033,7 +1037,7 @@ fn initEhFrameRecords(self: *Object, allocator: Allocator, sect_id: u8, file: Fi
                     });
                     return error.ParseFailed;
                 };
-                cie.personality = .{ .index = @intCast(rel.target), .offset = rel.offset - cie.offset };
+                cie.personality = .{ .ref = rel.target, .offset = rel.offset - cie.offset };
             },
             else => {},
         }
@@ -1047,10 +1051,10 @@ fn initUnwindRecords(self: *Object, allocator: Allocator, sect_id: u8, file: Fil
     const SymbolLookup = struct {
         ctx: *const Object,
 
-        fn find(fs: @This(), addr: u64) ?Symbol.Index {
-            for (fs.ctx.symbols.items, 0..) |sym_index, i| {
+        fn find(fs: @This(), addr: u64) ?MachO.Ref {
+            for (fs.ctx.symbols_refs.items, 0..) |ref, i| {
                 const nlist = fs.ctx.symtab.items(.nlist)[i];
-                if (nlist.ext() and nlist.n_value == addr) return sym_index;
+                if (nlist.ext() and nlist.n_value == addr) return ref;
             }
             return null;
         }
@@ -2077,6 +2081,65 @@ pub fn setAtomExtra(self: *Object, index: u32, extra: Atom.Extra) void {
     }
 }
 
+fn addSymbol(self: *Object, allocator: Allocator) !Symbol.Index {
+    try self.symbols.ensureUnusedCapacity(allocator, 1);
+    return self.addSymbolAssumeCapacity();
+}
+
+fn addSymbolAssumeCapacity(self: *Object) Symbol.Index {
+    const index: Symbol.Index = @intCast(self.symbols.items.len);
+    const symbol = self.symbols.addOneAssumeCapacity();
+    symbol.* = .{ .file = self.index };
+    return index;
+}
+
+pub fn getSymbol(self: *Object, index: Symbol.Index) *Symbol {
+    assert(index < self.symbols.items.len);
+    return &self.symbols.items[index];
+}
+
+pub fn addSymbolExtra(self: *Object, allocator: Allocator, extra: Symbol.Extra) !u32 {
+    const fields = @typeInfo(Symbol.Extra).Struct.fields;
+    try self.symbols_extra.ensureUnusedCapacity(allocator, fields.len);
+    return self.addSymbolExtraAssumeCapacity(extra);
+}
+
+fn addSymbolExtraAssumeCapacity(self: *Object, extra: Symbol.Extra) u32 {
+    const index = @as(u32, @intCast(self.symbols_extra.items.len));
+    const fields = @typeInfo(Symbol.Extra).Struct.fields;
+    inline for (fields) |field| {
+        self.symbols_extra.appendAssumeCapacity(switch (field.type) {
+            u32 => @field(extra, field.name),
+            else => @compileError("bad field type"),
+        });
+    }
+    return index;
+}
+
+pub fn getSymbolExtra(self: Object, index: u32) Symbol.Extra {
+    const fields = @typeInfo(Symbol.Extra).Struct.fields;
+    var i: usize = index;
+    var result: Symbol.Extra = undefined;
+    inline for (fields) |field| {
+        @field(result, field.name) = switch (field.type) {
+            u32 => self.symbols_extra.items[i],
+            else => @compileError("bad field type"),
+        };
+        i += 1;
+    }
+    return result;
+}
+
+pub fn setSymbolExtra(self: *Object, index: u32, extra: Symbol.Extra) void {
+    const fields = @typeInfo(Symbol.Extra).Struct.fields;
+    inline for (fields, 0..) |field, i| {
+        self.symbols_extra.items[index + i] = switch (field.type) {
+            u32 => @field(extra, field.name),
+            else => @compileError("bad field type"),
+        };
+    }
+}
+
 fn addUnwindRecord(self: *Object, allocator: Allocator) !UnwindInfo.Record.Index {
     try self.unwind_records.ensureUnusedCapacity(allocator, 1);
     return self.addUnwindRecordAssumeCapacity();
@@ -2299,10 +2362,10 @@ const StabFile = struct {
 
     const Stab = struct {
         is_func: bool = true,
-        symbol: ?Symbol.Index = null,
+        ref: ?MachO.Ref = null,
 
         fn getSymbol(stab: Stab, macho_file: *MachO) ?*Symbol {
-            return if (stab.symbol) |s| macho_file.getSymbol(s) else null;
+            return if (stab.ref) |ref| ref.getSymbol(macho_file) else null;
         }
 
         pub fn format(
@@ -2401,7 +2464,7 @@ const x86_64 = struct {
                 else => 0,
             };
 
-            const target = if (rel.r_extern == 0) blk: {
+            const target: MachO.Ref = if (rel.r_extern == 0) blk: {
                 const nsect = rel.r_symbolnum - 1;
                 const taddr: i64 = if (rel.r_pcrel == 1)
                     @as(i64, @intCast(sect.addr)) + rel.r_address + addend + 4
@@ -2414,8 +2477,8 @@ const x86_64 = struct {
                     return error.ParseFailed;
                 };
                 addend = taddr - @as(i64, @intCast(self.getAtom(target).?.getInputAddress(macho_file)));
-                break :blk target;
-            } else self.symbols.items[rel.r_symbolnum];
+                break :blk .{ .index = target, .file = self.index };
+            } else self.symbols_refs.items[rel.r_symbolnum];
 
             const has_subtractor = if (i > 0 and
                 @as(macho.reloc_type_x86_64, @enumFromInt(relocs[i - 1].r_type)) == .X86_64_RELOC_SUBTRACTOR)
@@ -2582,7 +2645,7 @@ const aarch64 = struct {
 
             const rel_type: macho.reloc_type_arm64 = @enumFromInt(rel.r_type);
 
-            const target = if (rel.r_extern == 0) blk: {
+            const target: MachO.Ref = if (rel.r_extern == 0) blk: {
                 const nsect = rel.r_symbolnum - 1;
                 const taddr: i64 = if (rel.r_pcrel == 1)
                     @as(i64, @intCast(sect.addr)) + rel.r_address + addend
@@ -2595,8 +2658,8 @@ const aarch64 = struct {
                     return error.ParseFailed;
                 };
                 addend = taddr - @as(i64, @intCast(self.getAtom(target).?.getInputAddress(macho_file)));
-                break :blk target;
-            } else self.symbols.items[rel.r_symbolnum];
+                break :blk .{ .index = target, .file = self.index };
+            } else self.symbols_refs.items[rel.r_symbolnum];
 
             const has_subtractor = if (i > 0 and
                 @as(macho.reloc_type_arm64, @enumFromInt(relocs[i - 1].r_type)) == .ARM64_RELOC_SUBTRACTOR)

@@ -400,11 +400,11 @@ fn resolveRelocInner(
     const rel_offset = rel.offset - self.off;
     const P = @as(i64, @intCast(self.getAddress(macho_file))) + @as(i64, @intCast(rel_offset));
     const A = rel.addend + rel.getRelocAddend(cpu_arch);
-    const S: i64 = @intCast(rel.getTargetAddress(self, macho_file));
+    const S: i64 = @intCast(rel.getTargetAddress(macho_file));
     const G: i64 = @intCast(rel.getGotTargetAddress(macho_file));
     const TLS = @as(i64, @intCast(macho_file.getTlsAddress()));
     const SUB = if (subtractor) |sub|
-        @as(i64, @intCast(sub.getTargetAddress(self, macho_file)))
+        @as(i64, @intCast(sub.getTargetAddress(macho_file)))
     else
         0;
 
@@ -429,7 +429,7 @@ fn resolveRelocInner(
             rel_offset,
             @tagName(rel.type),
             S + A - SUB,
-            rel.getTargetAtom(self, macho_file).atom_index,
+            rel.getTargetAtom(macho_file).atom_index,
         }),
         .@"extern" => relocs_log.debug("  {x}<+{d}>: {s}: [=> {x}] G({x}) ({s})", .{
             P,
@@ -722,7 +722,7 @@ pub fn writeRelocs(self: Atom, macho_file: *MachO, code: []u8, buffer: *std.Arra
         const r_address: i32 = math.cast(i32, self.value + rel_offset) orelse return error.Overflow;
         const r_symbolnum = r_symbolnum: {
             const r_symbolnum: u32 = switch (rel.tag) {
-                .local => rel.getTargetAtom(self, macho_file).out_n_sect + 1,
+                .local => rel.getTargetAtom(macho_file).out_n_sect + 1,
                 .@"extern" => rel.getTargetSymbol(macho_file).getOutputSymtabIndex(macho_file).?,
             };
             break :r_symbolnum math.cast(u24, r_symbolnum) orelse return error.Overflow;
@@ -730,7 +730,7 @@ pub fn writeRelocs(self: Atom, macho_file: *MachO, code: []u8, buffer: *std.Arra
         const r_extern = rel.tag == .@"extern";
         var addend = rel.addend + rel.getRelocAddend(cpu_arch);
         if (rel.tag == .local) {
-            const target: i64 = @intCast(rel.getTargetAddress(self, macho_file));
+            const target: i64 = @intCast(rel.getTargetAddress(macho_file));
             addend += target;
         }
 
@@ -919,20 +919,6 @@ pub const Extra = struct {
 
     /// Index into LiteralPool entry for this atom.
     literal_index: u32 = 0,
-};
-
-pub const Ref = struct {
-    atom: Atom.Index = 0,
-    file: File.Index = 0,
-
-    pub fn getFile(ref: Ref, macho_file: *MachO) ?File {
-        return macho_file.getFile(ref.file);
-    }
-
-    pub fn getAtom(ref: Ref, macho_file: *MachO) ?*Atom {
-        const file = ref.getFile(macho_file) orelse return null;
-        return file.getAtom(ref.atom);
-    }
 };
 
 const aarch64 = @import("../aarch64.zig");

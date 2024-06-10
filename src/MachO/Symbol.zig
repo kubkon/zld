@@ -11,7 +11,7 @@ file: File.Index = 0,
 
 /// Reference to Atom containing this symbol if any.
 /// Use `getAtom` to get the pointer to the atom.
-atom_ref: Atom.Ref = .{},
+atom_ref: MachO.Ref = .{ .index = 0, .file = 0 },
 
 /// Assigned output section index for this symbol.
 out_n_sect: u8 = 0,
@@ -395,6 +395,16 @@ pub const Extra = struct {
 };
 
 pub const Index = u32;
+
+pub const Ref = struct {
+    index: Symbol.Index,
+    file: File.Index,
+
+    pub fn getSymbol(ref: Ref, macho_file: *MachO) ?*Symbol {
+        const file = ref.getFile(macho_file) orelse return null;
+        return file.getSymbol(ref.index);
+    }
+};
 
 const assert = std.debug.assert;
 const macho = std.macho;

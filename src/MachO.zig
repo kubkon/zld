@@ -25,7 +25,7 @@ symbols_extra: std.ArrayListUnmanaged(u32) = .{},
 globals: std.AutoHashMapUnmanaged(u32, Symbol.Index) = .{},
 /// This table will be populated after `scanRelocs` has run.
 /// Key is symbol index.
-undefs: std.AutoHashMapUnmanaged(Symbol.Index, std.ArrayListUnmanaged(Atom.Ref)) = .{},
+undefs: std.AutoHashMapUnmanaged(Symbol.Index, std.ArrayListUnmanaged(Ref)) = .{},
 undefs_mutex: std.Thread.Mutex = .{},
 /// Global symbols we need to resolve for the link to succeed.
 undefined_symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
@@ -341,105 +341,106 @@ pub fn flush(self: *MachO) !void {
         };
     }
     if (has_parse_error) return error.ParseFailed;
+    return error.ToDo;
 
-    for (self.dylibs.items) |index| {
-        self.getFile(index).?.dylib.umbrella = index;
-    }
+    //     for (self.dylibs.items) |index| {
+    //         self.getFile(index).?.dylib.umbrella = index;
+    //     }
 
-    try self.parseDependentDylibs(arena, lib_dirs.items, framework_dirs.items);
+    //     try self.parseDependentDylibs(arena, lib_dirs.items, framework_dirs.items);
 
-    for (self.dylibs.items) |index| {
-        const dylib = self.getFile(index).?.dylib;
-        if (!dylib.explicit and !dylib.hoisted) continue;
-        try dylib.initSymbols(self);
-    }
+    //     for (self.dylibs.items) |index| {
+    //         const dylib = self.getFile(index).?.dylib;
+    //         if (!dylib.explicit and !dylib.hoisted) continue;
+    //         try dylib.initSymbols(self);
+    //     }
 
-    {
-        const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
-        self.files.set(index, .{ .internal = .{ .index = index } });
-        self.internal_object_index = index;
-        try self.getInternalObject().?.init(gpa);
-    }
+    //     {
+    //         const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
+    //         self.files.set(index, .{ .internal = .{ .index = index } });
+    //         self.internal_object_index = index;
+    //         try self.getInternalObject().?.init(gpa);
+    //     }
 
-    try self.addUndefinedGlobals();
-    try self.resolveSymbols();
-    try self.parseDebugInfo();
+    //     try self.addUndefinedGlobals();
+    //     try self.resolveSymbols();
+    //     try self.parseDebugInfo();
 
-    if (self.options.relocatable) return relocatable.flush(self);
+    //     if (self.options.relocatable) return relocatable.flush(self);
 
-    try self.resolveSyntheticSymbols();
+    //     try self.resolveSyntheticSymbols();
 
-    try self.convertTentativeDefinitions();
-    try self.createObjcSections();
-    try self.dedupLiterals();
-    try self.claimUnresolved();
+    //     try self.convertTentativeDefinitions();
+    //     try self.createObjcSections();
+    //     try self.dedupLiterals();
+    //     try self.claimUnresolved();
 
-    if (self.options.dead_strip) {
-        try dead_strip.gcAtoms(self);
-    }
+    //     if (self.options.dead_strip) {
+    //         try dead_strip.gcAtoms(self);
+    //     }
 
-    self.markImportsAndExports();
-    self.deadStripDylibs();
+    //     self.markImportsAndExports();
+    //     self.deadStripDylibs();
 
-    for (self.dylibs.items, 1..) |index, ord| {
-        const dylib = self.getFile(index).?.dylib;
-        dylib.ordinal = @intCast(ord);
-    }
+    //     for (self.dylibs.items, 1..) |index, ord| {
+    //         const dylib = self.getFile(index).?.dylib;
+    //         dylib.ordinal = @intCast(ord);
+    //     }
 
-    try self.scanRelocs();
+    //     try self.scanRelocs();
 
-    try self.initOutputSections();
-    try self.initSyntheticSections();
-    try self.sortSections();
-    try self.addAtomsToSections();
-    try self.calcSectionSizes();
-    try self.performAllTheWork();
-    try self.generateUnwindInfo();
+    //     try self.initOutputSections();
+    //     try self.initSyntheticSections();
+    //     try self.sortSections();
+    //     try self.addAtomsToSections();
+    //     try self.calcSectionSizes();
+    //     try self.performAllTheWork();
+    //     try self.generateUnwindInfo();
 
-    try self.initSegments();
-    try self.allocateSections();
-    self.allocateSegments();
-    self.allocateSyntheticSymbols();
+    //     try self.initSegments();
+    //     try self.allocateSections();
+    //     self.allocateSegments();
+    //     self.allocateSyntheticSymbols();
 
-    state_log.debug("{}", .{self.dumpState()});
+    //     state_log.debug("{}", .{self.dumpState()});
 
-    try self.updateLinkeditSizes();
-    try self.writeSections();
-    try self.writeSyntheticSections();
-    try self.performAllTheWork();
-    try self.writeSectionsToFile();
-    try self.allocateLinkeditSegment();
-    try self.writeLinkeditSectionsToFile();
+    //     try self.updateLinkeditSizes();
+    //     try self.writeSections();
+    //     try self.writeSyntheticSections();
+    //     try self.performAllTheWork();
+    //     try self.writeSectionsToFile();
+    //     try self.allocateLinkeditSegment();
+    //     try self.writeLinkeditSectionsToFile();
 
-    var codesig: ?CodeSignature = if (self.requiresCodeSig()) blk: {
-        // Preallocate space for the code signature.
-        // We need to do this at this stage so that we have the load commands with proper values
-        // written out to the file.
-        // The most important here is to have the correct vm and filesize of the __LINKEDIT segment
-        // where the code signature goes into.
-        var codesig = CodeSignature.init(self.getPageSize());
-        codesig.code_directory.ident = std.fs.path.basename(self.options.emit.sub_path);
-        if (self.options.entitlements) |path| try codesig.addEntitlements(gpa, path);
-        try self.writeCodeSignaturePadding(&codesig);
-        break :blk codesig;
-    } else null;
-    defer if (codesig) |*csig| csig.deinit(gpa);
+    //     var codesig: ?CodeSignature = if (self.requiresCodeSig()) blk: {
+    //         // Preallocate space for the code signature.
+    //         // We need to do this at this stage so that we have the load commands with proper values
+    //         // written out to the file.
+    //         // The most important here is to have the correct vm and filesize of the __LINKEDIT segment
+    //         // where the code signature goes into.
+    //         var codesig = CodeSignature.init(self.getPageSize());
+    //         codesig.code_directory.ident = std.fs.path.basename(self.options.emit.sub_path);
+    //         if (self.options.entitlements) |path| try codesig.addEntitlements(gpa, path);
+    //         try self.writeCodeSignaturePadding(&codesig);
+    //         break :blk codesig;
+    //     } else null;
+    //     defer if (codesig) |*csig| csig.deinit(gpa);
 
-    self.getLinkeditSegment().vmsize = mem.alignForward(
-        u64,
-        self.getLinkeditSegment().filesize,
-        self.getPageSize(),
-    );
+    //     self.getLinkeditSegment().vmsize = mem.alignForward(
+    //         u64,
+    //         self.getLinkeditSegment().filesize,
+    //         self.getPageSize(),
+    //     );
 
-    const ncmds, const sizeofcmds, const uuid_cmd_offset = try self.writeLoadCommands();
-    try self.writeHeader(ncmds, sizeofcmds);
-    try self.writeUuid(uuid_cmd_offset, self.requiresCodeSig());
+    //     const ncmds, const sizeofcmds, const uuid_cmd_offset = try self.writeLoadCommands();
+    //     try self.writeHeader(ncmds, sizeofcmds);
+    //     try self.writeUuid(uuid_cmd_offset, self.requiresCodeSig());
 
-    if (codesig) |*csig| {
-        try self.writeCodeSignature(csig); // code signing always comes last
-        const emit = self.options.emit;
-        try invalidateKernelCache(emit.directory, emit.sub_path);
-    }
+    //     if (codesig) |*csig| {
+    //         try self.writeCodeSignature(csig); // code signing always comes last
+    //         const emit = self.options.emit;
+    //         try invalidateKernelCache(emit.directory, emit.sub_path);
+    //     }
 }
 
 fn resolveSearchDir(
@@ -1765,7 +1766,7 @@ fn calcSectionSizeWorker(self: *MachO, sect_id: u8) void {
         fn doWork(
             macho_file: *MachO,
             header: *macho.section_64,
-            atoms: []const Atom.Ref,
+            atoms: []const Ref,
         ) !void {
             for (atoms) |ref| {
                 const atom = ref.getAtom(macho_file).?;
@@ -2224,13 +2225,13 @@ fn writeSectionsToFile(self: *MachO) !void {
 
 fn writeAtomsWorker(
     self: *MachO,
-    atoms: []const Atom.Ref,
+    atoms: []const Ref,
     out: []u8,
 ) void {
     const tracy = trace(@src());
     defer tracy.end();
     const doWork = struct {
-        fn doWork(as: []const Atom.Ref, buffer: []u8, macho_file: *MachO) !void {
+        fn doWork(as: []const Ref, buffer: []u8, macho_file: *MachO) !void {
             for (as) |ref| {
                 const atom = ref.getAtom(macho_file).?;
                 const off = atom.value;
@@ -3228,7 +3229,7 @@ pub const LiteralPool = struct {
 const Section = struct {
     header: macho.section_64,
     segment_id: u8,
-    atoms: std.ArrayListUnmanaged(Atom.Ref) = .{},
+    atoms: std.ArrayListUnmanaged(Ref) = .{},
     thunks: std.ArrayListUnmanaged(Thunk.Index) = .{},
     out: std.ArrayListUnmanaged(u8) = .{},
 };
@@ -3264,9 +3265,31 @@ pub const Job = union(enum) {
     export_trie_size: void,
     data_in_code_size: void,
     calc_symtab_size: void,
-    write_atoms: struct { []const Atom.Ref, []u8 },
+    write_atoms: struct { []const Ref, []u8 },
     write_thunk: struct { *const Thunk, []u8 },
     write_synthetic_section: struct { u8, []u8 },
+};
+
+/// A reference to atom or symbol in an input file.
+/// If file == 0, symbol is a synthetic global.
+pub const Ref = struct {
+    index: u32,
+    file: File.Index,
+
+    pub fn eql(ref: Ref, other: Ref) bool {
+        return ref.index == other.index and ref.file == other.file;
+    }
+
+    pub fn getAtom(ref: Ref, macho_file: *MachO) ?*Atom {
+        const file = macho_file.getFile(ref.file) orelse return null;
+        return file.getAtom(ref.index);
+    }
+
+    pub fn getSymbol(ref: Ref, macho_file: *MachO) *Symbol {
+        if (macho_file.getFile(ref.file)) |file| return file.getSymbol(ref.index);
+        // TODO synthetic global
+        unreachable;
+    }
 };
 
 pub const base_tag = Zld.Tag.macho;

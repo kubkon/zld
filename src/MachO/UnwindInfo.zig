@@ -4,7 +4,7 @@ records: std.ArrayListUnmanaged(Record.Ref) = .{},
 
 /// List of all personalities referenced by either unwind info entries
 /// or __eh_frame entries.
-personalities: [max_personalities]Symbol.Index = undefined,
+personalities: [max_personalities]MachO.Ref = undefined,
 personalities_count: u2 = 0,
 
 /// List of common encodings sorted in descending order with the most common first.
@@ -294,8 +294,8 @@ pub fn write(info: UnwindInfo, macho_file: *MachO, buffer: []u8) !void {
 
     try writer.writeAll(mem.sliceAsBytes(info.common_encodings[0..info.common_encodings_count]));
 
-    for (info.personalities[0..info.personalities_count]) |sym_index| {
-        const sym = macho_file.getSymbol(sym_index);
+    for (info.personalities[0..info.personalities_count]) |ref| {
+        const sym = ref.getSymbol(macho_file);
         try writer.writeInt(u32, @intCast(sym.getGotAddress(macho_file) - seg.vmaddr), .little);
     }
 
@@ -345,13 +345,13 @@ pub fn write(info: UnwindInfo, macho_file: *MachO, buffer: []u8) !void {
     }
 }
 
-fn getOrPutPersonalityFunction(info: *UnwindInfo, sym_index: Symbol.Index) error{TooManyPersonalities}!u2 {
+fn getOrPutPersonalityFunction(info: *UnwindInfo, ref: MachO.Ref) error{TooManyPersonalities}!u2 {
     comptime var index: u2 = 0;
     inline while (index < max_personalities) : (index += 1) {
-        if (info.personalities[index] == sym_index) {
+        if (info.personalities[index].eql(ref)) {
             return index;
         } else if (index == info.personalities_count) {
-            info.personalities[index] = sym_index;
+            info.personalities[index] = ref;
             info.personalities_count += 1;
             return index;
         }
@@ -456,7 +456,7 @@ pub const Record = struct {
     atom_offset: u32 = 0,
     lsda: Atom.Index = 0,
     lsda_offset: u32 = 0,
-    personality: ?Symbol.Index = null, // TODO make this zero-is-null
+    personality: ?MachO.Ref = null, // TODO make this zero-is-null
     fde: Fde.Index = 0, // TODO actually make FDE at 0 an invalid FDE
     file: File.Index = 0,
     alive: bool = true,
@@ -475,7 +475,7 @@ pub const Record = struct {
 
     pub fn getPersonality(rec: Record, macho_file: *MachO) ?*Symbol {
         const personality = rec.personality orelse return null;
-        return macho_file.getSymbol(personality);
+        return personality.getSymbol(macho_file);
     }
 
     pub fn getFde(rec: Record, macho_file: *MachO) ?Fde {
@@ -543,6 +543,7 @@ pub const Record = struct {
 
     pub const Index = u32;
 
+    // TODO convert into MachO.Ref
     pub const Ref = struct {
         record: Index,
         file: File.Index,

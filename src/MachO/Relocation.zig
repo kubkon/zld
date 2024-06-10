@@ -1,6 +1,6 @@
 tag: Tag,
 offset: u32,
-target: u32,
+target: MachO.Ref,
 addend: i64,
 type: Type,
 meta: packed struct {
@@ -13,17 +13,17 @@ mutex: std.Thread.Mutex = .{},
 
 pub fn getTargetSymbol(rel: Relocation, macho_file: *MachO) *Symbol {
     assert(rel.tag == .@"extern");
-    return macho_file.getSymbol(rel.target);
+    return rel.ref.getSymbol(macho_file);
 }
 
-pub fn getTargetAtom(rel: Relocation, atom: Atom, macho_file: *MachO) *Atom {
+pub fn getTargetAtom(rel: Relocation, macho_file: *MachO) *Atom {
     assert(rel.tag == .local);
-    return atom.getFile(macho_file).getAtom(rel.target).?;
+    return rel.ref.getAtom(macho_file).?;
 }
 
-pub fn getTargetAddress(rel: Relocation, atom: Atom, macho_file: *MachO) u64 {
+pub fn getTargetAddress(rel: Relocation, macho_file: *MachO) u64 {
     return switch (rel.tag) {
-        .local => rel.getTargetAtom(atom, macho_file).getAddress(macho_file),
+        .local => rel.getTargetAtom(macho_file).getAddress(macho_file),
         .@"extern" => rel.getTargetSymbol(macho_file).getAddress(.{}, macho_file),
     };
 }
