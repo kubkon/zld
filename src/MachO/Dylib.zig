@@ -498,12 +498,15 @@ pub fn initSymbols(self: *Dylib, macho_file: *MachO) !void {
     try self.symbols_refs.ensureTotalCapacityPrecise(gpa, nsyms);
     try self.symbols_extra.ensureTotalCapacityPrecise(gpa, nsyms * @sizeOf(Symbol.Extra));
 
-    for (self.exports.items(.name)) |noff| {
+    for (self.exports.items(.name), self.exports.items(.flags)) |noff, flags| {
         const index = self.addSymbolAssumeCapacity();
         const symbol = self.getSymbol(index);
         self.symbols_refs.addOneAssumeCapacity().* = .{ .index = index, .file = self.index };
         symbol.name = noff;
         symbol.extra = self.addSymbolExtraAssumeCapacity(.{});
+        symbol.flags.weak = flags.weak;
+        symbol.flags.tlv = flags.tlv;
+        symbol.visibility = .global;
     }
 }
 
@@ -513,13 +516,13 @@ pub fn resolveSymbols(self: *Dylib, macho_file: *MachO) void {
 
     if (!self.explicit and !self.hoisted) return;
 
-    for (self.symbols.items, self.exports.items(.flags)) |index, flags| {
-        const global = macho_file.getSymbol(index);
+    for (self.symbols_refs.items, self.exports.items(.flags)) |ref, flags| {
+        const global = ref.getSymbol(macho_file);
         if (self.asFile().getSymbolRank(.{
             .weak = flags.weak,
         }) < global.getSymbolRank(macho_file)) {
             global.value = 0;
-            global.atom_ref = .{};
+            global.atom_ref = .{ .index = 0, .file = 0 };
             global.nlist_idx = 0;
             global.file = self.index;
             global.flags.weak = flags.weak;

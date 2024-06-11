@@ -23,6 +23,7 @@ sections: std.MultiArrayList(Section) = .{},
 symbols: std.ArrayListUnmanaged(Symbol) = .{},
 symbols_extra: std.ArrayListUnmanaged(u32) = .{},
 globals: std.AutoHashMapUnmanaged(u32, Symbol.Index) = .{},
+globals_names: StringTable = .{},
 /// This table will be populated after `scanRelocs` has run.
 /// Key is symbol index.
 undefs: std.AutoHashMapUnmanaged(Symbol.Index, std.ArrayListUnmanaged(Ref)) = .{},
@@ -123,6 +124,7 @@ pub fn deinit(self: *MachO) void {
     self.symbols.deinit(gpa);
     self.symbols_extra.deinit(gpa);
     self.globals.deinit(gpa);
+    self.globals_names.deinit(gpa);
     self.undefs.deinit(gpa);
     self.undefined_symbols.deinit(gpa);
     self.string_intern.deinit(gpa);
@@ -363,9 +365,10 @@ pub fn flush(self: *MachO) !void {
         try object.initSymbols(self);
     }
 
+    try self.resolveSymbols();
+
     state_log.debug("{}", .{self.dumpState()});
     return error.ToDo;
-    //     try self.resolveSymbols();
     //     try self.parseDebugInfo();
 
     //     if (self.options.relocatable) return relocatable.flush(self);
@@ -952,32 +955,24 @@ pub fn resolveSymbols(self: *MachO) !void {
     // Mark live objects.
     self.markLive();
 
-    // Reset state of all globals after marking live objects.
-    for (self.objects.items) |index| self.getFile(index).?.resetGlobals(self);
-    for (self.dylibs.items) |index| self.getFile(index).?.resetGlobals(self);
+    // // Reset state of all globals after marking live objects.
+    // for (self.objects.items) |index| self.getFile(index).?.resetGlobals(self);
+    // for (self.dylibs.items) |index| self.getFile(index).?.resetGlobals(self);
 
-    // Prune dead objects.
-    var i: usize = 0;
-    while (i < self.objects.items.len) {
-        const index = self.objects.items[i];
-        if (!self.getFile(index).?.object.alive) {
-            _ = self.objects.orderedRemove(i);
-            self.files.items(.data)[index].object.deinit(self.base.allocator);
-            self.files.set(index, .null);
-        } else i += 1;
-    }
+    // // Prune dead objects.
+    // var i: usize = 0;
+    // while (i < self.objects.items.len) {
+    //     const index = self.objects.items[i];
+    //     if (!self.getFile(index).?.object.alive) {
+    //         _ = self.objects.orderedRemove(i);
+    //         self.files.items(.data)[index].object.deinit(self.base.allocator);
+    //         self.files.set(index, .null);
+    //     } else i += 1;
+    // }
 
-    // Re-resolve the symbols.
-    for (self.objects.items) |index| self.getFile(index).?.resolveSymbols(self);
-    for (self.dylibs.items) |index| self.getFile(index).?.resolveSymbols(self);
-
-    // Create symbols extra for resolved object files.
-    for (self.objects.items) |index| {
-        try self.getFile(index).?.addSymbolExtra(self);
-    }
-    for (self.dylibs.items) |index| {
-        try self.getFile(index).?.addSymbolExtra(self);
-    }
+    // // Re-resolve the symbols.
+    // for (self.objects.items) |index| self.getFile(index).?.resolveSymbols(self);
+    // for (self.dylibs.items) |index| self.getFile(index).?.resolveSymbols(self);
 }
 
 fn markLive(self: *MachO) void {
