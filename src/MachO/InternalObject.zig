@@ -9,6 +9,7 @@ strtab: std.ArrayListUnmanaged(u8) = .{},
 symbols: std.ArrayListUnmanaged(Symbol) = .{},
 symbols_refs: std.ArrayListUnmanaged(MachO.Ref) = .{},
 symbols_extra: std.ArrayListUnmanaged(u32) = .{},
+globals: std.ArrayListUnmanaged(u32) = .{},
 
 objc_methnames: std.ArrayListUnmanaged(u8) = .{},
 objc_selrefs: [@sizeOf(u64)]u8 = [_]u8{0} ** @sizeOf(u64),
@@ -29,6 +30,7 @@ pub fn deinit(self: *InternalObject, allocator: Allocator) void {
     self.symbols.deinit(allocator);
     self.symbols_refs.deinit(allocator);
     self.symbols_extra.deinit(allocator);
+    self.globals.deinit(allocator);
     self.objc_methnames.deinit(allocator);
 }
 
@@ -51,6 +53,9 @@ pub fn initSymbols(self: *InternalObject, macho_file: *MachO) !void {
     try self.symbols_refs.ensureTotalCapacityPrecise(gpa, nsyms);
     try self.symbols_extra.ensureTotalCapacityPrecise(gpa, nsyms * @sizeOf(Symbol.Extra));
     try self.symtab.ensureTotalCapacityPrecise(gpa, nsyms);
+    try self.globals.ensureTotalCapacityPrecise(gpa, nsyms);
+    self.globals.resize(gpa, nsyms) catch unreachable;
+    @memset(self.globals.items, 0);
 
     const addUndef = struct {
         fn addUndef(obj: *InternalObject, name: u32) void {
@@ -77,8 +82,43 @@ pub fn initSymbols(self: *InternalObject, macho_file: *MachO) !void {
         addUndef(self, try self.addString(gpa, name));
     }
 
+    addUndef(self, try self.addString(gpa, macho_file.options.entry orelse "_main"));
     addUndef(self, try self.addString(gpa, "dyld_stub_binder"));
     addUndef(self, try self.addString(gpa, "_objc_msgSend"));
+}
+
+pub fn resolveSymbols(self: *InternalObject, resolver: *MachO.SymbolResolver, macho_file: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    const gpa = macho_file.base.allocator;
+
+    for (self.symbols_refs.items, 0..) |ref, i| {
+        const global = &self.globals.items[i];
+        const symbol = ref.getSymbol(macho_file);
+        const name = symbol.getName(macho_file);
+        const gop = try resolver.getOrPut(gpa, name);
+        if (!gop.found_existing) {
+            gop.ref_ptr.* = ref;
+        }
+        global.* = gop.off;
+
+        if (self.asFile().getSymbolRank(.{
+            .archive = false,
+            .weak = false,
+            .tentative = false,
+        }) < gop.ref_ptr.getSymbol(macho_file).getSymbolRank(macho_file)) {
+            gop.ref_ptr.* = ref;
+        }
+    }
+}
+
+pub fn setGlobals(self: *InternalObject, resolver: MachO.SymbolResolver) void {
+    for (self.symbols_refs.items, self.globals.items) |*ref, off| {
+        if (resolver.refs.get(off)) |pref| {
+            ref.* = pref;
+        }
+    }
 }
 
 /// Creates a fake input sections __TEXT,__objc_methname and __DATA,__objc_selrefs.

@@ -937,6 +937,32 @@ fn parseDependentDylibs(
     }
 }
 
+pub const SymbolResolver = struct {
+    refs: std.AutoHashMapUnmanaged(u32, Ref) = .{},
+    strtab: StringTable = .{},
+
+    const Result = struct {
+        found_existing: bool,
+        off: u32,
+        ref_ptr: *Ref,
+    };
+
+    pub fn deinit(resolver: *SymbolResolver, allocator: Allocator) void {
+        resolver.refs.deinit(allocator);
+        resolver.strtab.deinit(allocator);
+    }
+
+    pub fn getOrPut(resolver: *SymbolResolver, allocator: Allocator, name: []const u8) !Result {
+        const off = try resolver.strtab.insert(allocator, name);
+        const gop = try resolver.refs.getOrPut(allocator, off);
+        return .{
+            .found_existing = gop.found_existing,
+            .off = off,
+            .ref_ptr = gop.value_ptr,
+        };
+    }
+};
+
 /// When resolving symbols, we approach the problem similarly to `mold`.
 /// 1. Resolve symbols across all objects (including those preemptively extracted archives).
 /// 2. Resolve symbols across all shared objects.
@@ -948,12 +974,22 @@ pub fn resolveSymbols(self: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
+    const gpa = self.base.allocator;
+    var resolver = SymbolResolver{};
+    defer resolver.deinit(gpa);
+    try resolver.strtab.buffer.append(gpa, 0);
+
     // Resolve symbols on the set of all objects and shared objects (even if some are unneeded).
-    for (self.objects.items) |index| self.getFile(index).?.resolveSymbols(self);
-    for (self.dylibs.items) |index| self.getFile(index).?.resolveSymbols(self);
+    for (self.objects.items) |index| try self.getFile(index).?.resolveSymbols(&resolver, self);
+    for (self.dylibs.items) |index| try self.getFile(index).?.resolveSymbols(&resolver, self);
+    if (self.getInternalObject()) |obj| try obj.resolveSymbols(&resolver, self);
+
+    for (self.objects.items) |index| self.getFile(index).?.setGlobals(resolver);
+    for (self.dylibs.items) |index| self.getFile(index).?.setGlobals(resolver);
+    if (self.getInternalObject()) |obj| obj.setGlobals(resolver);
 
     // Mark live objects.
-    self.markLive();
+    // self.markLive();
 
     // // Reset state of all globals after marking live objects.
     // for (self.objects.items) |index| self.getFile(index).?.resetGlobals(self);

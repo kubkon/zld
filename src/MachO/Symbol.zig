@@ -80,8 +80,9 @@ pub fn getFile(symbol: Symbol, macho_file: *MachO) ?File {
 pub fn getNlist(symbol: Symbol, macho_file: *MachO) macho.nlist_64 {
     const file = symbol.getFile(macho_file).?;
     return switch (file) {
+        .dylib => unreachable,
         .object => |x| x.symtab.items(.nlist)[symbol.nlist_idx],
-        else => unreachable,
+        .internal => |x| x.symtab.items[symbol.nlist_idx],
     };
 }
 

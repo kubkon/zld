@@ -9,6 +9,7 @@ ordinal: u16 = 0,
 symbols: std.ArrayListUnmanaged(Symbol) = .{},
 symbols_refs: std.ArrayListUnmanaged(MachO.Ref) = .{},
 symbols_extra: std.ArrayListUnmanaged(u32) = .{},
+globals: std.ArrayListUnmanaged(u32) = .{},
 dependents: std.ArrayListUnmanaged(Id) = .{},
 rpaths: std.StringArrayHashMapUnmanaged(void) = .{},
 umbrella: File.Index = 0,
@@ -29,6 +30,7 @@ pub fn deinit(self: *Dylib, allocator: Allocator) void {
     self.symbols.deinit(allocator);
     self.symbols_refs.deinit(allocator);
     self.symbols_extra.deinit(allocator);
+    self.globals.deinit(allocator);
     for (self.dependents.items) |*id| {
         id.deinit(allocator);
     }
@@ -497,6 +499,9 @@ pub fn initSymbols(self: *Dylib, macho_file: *MachO) !void {
     try self.symbols.ensureTotalCapacityPrecise(gpa, nsyms);
     try self.symbols_refs.ensureTotalCapacityPrecise(gpa, nsyms);
     try self.symbols_extra.ensureTotalCapacityPrecise(gpa, nsyms * @sizeOf(Symbol.Extra));
+    try self.globals.ensureTotalCapacityPrecise(gpa, nsyms);
+    self.globals.resize(gpa, nsyms) catch unreachable;
+    @memset(self.globals.items, 0);
 
     for (self.exports.items(.name), self.exports.items(.flags)) |noff, flags| {
         const index = self.addSymbolAssumeCapacity();
@@ -510,26 +515,35 @@ pub fn initSymbols(self: *Dylib, macho_file: *MachO) !void {
     }
 }
 
-pub fn resolveSymbols(self: *Dylib, macho_file: *MachO) void {
+pub fn resolveSymbols(self: *Dylib, resolver: *MachO.SymbolResolver, macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
     if (!self.explicit and !self.hoisted) return;
 
-    for (self.symbols_refs.items, self.exports.items(.flags)) |ref, flags| {
-        const global = ref.getSymbol(macho_file);
+    const gpa = macho_file.base.allocator;
+
+    for (self.symbols_refs.items, self.exports.items(.flags), self.globals.items) |ref, flags, *global| {
+        const symbol = ref.getSymbol(macho_file);
+        const name = symbol.getName(macho_file);
+        const gop = try resolver.getOrPut(gpa, name);
+        if (!gop.found_existing) {
+            gop.ref_ptr.* = ref;
+        }
+        global.* = gop.off;
+
         if (self.asFile().getSymbolRank(.{
             .weak = flags.weak,
-        }) < global.getSymbolRank(macho_file)) {
-            global.value = 0;
-            global.atom_ref = .{ .index = 0, .file = 0 };
-            global.nlist_idx = 0;
-            global.file = self.index;
-            global.flags.weak = flags.weak;
-            global.flags.tlv = flags.tlv;
-            global.flags.dyn_ref = false;
-            global.flags.tentative = false;
-            global.visibility = .global;
+        }) < gop.ref_ptr.getSymbol(macho_file).getSymbolRank(macho_file)) {
+            gop.ref_ptr.* = ref;
+        }
+    }
+}
+
+pub fn setGlobals(self: *Dylib, resolver: MachO.SymbolResolver) void {
+    for (self.symbols_refs.items, self.globals.items) |*ref, off| {
+        if (resolver.refs.get(off)) |pref| {
+            ref.* = pref;
         }
     }
 }

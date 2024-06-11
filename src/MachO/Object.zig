@@ -14,6 +14,7 @@ strtab: std.ArrayListUnmanaged(u8) = .{},
 symbols: std.ArrayListUnmanaged(Symbol) = .{},
 symbols_refs: std.ArrayListUnmanaged(MachO.Ref) = .{},
 symbols_extra: std.ArrayListUnmanaged(u32) = .{},
+globals: std.ArrayListUnmanaged(u32) = .{},
 atoms: std.ArrayListUnmanaged(Atom) = .{},
 atoms_indexes: std.ArrayListUnmanaged(Atom.Index) = .{},
 atoms_extra: std.ArrayListUnmanaged(u32) = .{},
@@ -48,6 +49,7 @@ pub fn deinit(self: *Object, allocator: Allocator) void {
     self.symbols.deinit(allocator);
     self.symbols_refs.deinit(allocator);
     self.symbols_extra.deinit(allocator);
+    self.globals.deinit(allocator);
     self.atoms.deinit(allocator);
     self.atoms_indexes.deinit(allocator);
     self.atoms_extra.deinit(allocator);
@@ -765,6 +767,9 @@ fn initSymbols(self: *Object, allocator: Allocator, macho_file: *MachO) !void {
     try self.symbols.ensureTotalCapacityPrecise(allocator, nsyms);
     try self.symbols_refs.ensureTotalCapacityPrecise(allocator, nsyms);
     try self.symbols_extra.ensureTotalCapacityPrecise(allocator, nsyms * @sizeOf(Symbol.Extra));
+    try self.globals.ensureTotalCapacityPrecise(allocator, nsyms);
+    self.globals.resize(allocator, nsyms) catch unreachable;
+    @memset(self.globals.items, 0);
 
     for (slice.items(.nlist), slice.items(.atom), 0..) |nlist, atom_index, i| {
         const index = self.addSymbolAssumeCapacity();
@@ -1400,28 +1405,39 @@ fn findCompileUnit(self: *Object, args: struct {
     };
 }
 
-pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
+pub fn resolveSymbols(self: *Object, resolver: *MachO.SymbolResolver, macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    for (self.symbols_refs.items, 0..) |*ref, i| {
+    const gpa = macho_file.base.allocator;
+
+    for (self.symbols_refs.items, 0..) |ref, i| {
         const nlist_idx = @as(Symbol.Index, @intCast(i));
         const nlist = self.symtab.items(.nlist)[nlist_idx];
         const atom_index = self.symtab.items(.atom)[nlist_idx];
+        const global = &self.globals.items[i];
 
         if (!nlist.ext()) continue;
-        if (nlist.undf() and !nlist.tentative()) continue;
         if (nlist.sect()) {
             const atom = self.getAtom(atom_index).?;
             if (!atom.alive.load(.seq_cst)) continue;
         }
 
         const symbol = ref.getSymbol(macho_file);
+        const name = symbol.getName(macho_file);
+        const gop = try resolver.getOrPut(gpa, name);
+        if (!gop.found_existing) {
+            gop.ref_ptr.* = ref;
+        }
+        global.* = gop.off;
+
         if (self.asFile().getSymbolRank(.{
             .archive = !self.alive,
             .weak = nlist.weakDef(),
             .tentative = nlist.tentative(),
-        }) < symbol.getSymbolRank(macho_file)) {}
+        }) < gop.ref_ptr.getSymbol(macho_file).getSymbolRank(macho_file)) {
+            gop.ref_ptr.* = ref;
+        }
 
         // TODO how do we merge visibility with the new model?
         // // Regardless of who the winner is, we still merge symbol visibility here.
@@ -1432,6 +1448,14 @@ pub fn resolveSymbols(self: *Object, macho_file: *MachO) void {
         // } else {
         //     symbol.visibility = .global;
         // }
+    }
+}
+
+pub fn setGlobals(self: *Object, resolver: MachO.SymbolResolver) void {
+    for (self.symbols_refs.items, self.globals.items) |*ref, off| {
+        if (resolver.refs.get(off)) |pref| {
+            ref.* = pref;
+        }
     }
 }
 
