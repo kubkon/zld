@@ -23,7 +23,7 @@ sections: std.MultiArrayList(Section) = .{},
 symbols: std.ArrayListUnmanaged(Symbol) = .{},
 symbols_extra: std.ArrayListUnmanaged(u32) = .{},
 globals: std.AutoHashMapUnmanaged(u32, Symbol.Index) = .{},
-globals_names: StringTable = .{},
+resolver: SymbolResolver = .{},
 /// This table will be populated after `scanRelocs` has run.
 /// Key is symbol index.
 undefs: std.AutoHashMapUnmanaged(Symbol.Index, std.ArrayListUnmanaged(Ref)) = .{},
@@ -124,7 +124,7 @@ pub fn deinit(self: *MachO) void {
     self.symbols.deinit(gpa);
     self.symbols_extra.deinit(gpa);
     self.globals.deinit(gpa);
-    self.globals_names.deinit(gpa);
+    self.resolver.deinit(gpa);
     self.undefs.deinit(gpa);
     self.undefined_symbols.deinit(gpa);
     self.string_intern.deinit(gpa);
@@ -173,6 +173,7 @@ pub fn flush(self: *MachO) !void {
 
     // Append empty string to string tables
     try self.string_intern.buffer.append(gpa, 0);
+    try self.resolver.strtab.buffer.append(gpa, 0);
     try self.strtab.append(gpa, 0);
     // Append null file
     try self.files.append(gpa, .null);
@@ -937,32 +938,6 @@ fn parseDependentDylibs(
     }
 }
 
-pub const SymbolResolver = struct {
-    refs: std.AutoHashMapUnmanaged(u32, Ref) = .{},
-    strtab: StringTable = .{},
-
-    const Result = struct {
-        found_existing: bool,
-        off: u32,
-        ref_ptr: *Ref,
-    };
-
-    pub fn deinit(resolver: *SymbolResolver, allocator: Allocator) void {
-        resolver.refs.deinit(allocator);
-        resolver.strtab.deinit(allocator);
-    }
-
-    pub fn getOrPut(resolver: *SymbolResolver, allocator: Allocator, name: []const u8) !Result {
-        const off = try resolver.strtab.insert(allocator, name);
-        const gop = try resolver.refs.getOrPut(allocator, off);
-        return .{
-            .found_existing = gop.found_existing,
-            .off = off,
-            .ref_ptr = gop.value_ptr,
-        };
-    }
-};
-
 /// When resolving symbols, we approach the problem similarly to `mold`.
 /// 1. Resolve symbols across all objects (including those preemptively extracted archives).
 /// 2. Resolve symbols across all shared objects.
@@ -974,62 +949,54 @@ pub fn resolveSymbols(self: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    const gpa = self.base.allocator;
-    var resolver = SymbolResolver{};
-    defer resolver.deinit(gpa);
-    try resolver.strtab.buffer.append(gpa, 0);
-
     // Resolve symbols on the set of all objects and shared objects (even if some are unneeded).
-    for (self.objects.items) |index| try self.getFile(index).?.resolveSymbols(&resolver, self);
-    for (self.dylibs.items) |index| try self.getFile(index).?.resolveSymbols(&resolver, self);
-    if (self.getInternalObject()) |obj| try obj.resolveSymbols(&resolver, self);
+    for (self.objects.items) |index| try self.getFile(index).?.resolveSymbols(self);
+    for (self.dylibs.items) |index| try self.getFile(index).?.resolveSymbols(self);
+    if (self.getInternalObject()) |obj| try obj.resolveSymbols(self);
 
-    for (self.objects.items) |index| self.getFile(index).?.setGlobals(resolver);
-    for (self.dylibs.items) |index| self.getFile(index).?.setGlobals(resolver);
-    if (self.getInternalObject()) |obj| obj.setGlobals(resolver);
+    for (self.objects.items) |index| self.getFile(index).?.mergeGlobals(self);
+    for (self.dylibs.items) |index| self.getFile(index).?.mergeGlobals(self);
+    if (self.getInternalObject()) |obj| obj.mergeGlobals(self);
 
     // Mark live objects.
-    // self.markLive();
+    self.markLive();
 
-    // // Reset state of all globals after marking live objects.
-    // for (self.objects.items) |index| self.getFile(index).?.resetGlobals(self);
-    // for (self.dylibs.items) |index| self.getFile(index).?.resetGlobals(self);
+    // Reset state of all globals after marking live objects.
+    self.resolver.reset();
 
-    // // Prune dead objects.
-    // var i: usize = 0;
-    // while (i < self.objects.items.len) {
-    //     const index = self.objects.items[i];
-    //     if (!self.getFile(index).?.object.alive) {
-    //         _ = self.objects.orderedRemove(i);
-    //         self.files.items(.data)[index].object.deinit(self.base.allocator);
-    //         self.files.set(index, .null);
-    //     } else i += 1;
-    // }
+    // Prune dead objects.
+    var i: usize = 0;
+    while (i < self.objects.items.len) {
+        const index = self.objects.items[i];
+        if (!self.getFile(index).?.object.alive) {
+            _ = self.objects.orderedRemove(i);
+            self.files.items(.data)[index].object.deinit(self.base.allocator);
+            self.files.set(index, .null);
+        } else i += 1;
+    }
 
-    // // Re-resolve the symbols.
-    // for (self.objects.items) |index| self.getFile(index).?.resolveSymbols(self);
-    // for (self.dylibs.items) |index| self.getFile(index).?.resolveSymbols(self);
+    // Re-resolve the symbols.
+    for (self.objects.items) |index| try self.getFile(index).?.resolveSymbols(self);
+    for (self.dylibs.items) |index| try self.getFile(index).?.resolveSymbols(self);
+    if (self.getInternalObject()) |obj| try obj.resolveSymbols(self);
+
+    for (self.objects.items) |index| self.getFile(index).?.mergeGlobals(self);
+    for (self.dylibs.items) |index| self.getFile(index).?.mergeGlobals(self);
+    if (self.getInternalObject()) |obj| obj.mergeGlobals(self);
+
+    // Merge symbol visibility
+    for (self.objects.items) |index| self.getFile(index).?.object.mergeSymbolVisibility(self);
 }
 
 fn markLive(self: *MachO) void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    for (self.undefined_symbols.items) |index| {
-        if (self.getSymbol(index).getFile(self)) |file| {
-            if (file == .object) file.object.alive = true;
-        }
-    }
-    if (self.entry_index) |index| {
-        const sym = self.getSymbol(index);
-        if (sym.getFile(self)) |file| {
-            if (file == .object) file.object.alive = true;
-        }
-    }
     for (self.objects.items) |index| {
         const object = self.getFile(index).?.object;
         if (object.alive) object.markLive(self);
     }
+    if (self.getInternalObject()) |obj| obj.markLive(self);
 }
 
 fn parseDebugInfo(self: *MachO) !void {
@@ -3302,6 +3269,40 @@ pub const Ref = struct {
         _ = unused_fmt_string;
         _ = options;
         try writer.print("%{d} in file({d})", .{ ref.index, ref.file });
+    }
+};
+
+pub const SymbolResolver = struct {
+    refs: std.AutoHashMapUnmanaged(u32, Ref) = .{},
+    strtab: StringTable = .{},
+
+    const Result = struct {
+        found_existing: bool,
+        off: u32,
+        ref_ptr: *Ref,
+    };
+
+    pub fn deinit(resolver: *SymbolResolver, allocator: Allocator) void {
+        resolver.refs.deinit(allocator);
+        resolver.strtab.deinit(allocator);
+    }
+
+    pub fn getOrPut(resolver: *SymbolResolver, allocator: Allocator, name: []const u8) !Result {
+        const off = try resolver.strtab.insert(allocator, name);
+        const gop = try resolver.refs.getOrPut(allocator, off);
+        return .{
+            .found_existing = gop.found_existing,
+            .off = off,
+            .ref_ptr = gop.value_ptr,
+        };
+    }
+
+    pub fn get(resolver: SymbolResolver, off: u32) ?Ref {
+        return resolver.refs.get(off);
+    }
+
+    pub fn reset(resolver: *SymbolResolver) void {
+        resolver.refs.clearRetainingCapacity();
     }
 };
 

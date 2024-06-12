@@ -1405,7 +1405,7 @@ fn findCompileUnit(self: *Object, args: struct {
     };
 }
 
-pub fn resolveSymbols(self: *Object, resolver: *MachO.SymbolResolver, macho_file: *MachO) !void {
+pub fn resolveSymbols(self: *Object, macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -1425,7 +1425,7 @@ pub fn resolveSymbols(self: *Object, resolver: *MachO.SymbolResolver, macho_file
 
         const symbol = ref.getSymbol(macho_file);
         const name = symbol.getName(macho_file);
-        const gop = try resolver.getOrPut(gpa, name);
+        const gop = try macho_file.resolver.getOrPut(gpa, name);
         if (!gop.found_existing) {
             gop.ref_ptr.* = ref;
         }
@@ -1438,38 +1438,14 @@ pub fn resolveSymbols(self: *Object, resolver: *MachO.SymbolResolver, macho_file
         }) < gop.ref_ptr.getSymbol(macho_file).getSymbolRank(macho_file)) {
             gop.ref_ptr.* = ref;
         }
-
-        // TODO how do we merge visibility with the new model?
-        // // Regardless of who the winner is, we still merge symbol visibility here.
-        // if (nlist.pext() or (nlist.weakDef() and nlist.weakRef()) or self.hidden) {
-        //     if (symbol.visibility != .global) {
-        //         symbol.visibility = .hidden;
-        //     }
-        // } else {
-        //     symbol.visibility = .global;
-        // }
     }
 }
 
-pub fn setGlobals(self: *Object, resolver: MachO.SymbolResolver) void {
+pub fn mergeGlobals(self: *Object, macho_file: *MachO) void {
     for (self.symbols_refs.items, self.globals.items) |*ref, off| {
-        if (resolver.refs.get(off)) |pref| {
+        if (macho_file.resolver.get(off)) |pref| {
             ref.* = pref;
         }
-    }
-}
-
-pub fn resetGlobals(self: *Object, macho_file: *MachO) void {
-    for (self.symbols.items, 0..) |sym_index, nlist_idx| {
-        if (!self.symtab.items(.nlist)[nlist_idx].ext()) continue;
-        const sym = macho_file.getSymbol(sym_index);
-        const name = sym.name;
-        const global = sym.flags.global;
-        const weak_ref = sym.flags.weak_ref;
-        sym.* = .{};
-        sym.name = name;
-        sym.flags.global = global;
-        sym.flags.weak_ref = weak_ref;
     }
 }
 
@@ -1487,6 +1463,18 @@ pub fn markLive(self: *Object, macho_file: *MachO) void {
         if (should_keep and file == .object and !file.object.alive) {
             file.object.alive = true;
             file.object.markLive(macho_file);
+        }
+    }
+}
+
+pub fn mergeSymbolVisibility(self: *Object, macho_file: *MachO) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    for (self.symbols_refs.items, self.symbols.items) |ref, sym| {
+        const global = ref.getSymbol(macho_file);
+        if (global.visibility != .global) {
+            global.visibility = sym.visibility;
         }
     }
 }

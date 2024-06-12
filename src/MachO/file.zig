@@ -28,21 +28,20 @@ pub const File = union(enum) {
         }
     }
 
-    pub fn resolveSymbols(file: File, resolver: *MachO.SymbolResolver, macho_file: *MachO) !void {
+    pub fn resolveSymbols(file: File, macho_file: *MachO) !void {
         switch (file) {
-            inline else => |x| try x.resolveSymbols(resolver, macho_file),
+            inline else => |x| try x.resolveSymbols(macho_file),
         }
     }
 
-    pub fn setGlobals(file: File, resolver: MachO.SymbolResolver) void {
+    pub fn mergeGlobals(file: File, macho_file: *MachO) void {
         switch (file) {
-            inline else => |x| x.setGlobals(resolver),
+            inline else => |x| x.mergeGlobals(macho_file),
         }
     }
 
     pub fn resetGlobals(file: File, macho_file: *MachO) void {
         switch (file) {
-            .internal => unreachable,
             inline else => |x| x.resetGlobals(macho_file),
         }
     }

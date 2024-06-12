@@ -515,7 +515,7 @@ pub fn initSymbols(self: *Dylib, macho_file: *MachO) !void {
     }
 }
 
-pub fn resolveSymbols(self: *Dylib, resolver: *MachO.SymbolResolver, macho_file: *MachO) !void {
+pub fn resolveSymbols(self: *Dylib, macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -526,7 +526,7 @@ pub fn resolveSymbols(self: *Dylib, resolver: *MachO.SymbolResolver, macho_file:
     for (self.symbols_refs.items, self.exports.items(.flags), self.globals.items) |ref, flags, *global| {
         const symbol = ref.getSymbol(macho_file);
         const name = symbol.getName(macho_file);
-        const gop = try resolver.getOrPut(gpa, name);
+        const gop = try macho_file.resolver.getOrPut(gpa, name);
         if (!gop.found_existing) {
             gop.ref_ptr.* = ref;
         }
@@ -540,24 +540,11 @@ pub fn resolveSymbols(self: *Dylib, resolver: *MachO.SymbolResolver, macho_file:
     }
 }
 
-pub fn setGlobals(self: *Dylib, resolver: MachO.SymbolResolver) void {
+pub fn mergeGlobals(self: *Dylib, macho_file: *MachO) void {
     for (self.symbols_refs.items, self.globals.items) |*ref, off| {
-        if (resolver.refs.get(off)) |pref| {
+        if (macho_file.resolver.get(off)) |pref| {
             ref.* = pref;
         }
-    }
-}
-
-pub fn resetGlobals(self: *Dylib, macho_file: *MachO) void {
-    for (self.symbols.items) |sym_index| {
-        const sym = macho_file.getSymbol(sym_index);
-        const name = sym.name;
-        const global = sym.flags.global;
-        const weak_ref = sym.flags.weak_ref;
-        sym.* = .{};
-        sym.name = name;
-        sym.flags.global = global;
-        sym.flags.weak_ref = weak_ref;
     }
 }
 

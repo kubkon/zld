@@ -87,7 +87,7 @@ pub fn initSymbols(self: *InternalObject, macho_file: *MachO) !void {
     addUndef(self, try self.addString(gpa, "_objc_msgSend"));
 }
 
-pub fn resolveSymbols(self: *InternalObject, resolver: *MachO.SymbolResolver, macho_file: *MachO) !void {
+pub fn resolveSymbols(self: *InternalObject, macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -97,7 +97,7 @@ pub fn resolveSymbols(self: *InternalObject, resolver: *MachO.SymbolResolver, ma
         const global = &self.globals.items[i];
         const symbol = ref.getSymbol(macho_file);
         const name = symbol.getName(macho_file);
-        const gop = try resolver.getOrPut(gpa, name);
+        const gop = try macho_file.resolver.getOrPut(gpa, name);
         if (!gop.found_existing) {
             gop.ref_ptr.* = ref;
         }
@@ -113,10 +113,24 @@ pub fn resolveSymbols(self: *InternalObject, resolver: *MachO.SymbolResolver, ma
     }
 }
 
-pub fn setGlobals(self: *InternalObject, resolver: MachO.SymbolResolver) void {
+pub fn mergeGlobals(self: *InternalObject, macho_file: *MachO) void {
     for (self.symbols_refs.items, self.globals.items) |*ref, off| {
-        if (resolver.refs.get(off)) |pref| {
+        if (macho_file.resolver.get(off)) |pref| {
             ref.* = pref;
+        }
+    }
+}
+
+pub fn markLive(self: *InternalObject, macho_file: *MachO) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    for (self.symbols_refs.items) |ref| {
+        const sym = ref.getSymbol(macho_file);
+        const file = sym.getFile(macho_file).?;
+        if (file == .object and !file.object.alive) {
+            file.object.alive = true;
+            file.object.markLive(macho_file);
         }
     }
 }
