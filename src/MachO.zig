@@ -376,14 +376,14 @@ pub fn flush(self: *MachO) !void {
     try self.convertTentativeDefinitions();
     try self.createObjcSections();
     try self.dedupLiterals();
-
-    state_log.debug("{}", .{self.dumpState()});
-    return error.ToDo;
-    //     try self.claimUnresolved();
+    try self.claimUnresolved();
 
     //     if (self.options.dead_strip) {
     //         try dead_strip.gcAtoms(self);
     //     }
+
+    state_log.debug("{}", .{self.dumpState()});
+    return error.ToDo;
 
     //     self.markImportsAndExports();
     //     self.deadStripDylibs();
@@ -1211,14 +1211,12 @@ fn claimUnresolved(self: *MachO) error{OutOfMemory}!void {
     for (self.objects.items) |index| {
         const object = self.getFile(index).?.object;
 
-        for (object.symbols.items, 0..) |sym_index, i| {
+        for (object.symbols_refs.items, 0..) |ref, i| {
             const nlist_idx = @as(Symbol.Index, @intCast(i));
             const nlist = object.symtab.items(.nlist)[nlist_idx];
             if (!nlist.ext()) continue;
             if (!nlist.undf()) continue;
-
-            const sym = self.getSymbol(sym_index);
-            if (sym.getFile(self) != null) continue;
+            if (ref.file != object.index) continue;
 
             const is_import = switch (self.options.undefined_treatment) {
                 .@"error" => false,
@@ -1226,15 +1224,14 @@ fn claimUnresolved(self: *MachO) error{OutOfMemory}!void {
                 .dynamic_lookup => true,
             };
             if (is_import) {
+                const sym = ref.getSymbol(self);
                 sym.value = 0;
-                sym.atom_ref = .{};
+                sym.atom_ref = .{ .index = 0, .file = 0 };
                 sym.nlist_idx = 0;
-                sym.file = self.internal_object_index.?;
                 sym.flags.weak = false;
                 sym.flags.weak_ref = nlist.weakRef();
                 sym.flags.import = is_import;
                 sym.visibility = .global;
-                try self.getInternalObject().?.symbols.append(self.base.allocator, sym_index);
             }
         }
     }
