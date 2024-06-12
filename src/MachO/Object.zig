@@ -1509,11 +1509,10 @@ pub fn convertTentativeDefinitions(self: *Object, macho_file: *MachO) !void {
     defer tracy.end();
     const gpa = macho_file.base.allocator;
 
-    for (self.symbols.items, 0..) |index, i| {
-        const sym = macho_file.getSymbol(index);
+    for (self.symbols_refs.items, 0..) |ref, i| {
+        if (ref.file != self.index) continue;
+        const sym = ref.getSymbol(macho_file);
         if (!sym.flags.tentative) continue;
-        const sym_file = sym.getFile(macho_file).?;
-        if (sym_file.getIndex() != self.index) continue;
 
         const nlist_idx = @as(Symbol.Index, @intCast(i));
         const nlist = &self.symtab.items(.nlist)[nlist_idx];
@@ -1539,8 +1538,7 @@ pub fn convertTentativeDefinitions(self: *Object, macho_file: *MachO) !void {
         sect.@"align" = alignment;
 
         sym.value = 0;
-        sym.atom_ref = .{ .atom = atom_index, .file = self.index };
-        sym.flags.global = true;
+        sym.atom_ref = .{ .index = atom_index, .file = self.index };
         sym.flags.weak = false;
         sym.flags.weak_ref = false;
         sym.flags.tentative = false;

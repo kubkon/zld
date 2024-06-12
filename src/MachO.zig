@@ -373,10 +373,9 @@ pub fn flush(self: *MachO) !void {
 
     // try self.resolveSyntheticSymbols();
 
+    try self.convertTentativeDefinitions();
     state_log.debug("{}", .{self.dumpState()});
     return error.ToDo;
-
-    //     try self.convertTentativeDefinitions();
     //     try self.createObjcSections();
     //     try self.dedupLiterals();
     //     try self.claimUnresolved();
