@@ -14,6 +14,11 @@ globals: std.ArrayListUnmanaged(u32) = .{},
 objc_methnames: std.ArrayListUnmanaged(u8) = .{},
 objc_selrefs: [@sizeOf(u64)]u8 = [_]u8{0} ** @sizeOf(u64),
 
+entry_index: ?Symbol.Index = null,
+dyld_stub_binder_index: ?Symbol.Index = null,
+dyld_private_index: ?Symbol.Index = null,
+objc_msg_send_index: ?Symbol.Index = null,
+
 num_rebase_relocs: u32 = 0,
 output_symtab_ctx: MachO.SymtabCtx = .{},
 
@@ -47,7 +52,7 @@ pub fn initSymbols(self: *InternalObject, macho_file: *MachO) !void {
         fn createSymbol(obj: *InternalObject, name: u32, args: struct {
             type: u8 = macho.N_UNDF,
             desc: u16 = 0,
-        }) void {
+        }) Symbol.Index {
             const index = obj.addSymbolAssumeCapacity();
             obj.symbols_refs.addOneAssumeCapacity().* = .{ .index = index, .file = obj.index };
             const symbol = obj.getSymbol(index);
@@ -68,6 +73,7 @@ pub fn initSymbols(self: *InternalObject, macho_file: *MachO) !void {
                 .n_value = 0,
             };
             symbol.nlist_idx = nlist_idx;
+            return index;
         }
     }.createSymbol;
 
@@ -93,29 +99,29 @@ pub fn initSymbols(self: *InternalObject, macho_file: *MachO) !void {
     @memset(self.globals.items, 0);
 
     for (macho_file.options.force_undefined_symbols) |name| {
-        createSymbol(self, try self.addString(gpa, name), .{});
+        _ = createSymbol(self, try self.addString(gpa, name), .{});
     }
 
-    createSymbol(self, try self.addString(gpa, "dyld_stub_binder"), .{});
-    createSymbol(self, try self.addString(gpa, "_objc_msgSend"), .{});
+    self.dyld_stub_binder_index = createSymbol(self, try self.addString(gpa, "dyld_stub_binder"), .{});
+    self.objc_msg_send_index = createSymbol(self, try self.addString(gpa, "_objc_msgSend"), .{});
 
     if (!macho_file.options.dylib) {
-        createSymbol(self, try self.addString(gpa, macho_file.options.entry orelse "_main"), .{});
-        createSymbol(self, try self.addString(gpa, "__mh_execute_header"), .{
+        self.entry_index = createSymbol(self, try self.addString(gpa, macho_file.options.entry orelse "_main"), .{});
+        _ = createSymbol(self, try self.addString(gpa, "__mh_execute_header"), .{
             .type = macho.N_SECT | macho.N_EXT,
             .desc = macho.REFERENCED_DYNAMICALLY,
         });
     } else {
-        createSymbol(self, try self.addString(gpa, "__mh_dylib_header"), .{
+        _ = createSymbol(self, try self.addString(gpa, "__mh_dylib_header"), .{
             .type = macho.N_SECT | macho.N_EXT,
         });
     }
 
-    createSymbol(self, try self.addString(gpa, "___dso_handle"), .{
+    _ = createSymbol(self, try self.addString(gpa, "___dso_handle"), .{
         .type = macho.N_SECT | macho.N_EXT,
     });
-    createSymbol(self, try self.addString(gpa, "dyld_private"), .{
-        .type = macho.N_SECT | macho.N_EXT | macho.N_PEXT,
+    self.dyld_private_index = createSymbol(self, try self.addString(gpa, "dyld_private"), .{
+        .type = macho.N_SECT,
     });
 }
 
@@ -398,6 +404,28 @@ pub fn dedupLiterals(self: *InternalObject, lp: MachO.LiteralPool, macho_file: *
     }
 }
 
+pub fn scanRelocs(self: *InternalObject, macho_file: *MachO) void {
+    if (self.getEntryRef()) |ref| {
+        const sym = ref.getSymbol(macho_file);
+        if (!sym.isUndefined(macho_file)) {
+            if (sym.flags.import) sym.setSectionFlags(.{ .stubs = true });
+        }
+    }
+    if (self.getDyldStubBinderRef()) |ref| {
+        const sym = ref.getSymbol(macho_file);
+        if (!sym.isUndefined(macho_file)) {
+            sym.setSectionFlags(.{ .got = true });
+        }
+    }
+    if (self.getObjcMsgSendRef()) |ref| {
+        const sym = ref.getSymbol(macho_file);
+        if (!sym.isUndefined(macho_file)) {
+            // TODO is it always needed, or only if we are synthesising fast stubs
+            sym.setSectionFlags(.{ .got = true });
+        }
+    }
+}
+
 pub fn calcSymtabSize(self: *InternalObject, macho_file: *MachO) void {
     for (self.symbols.items) |sym_index| {
         const sym = macho_file.getSymbol(sym_index);
@@ -535,6 +563,26 @@ pub fn setAtomExtra(self: *InternalObject, index: u32, extra: Atom.Extra) void {
             else => @compileError("bad field type"),
         };
     }
+}
+
+pub fn getEntryRef(self: InternalObject) ?MachO.Ref {
+    const index = self.entry_index orelse return null;
+    return self.symbols_refs.items[index];
+}
+
+pub fn getDyldStubBinderRef(self: InternalObject) ?MachO.Ref {
+    const index = self.dyld_stub_binder_index orelse return null;
+    return self.symbols_refs.items[index];
+}
+
+pub fn getDyldPrivateRef(self: InternalObject) ?MachO.Ref {
+    const index = self.dyld_private_index orelse return null;
+    return self.symbols_refs.items[index];
+}
+
+pub fn getObjcMsgSendRef(self: InternalObject) ?MachO.Ref {
+    const index = self.objc_msg_send_index orelse return null;
+    return self.symbols_refs.items[index];
 }
 
 pub fn addSymbol(self: *InternalObject, allocator: Allocator) !Symbol.Index {

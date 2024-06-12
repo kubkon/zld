@@ -329,7 +329,7 @@ fn reportUndefSymbol(self: Atom, rel: Relocation, macho_file: *MachO) !bool {
     if (rel.tag == .local) return false;
 
     const sym = rel.getTargetSymbol(macho_file);
-    if (sym.getFile(macho_file) == null) {
+    if (sym.isUndefined(macho_file)) {
         macho_file.undefs_mutex.lock();
         defer macho_file.undefs_mutex.unlock();
         const gpa = macho_file.base.allocator;
@@ -337,7 +337,7 @@ fn reportUndefSymbol(self: Atom, rel: Relocation, macho_file: *MachO) !bool {
         if (!gop.found_existing) {
             gop.value_ptr.* = .{};
         }
-        try gop.value_ptr.append(gpa, .{ .atom = self.atom_index, .file = self.file });
+        try gop.value_ptr.append(gpa, .{ .index = self.atom_index, .file = self.file });
         return true;
     }
 

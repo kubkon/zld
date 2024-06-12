@@ -26,7 +26,7 @@ globals: std.AutoHashMapUnmanaged(u32, Symbol.Index) = .{},
 resolver: SymbolResolver = .{},
 /// This table will be populated after `scanRelocs` has run.
 /// Key is symbol index.
-undefs: std.AutoHashMapUnmanaged(Symbol.Index, std.ArrayListUnmanaged(Ref)) = .{},
+undefs: std.AutoHashMapUnmanaged(Ref, std.ArrayListUnmanaged(Ref)) = .{},
 undefs_mutex: std.Thread.Mutex = .{},
 /// Global symbols we need to resolve for the link to succeed.
 undefined_symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
@@ -385,15 +385,15 @@ pub fn flush(self: *MachO) !void {
     self.markImportsAndExports();
     self.deadStripDylibs();
 
+    for (self.dylibs.items, 1..) |index, ord| {
+        const dylib = self.getFile(index).?.dylib;
+        dylib.ordinal = @intCast(ord);
+    }
+
+    try self.scanRelocs();
+
     state_log.debug("{}", .{self.dumpState()});
     return error.ToDo;
-
-    //     for (self.dylibs.items, 1..) |index, ord| {
-    //         const dylib = self.getFile(index).?.dylib;
-    //         dylib.ordinal = @intCast(ord);
-    //     }
-
-    //     try self.scanRelocs();
 
     //     try self.initOutputSections();
     //     try self.initSyntheticSections();
@@ -1207,45 +1207,20 @@ fn scanRelocs(self: *MachO) !void {
             self.base.thread_pool.spawnWg(&wg, scanRelocsWorker, .{ self, self.getFile(index).?.object });
         }
     }
+    if (self.getInternalObject()) |obj| {
+        obj.scanRelocs(self);
+    }
 
     try self.reportUndefs();
 
-    if (self.entry_index) |index| {
-        const sym = self.getSymbol(index);
-        if (sym.getFile(self) != null) {
-            if (sym.flags.import) sym.setSectionFlags(.{ .stubs = true });
-        }
+    for (self.objects.items) |index| {
+        try self.getFile(index).?.createSymbolIndirection(self);
     }
-
-    if (self.dyld_stub_binder_index) |index| {
-        const sym = self.getSymbol(index);
-        if (sym.getFile(self) != null) sym.setSectionFlags(.{ .got = true });
+    for (self.dylibs.items) |index| {
+        try self.getFile(index).?.createSymbolIndirection(self);
     }
-
-    if (self.objc_msg_send_index) |index| {
-        const sym = self.getSymbol(index);
-        if (sym.getFile(self) != null)
-            sym.setSectionFlags(.{ .got = true }); // TODO is it always needed, or only if we are synthesising fast stubs?
-    }
-
-    for (self.symbols.items, 0..) |*symbol, i| {
-        const index = @as(Symbol.Index, @intCast(i));
-        if (symbol.getSectionFlags().got) {
-            log.debug("'{s}' needs GOT", .{symbol.getName(self)});
-            try self.got.addSymbol(index, self);
-        }
-        if (symbol.getSectionFlags().stubs) {
-            log.debug("'{s}' needs STUBS", .{symbol.getName(self)});
-            try self.stubs.addSymbol(index, self);
-        }
-        if (symbol.getSectionFlags().tlv_ptr) {
-            log.debug("'{s}' needs TLV pointer", .{symbol.getName(self)});
-            try self.tlv_ptr.addSymbol(index, self);
-        }
-        if (symbol.getSectionFlags().objc_stubs) {
-            log.debug("'{s}' needs OBJC STUBS", .{symbol.getName(self)});
-            try self.objc_stubs.addSymbol(index, self);
-        }
+    if (self.getInternalObject()) |obj| {
+        try obj.asFile().createSymbolIndirection(self);
     }
 }
 
@@ -1277,7 +1252,7 @@ fn reportUndefs(self: *MachO) !void {
     var has_undefs = false;
     var it = self.undefs.iterator();
     while (it.next()) |entry| {
-        const undef_sym = self.getSymbol(entry.key_ptr.*);
+        const undef_sym = entry.key_ptr.getSymbol(self);
         const notes = entry.value_ptr.*;
         const nnotes = @min(notes.items.len, max_notes) + @intFromBool(notes.items.len > max_notes);
 
@@ -1288,7 +1263,7 @@ fn reportUndefs(self: *MachO) !void {
         var inote: usize = 0;
         while (inote < @min(notes.items.len, max_notes)) : (inote += 1) {
             const note = notes.items[inote];
-            const file = note.getFile(self).?;
+            const file = self.getFile(note.file).?;
             const atom = note.getAtom(self).?;
             try err.addNote("referenced by {}:{s}", .{ file.fmtPath(), atom.getName(self) });
         }
@@ -1298,46 +1273,6 @@ fn reportUndefs(self: *MachO) !void {
             try err.addNote("referenced {d} more times", .{remaining});
         }
     }
-
-    for (self.undefined_symbols.items) |index| {
-        const sym = self.getSymbol(index);
-        if (sym.getFile(self) != null) continue; // If undefined in an object file, will be reported above
-        has_undefs = true;
-        const err = try addFn(&self.base, 1);
-        try err.addMsg("undefined symbol: {s}", .{sym.getName(self)});
-        try err.addNote("-u command line option", .{});
-    }
-
-    if (self.entry_index) |index| {
-        const sym = self.getSymbol(index);
-        if (sym.getFile(self) == null) {
-            has_undefs = true;
-            const err = try addFn(&self.base, 1);
-            try err.addMsg("undefined symbol: {s}", .{sym.getName(self)});
-            try err.addNote("implicit entry/start for main executable", .{});
-        }
-    }
-
-    if (self.dyld_stub_binder_index) |index| {
-        const sym = self.getSymbol(index);
-        if (sym.getFile(self) == null and self.stubs_sect_index != null) {
-            has_undefs = true;
-            const err = try addFn(&self.base, 1);
-            try err.addMsg("undefined symbol: {s}", .{sym.getName(self)});
-            try err.addNote("implicit -u command line option", .{});
-        }
-    }
-
-    if (self.objc_msg_send_index) |index| {
-        const sym = self.getSymbol(index);
-        if (sym.getFile(self) == null and self.objc_stubs_sect_index != null) {
-            has_undefs = true;
-            const err = try addFn(&self.base, 1);
-            try err.addMsg("undefined symbol: {s}", .{sym.getName(self)});
-            try err.addNote("implicit -u command line option", .{});
-        }
-    }
-
     if (has_undefs) return error.UndefinedSymbols;
 }
 

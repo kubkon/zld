@@ -1,5 +1,5 @@
 pub const GotSection = struct {
-    symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
+    symbols: std.ArrayListUnmanaged(MachO.Ref) = .{},
 
     pub const Index = u32;
 
@@ -7,12 +7,12 @@ pub const GotSection = struct {
         got.symbols.deinit(allocator);
     }
 
-    pub fn addSymbol(got: *GotSection, sym_index: Symbol.Index, macho_file: *MachO) !void {
+    pub fn addSymbol(got: *GotSection, ref: MachO.Ref, macho_file: *MachO) !void {
         const gpa = macho_file.base.allocator;
         const index = @as(Index, @intCast(got.symbols.items.len));
         const entry = try got.symbols.addOne(gpa);
-        entry.* = sym_index;
-        const symbol = macho_file.getSymbol(sym_index);
+        entry.* = ref;
+        const symbol = ref.getSymbol(macho_file);
         symbol.addExtra(.{ .got = index }, macho_file);
     }
 
@@ -29,8 +29,8 @@ pub const GotSection = struct {
     pub fn write(got: GotSection, macho_file: *MachO, writer: anytype) !void {
         const tracy = trace(@src());
         defer tracy.end();
-        for (got.symbols.items) |sym_index| {
-            const sym = macho_file.getSymbol(sym_index);
+        for (got.symbols.items) |ref| {
+            const sym = ref.getSymbol(macho_file);
             const value = if (sym.flags.import) @as(u64, 0) else sym.getAddress(.{}, macho_file);
             try writer.writeInt(u64, value, .little);
         }
@@ -53,12 +53,12 @@ pub const GotSection = struct {
     ) !void {
         _ = options;
         _ = unused_fmt_string;
-        for (ctx.got.symbols.items, 0..) |entry, i| {
-            const symbol = ctx.macho_file.getSymbol(entry);
-            try writer.print("  {d}@0x{x} => {d}@0x{x} ({s})\n", .{
+        for (ctx.got.symbols.items, 0..) |ref, i| {
+            const symbol = ref.getSymbol(ctx.macho_file);
+            try writer.print("  {d}@0x{x} => {}@0x{x} ({s})\n", .{
                 i,
                 symbol.getGotAddress(ctx.macho_file),
-                entry,
+                ref,
                 symbol.getAddress(.{}, ctx.macho_file),
                 symbol.getName(ctx.macho_file),
             });
@@ -67,7 +67,7 @@ pub const GotSection = struct {
 };
 
 pub const StubsSection = struct {
-    symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
+    symbols: std.ArrayListUnmanaged(MachO.Ref) = .{},
 
     pub const Index = u32;
 
@@ -75,12 +75,12 @@ pub const StubsSection = struct {
         stubs.symbols.deinit(allocator);
     }
 
-    pub fn addSymbol(stubs: *StubsSection, sym_index: Symbol.Index, macho_file: *MachO) !void {
+    pub fn addSymbol(stubs: *StubsSection, ref: MachO.Ref, macho_file: *MachO) !void {
         const gpa = macho_file.base.allocator;
         const index = @as(Index, @intCast(stubs.symbols.items.len));
         const entry = try stubs.symbols.addOne(gpa);
-        entry.* = sym_index;
-        const symbol = macho_file.getSymbol(sym_index);
+        entry.* = ref;
+        const symbol = ref.getSymbol(macho_file);
         symbol.addExtra(.{ .stubs = index }, macho_file);
     }
 
@@ -101,8 +101,8 @@ pub const StubsSection = struct {
         const cpu_arch = macho_file.options.cpu_arch.?;
         const laptr_sect = macho_file.sections.items(.header)[macho_file.la_symbol_ptr_sect_index.?];
 
-        for (stubs.symbols.items, 0..) |sym_index, idx| {
-            const sym = macho_file.getSymbol(sym_index);
+        for (stubs.symbols.items, 0..) |ref, idx| {
+            const sym = ref.getSymbol(macho_file);
             const source = sym.getAddress(.{ .stubs = true }, macho_file);
             const target = laptr_sect.addr + idx * @sizeOf(u64);
             switch (cpu_arch) {
@@ -144,12 +144,12 @@ pub const StubsSection = struct {
     ) !void {
         _ = options;
         _ = unused_fmt_string;
-        for (ctx.stubs.symbols.items, 0..) |entry, i| {
-            const symbol = ctx.macho_file.getSymbol(entry);
-            try writer.print("  {d}@0x{x} => {d}@0x{x} ({s})\n", .{
+        for (ctx.stubs.symbols.items, 0..) |ref, i| {
+            const symbol = ref.getSymbol(ctx.macho_file);
+            try writer.print("  {d}@0x{x} => {}@0x{x} ({s})\n", .{
                 i,
                 symbol.getStubsAddress(ctx.macho_file),
-                entry,
+                ref,
                 symbol.getAddress(.{}, ctx.macho_file),
                 symbol.getName(ctx.macho_file),
             });
@@ -180,8 +180,8 @@ pub const StubsHelperSection = struct {
         _ = stubs_helper;
         const cpu_arch = macho_file.options.cpu_arch.?;
         var s: usize = preambleSize(cpu_arch);
-        for (macho_file.stubs.symbols.items) |sym_index| {
-            const sym = macho_file.getSymbol(sym_index);
+        for (macho_file.stubs.symbols.items) |ref| {
+            const sym = ref.getSymbol(macho_file);
             if (sym.flags.weak) continue;
             s += entrySize(cpu_arch);
         }
@@ -200,8 +200,8 @@ pub const StubsHelperSection = struct {
         const entry_size = entrySize(cpu_arch);
 
         var idx: usize = 0;
-        for (macho_file.stubs.symbols.items) |sym_index| {
-            const sym = macho_file.getSymbol(sym_index);
+        for (macho_file.stubs.symbols.items) |ref| {
+            const sym = ref.getSymbol(macho_file);
             if (sym.flags.weak) continue;
             const offset = macho_file.lazy_bind.offsets.items[idx];
             const source: i64 = @intCast(sect.addr + preamble_size + entry_size * idx);
@@ -235,14 +235,15 @@ pub const StubsHelperSection = struct {
 
     fn writePreamble(stubs_helper: StubsHelperSection, macho_file: *MachO, writer: anytype) !void {
         _ = stubs_helper;
+        const obj = macho_file.getInternalObject().?;
         const cpu_arch = macho_file.options.cpu_arch.?;
         const sect = macho_file.sections.items(.header)[macho_file.stubs_helper_sect_index.?];
         const dyld_private_addr = target: {
-            const sym = macho_file.getSymbol(macho_file.dyld_private_index.?);
+            const sym = obj.getDyldPrivateRef().getSymbol(macho_file);
             break :target sym.getAddress(.{}, macho_file);
         };
         const dyld_stub_binder_addr = target: {
-            const sym = macho_file.getSymbol(macho_file.dyld_stub_binder_index.?);
+            const sym = obj.getDyldStubBinderRef().getSymbol(macho_file);
             break :target sym.getGotAddress(macho_file);
         };
         switch (cpu_arch) {
@@ -298,8 +299,8 @@ pub const LaSymbolPtrSection = struct {
         const cpu_arch = macho_file.options.cpu_arch.?;
         const sect = macho_file.sections.items(.header)[macho_file.stubs_helper_sect_index.?];
         var stub_helper_idx: u32 = 0;
-        for (macho_file.stubs.symbols.items) |sym_index| {
-            const sym = macho_file.getSymbol(sym_index);
+        for (macho_file.stubs.symbols.items) |ref| {
+            const sym = ref.getSymbol(macho_file);
             if (sym.flags.weak) {
                 const value = sym.getAddress(.{ .stubs = false }, macho_file);
                 try writer.writeInt(u64, @intCast(value), .little);
@@ -314,7 +315,7 @@ pub const LaSymbolPtrSection = struct {
 };
 
 pub const TlvPtrSection = struct {
-    symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
+    symbols: std.ArrayListUnmanaged(MachO.Ref) = .{},
 
     pub const Index = u32;
 
@@ -322,12 +323,12 @@ pub const TlvPtrSection = struct {
         tlv.symbols.deinit(allocator);
     }
 
-    pub fn addSymbol(tlv: *TlvPtrSection, sym_index: Symbol.Index, macho_file: *MachO) !void {
+    pub fn addSymbol(tlv: *TlvPtrSection, ref: MachO.Ref, macho_file: *MachO) !void {
         const gpa = macho_file.base.allocator;
         const index = @as(Index, @intCast(tlv.symbols.items.len));
         const entry = try tlv.symbols.addOne(gpa);
-        entry.* = sym_index;
-        const symbol = macho_file.getSymbol(sym_index);
+        entry.* = ref;
+        const symbol = ref.getSymbol(macho_file);
         symbol.addExtra(.{ .tlv_ptr = index }, macho_file);
     }
 
@@ -345,8 +346,8 @@ pub const TlvPtrSection = struct {
         const tracy = trace(@src());
         defer tracy.end();
 
-        for (tlv.symbols.items) |sym_index| {
-            const sym = macho_file.getSymbol(sym_index);
+        for (tlv.symbols.items) |ref| {
+            const sym = ref.getSymbol(macho_file);
             if (sym.flags.import) {
                 try writer.writeInt(u64, 0, .little);
             } else {
@@ -372,12 +373,12 @@ pub const TlvPtrSection = struct {
     ) !void {
         _ = options;
         _ = unused_fmt_string;
-        for (ctx.tlv.symbols.items, 0..) |entry, i| {
-            const symbol = ctx.macho_file.getSymbol(entry);
-            try writer.print("  {d}@0x{x} => {d}@0x{x} ({s})\n", .{
+        for (ctx.tlv.symbols.items, 0..) |ref, i| {
+            const symbol = ref.getSymbol(ctx.macho_file);
+            try writer.print("  {d}@0x{x} => {}@0x{x} ({s})\n", .{
                 i,
                 symbol.getTlvPtrAddress(ctx.macho_file),
-                entry,
+                ref,
                 symbol.getAddress(.{}, ctx.macho_file),
                 symbol.getName(ctx.macho_file),
             });
@@ -386,7 +387,7 @@ pub const TlvPtrSection = struct {
 };
 
 pub const ObjcStubsSection = struct {
-    symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
+    symbols: std.ArrayListUnmanaged(MachO.Ref) = .{},
 
     pub fn deinit(objc: *ObjcStubsSection, allocator: Allocator) void {
         objc.symbols.deinit(allocator);
@@ -400,12 +401,12 @@ pub const ObjcStubsSection = struct {
         };
     }
 
-    pub fn addSymbol(objc: *ObjcStubsSection, sym_index: Symbol.Index, macho_file: *MachO) !void {
+    pub fn addSymbol(objc: *ObjcStubsSection, ref: MachO.Ref, macho_file: *MachO) !void {
         const gpa = macho_file.base.allocator;
         const index = @as(Index, @intCast(objc.symbols.items.len));
         const entry = try objc.symbols.addOne(gpa);
-        entry.* = sym_index;
-        const symbol = macho_file.getSymbol(sym_index);
+        entry.* = ref;
+        const symbol = ref.getSymbol(macho_file);
         symbol.addExtra(.{ .objc_stubs = index }, macho_file);
     }
 
@@ -423,8 +424,10 @@ pub const ObjcStubsSection = struct {
         const tracy = trace(@src());
         defer tracy.end();
 
-        for (objc.symbols.items, 0..) |sym_index, idx| {
-            const sym = macho_file.getSymbol(sym_index);
+        const obj = macho_file.getInternalObject().?;
+
+        for (objc.symbols.items, 0..) |ref, idx| {
+            const sym = ref.getSymbol(macho_file);
             const addr = objc.getAddress(@intCast(idx), macho_file);
             switch (macho_file.options.cpu_arch.?) {
                 .x86_64 => {
@@ -436,7 +439,7 @@ pub const ObjcStubsSection = struct {
                     }
                     try writer.writeAll(&.{ 0xff, 0x25 });
                     {
-                        const target_sym = macho_file.getSymbol(macho_file.objc_msg_send_index.?);
+                        const target_sym = obj.getObjcMsgSendRef().getSymbol(macho_file);
                         const target = target_sym.getGotAddress(macho_file);
                         const source = addr + 7;
                         try writer.writeInt(i32, @intCast(target - source - 2 - 4), .little);
@@ -456,7 +459,7 @@ pub const ObjcStubsSection = struct {
                         );
                     }
                     {
-                        const target_sym = macho_file.getSymbol(macho_file.objc_msg_send_index.?);
+                        const target_sym = obj.getObjcMsgSendRef().getSymbol(macho_file);
                         const target = target_sym.getGotAddress(macho_file);
                         const source = addr + 2 * @sizeOf(u32);
                         const pages = try aarch64.calcNumberOfPages(@intCast(source), @intCast(target));
@@ -495,12 +498,12 @@ pub const ObjcStubsSection = struct {
     ) !void {
         _ = options;
         _ = unused_fmt_string;
-        for (ctx.objc.symbols.items, 0..) |entry, i| {
-            const symbol = ctx.macho_file.getSymbol(entry);
-            try writer.print("  {d}@0x{x} => {d}@0x{x} ({s})\n", .{
+        for (ctx.objc.symbols.items, 0..) |ref, i| {
+            const symbol = ref.getSymbol(ctx.macho_file);
+            try writer.print("  {d}@0x{x} => {}@0x{x} ({s})\n", .{
                 i,
                 symbol.getObjcStubsAddress(ctx.macho_file),
-                entry,
+                ref,
                 symbol.getAddress(.{}, ctx.macho_file),
                 symbol.getName(ctx.macho_file),
             });
@@ -526,18 +529,18 @@ pub const Indsymtab = struct {
 
         _ = ind;
 
-        for (macho_file.stubs.symbols.items) |sym_index| {
-            const sym = macho_file.getSymbol(sym_index);
+        for (macho_file.stubs.symbols.items) |ref| {
+            const sym = ref.getSymbol(macho_file);
             try writer.writeInt(u32, sym.getOutputSymtabIndex(macho_file).?, .little);
         }
 
-        for (macho_file.got.symbols.items) |sym_index| {
-            const sym = macho_file.getSymbol(sym_index);
+        for (macho_file.got.symbols.items) |ref| {
+            const sym = ref.getSymbol(macho_file);
             try writer.writeInt(u32, sym.getOutputSymtabIndex(macho_file).?, .little);
         }
 
-        for (macho_file.stubs.symbols.items) |sym_index| {
-            const sym = macho_file.getSymbol(sym_index);
+        for (macho_file.stubs.symbols.items) |ref| {
+            const sym = ref.getSymbol(macho_file);
             try writer.writeInt(u32, sym.getOutputSymtabIndex(macho_file).?, .little);
         }
     }

@@ -145,6 +145,29 @@ pub const File = union(enum) {
         }
     }
 
+    pub fn createSymbolIndirection(file: File, macho_file: *MachO) !void {
+        for (file.getSymbols()) |ref| {
+            if (ref.file != file.getIndex()) continue;
+            const sym = ref.getSymbol(macho_file);
+            if (sym.getSectionFlags().got) {
+                log.debug("'{s}' needs GOT", .{sym.getName(macho_file)});
+                try macho_file.got.addSymbol(ref, macho_file);
+            }
+            if (sym.getSectionFlags().stubs) {
+                log.debug("'{s}' needs STUBS", .{sym.getName(macho_file)});
+                try macho_file.stubs.addSymbol(ref, macho_file);
+            }
+            if (sym.getSectionFlags().tlv_ptr) {
+                log.debug("'{s}' needs TLV pointer", .{sym.getName(macho_file)});
+                try macho_file.tlv_ptr.addSymbol(ref, macho_file);
+            }
+            if (sym.getSectionFlags().objc_stubs) {
+                log.debug("'{s}' needs OBJC STUBS", .{sym.getName(macho_file)});
+                try macho_file.objc_stubs.addSymbol(ref, macho_file);
+            }
+        }
+    }
+
     pub fn initOutputSections(file: File, macho_file: *MachO) !void {
         const tracy = trace(@src());
         defer tracy.end();
@@ -182,6 +205,7 @@ pub const File = union(enum) {
 
 const assert = std.debug.assert;
 const bind = @import("dyld_info/bind.zig");
+const log = std.log.scoped(.macho);
 const macho = std.macho;
 const std = @import("std");
 const trace = @import("../tracy.zig").trace;

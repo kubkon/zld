@@ -35,6 +35,16 @@ pub fn isLocal(symbol: Symbol) bool {
     return !(symbol.flags.import or symbol.flags.@"export");
 }
 
+pub fn isUndefined(symbol: Symbol, macho_file: *MachO) bool {
+    switch (symbol.getFile(macho_file).?) {
+        .dylib => return false,
+        .internal, .object => {
+            const nlist = symbol.getNlist(macho_file);
+            return nlist.undf() and !(nlist.weakRef() and symbol.flags.import and symbol.visibility == .global);
+        },
+    }
+}
+
 pub fn isSymbolStab(symbol: Symbol, macho_file: *MachO) bool {
     const file = symbol.getFile(macho_file) orelse return false;
     return switch (file) {
