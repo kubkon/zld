@@ -147,7 +147,8 @@ pub fn getObjcStubsAddress(symbol: Symbol, macho_file: *MachO) u64 {
 pub fn getObjcSelrefsAddress(symbol: Symbol, macho_file: *MachO) u64 {
     if (!symbol.getSectionFlags().objc_stubs) return 0;
     const extra = symbol.getExtra(macho_file);
-    return macho_file.getSymbol(extra.objc_selrefs).getAddress(.{}, macho_file);
+    const ref = MachO.Ref{ .index = extra.objc_selrefs_index, .file = extra.objc_selrefs_file };
+    return ref.getSymbol(macho_file).getAddress(.{}, macho_file);
 }
 
 pub fn getTlvPtrAddress(symbol: Symbol, macho_file: *MachO) u64 {
@@ -187,9 +188,10 @@ const AddExtraOpts = struct {
     got: ?u32 = null,
     stubs: ?u32 = null,
     objc_stubs: ?u32 = null,
-    objc_selrefs: ?u32 = null,
     tlv_ptr: ?u32 = null,
     symtab: ?u32 = null,
+    objc_selrefs_index: ?u32 = null,
+    objc_selrefs_file: ?u32 = null,
 };
 
 pub fn addExtra(symbol: *Symbol, opts: AddExtraOpts, macho_file: *MachO) void {
@@ -381,9 +383,10 @@ pub const Extra = struct {
     got: u32 = 0,
     stubs: u32 = 0,
     objc_stubs: u32 = 0,
-    objc_selrefs: u32 = 0,
     tlv_ptr: u32 = 0,
     symtab: u32 = 0,
+    objc_selrefs_index: u32 = 0,
+    objc_selrefs_file: u32 = 0,
 };
 
 pub const Index = u32;

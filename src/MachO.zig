@@ -374,10 +374,11 @@ pub fn flush(self: *MachO) !void {
     // try self.resolveSyntheticSymbols();
 
     try self.convertTentativeDefinitions();
+    try self.createObjcSections();
+    try self.dedupLiterals();
+
     state_log.debug("{}", .{self.dumpState()});
     return error.ToDo;
-    //     try self.createObjcSections();
-    //     try self.dedupLiterals();
     //     try self.claimUnresolved();
 
     //     if (self.options.dead_strip) {
@@ -1129,34 +1130,51 @@ fn resolveSyntheticSymbols(self: *MachO) !void {
 
 fn createObjcSections(self: *MachO) !void {
     const gpa = self.base.allocator;
-    var objc_msgsend_syms = std.AutoArrayHashMap(Symbol.Index, void).init(gpa);
+    var objc_msgsend_syms = std.AutoArrayHashMap(Ref, void).init(gpa);
     defer objc_msgsend_syms.deinit();
 
     for (self.objects.items) |index| {
         const object = self.getFile(index).?.object;
 
-        for (object.symbols.items, 0..) |sym_index, i| {
+        for (object.symbols_refs.items, 0..) |ref, i| {
             const nlist_idx = @as(Symbol.Index, @intCast(i));
             const nlist = object.symtab.items(.nlist)[nlist_idx];
             if (!nlist.ext()) continue;
             if (!nlist.undf()) continue;
 
-            const sym = self.getSymbol(sym_index);
-            if (sym.getFile(self) != null) continue;
+            const sym = ref.getSymbol(self);
+            if (sym.getFile(self).? != .dylib and !sym.getNlist(self).undf()) continue;
             if (mem.startsWith(u8, sym.getName(self), "_objc_msgSend$")) {
-                _ = try objc_msgsend_syms.put(sym_index, {});
+                _ = try objc_msgsend_syms.put(ref, {});
             }
         }
     }
 
-    for (objc_msgsend_syms.keys()) |sym_index| {
+    for (objc_msgsend_syms.keys()) |ref| {
         const internal = self.getInternalObject().?;
-        const sym = self.getSymbol(sym_index);
-        _ = try internal.addSymbol(sym.getName(self), self);
+        const sym_name = ref.getSymbol(self).getName(self);
+        const name_off = try internal.addString(gpa, sym_name);
+        const sym_index = try internal.addSymbol(gpa);
+        try internal.symbols_refs.append(gpa, .{ .index = sym_index, .file = internal.index });
+        const sym = internal.getSymbol(sym_index);
+        sym.name = name_off;
         sym.visibility = .hidden;
-        const name = eatPrefix(sym.getName(self), "_objc_msgSend$").?;
-        const selrefs_index = try internal.addObjcMsgsendSections(name, self);
-        sym.addExtra(.{ .objc_selrefs = selrefs_index }, self);
+        const nlist_idx: u32 = @intCast(internal.symtab.items.len);
+        const nlist = try internal.symtab.addOne(gpa);
+        nlist.* = .{
+            .n_strx = name_off,
+            .n_type = macho.N_SECT | macho.N_EXT | macho.N_PEXT,
+            .n_sect = 0,
+            .n_desc = 0,
+            .n_value = 0,
+        };
+        sym.nlist_idx = nlist_idx;
+        const name = eatPrefix(sym_name, "_objc_msgSend$").?;
+        const selrefs_ref = try internal.addObjcMsgsendSections(name, self);
+        sym.extra = try internal.addSymbolExtra(gpa, .{
+            .objc_selrefs_index = selrefs_ref.index,
+            .objc_selrefs_file = selrefs_ref.file,
+        });
         sym.setSectionFlags(.{ .objc_stubs = true });
     }
 }
@@ -3100,7 +3118,7 @@ const default_pagezero_vmsize: u64 = 0x100000000;
 pub const LiteralPool = struct {
     table: std.AutoArrayHashMapUnmanaged(void, void) = .{},
     keys: std.ArrayListUnmanaged(Key) = .{},
-    values: std.ArrayListUnmanaged(Symbol.Index) = .{},
+    values: std.ArrayListUnmanaged(MachO.Ref) = .{},
     data: std.ArrayListUnmanaged(u8) = .{},
 
     pub fn deinit(lp: *LiteralPool, allocator: Allocator) void {
@@ -3113,16 +3131,16 @@ pub const LiteralPool = struct {
     const InsertResult = struct {
         found_existing: bool,
         index: Index,
-        symbol: *Symbol.Index,
+        ref: *MachO.Ref,
     };
 
-    pub fn getSymbolIndex(lp: LiteralPool, index: Index) Symbol.Index {
+    pub fn getSymbolRef(lp: LiteralPool, index: Index) MachO.Ref {
         assert(index < lp.values.items.len);
         return lp.values.items[index];
     }
 
     pub fn getSymbol(lp: LiteralPool, index: Index, macho_file: *MachO) *Symbol {
-        return macho_file.getSymbol(lp.getSymbolIndex(index));
+        return lp.getSymbolRef(index).getSymbol(macho_file);
     }
 
     pub fn insert(lp: *LiteralPool, allocator: Allocator, @"type": u8, string: []const u8) !InsertResult {
@@ -3140,7 +3158,7 @@ pub const LiteralPool = struct {
         return .{
             .found_existing = gop.found_existing,
             .index = @intCast(gop.index),
-            .symbol = &lp.values.items[gop.index],
+            .ref = &lp.values.items[gop.index],
         };
     }
 

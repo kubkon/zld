@@ -575,16 +575,13 @@ pub fn resolveLiterals(self: *Object, lp: *MachO.LiteralPool, macho_file: *MachO
                         .size = atom.size,
                         .atom = sub.atom,
                     });
-                    const sym_index = try macho_file.addSymbol();
-                    try self.symbols.append(gpa, sym_index);
-                    const sym = macho_file.getSymbol(sym_index);
-                    sym.* = .{
-                        .atom_ref = .{ .index = sub.atom, .file = self.index },
-                        .file = self.index,
-                        .nlist_idx = nlist_index,
-                        .extra = try macho_file.addSymbolExtra(.{}),
-                    };
-                    res.symbol.* = sym_index;
+                    const sym_index = try self.addSymbol(gpa);
+                    try self.symbols_refs.append(gpa, .{ .index = sym_index, .file = self.index });
+                    const sym = self.getSymbol(sym_index);
+                    sym.atom_ref = .{ .index = sub.atom, .file = self.index };
+                    sym.nlist_idx = nlist_index;
+                    sym.extra = try self.addSymbolExtra(gpa, .{});
+                    res.ref.* = .{ .index = sym_index, .file = self.index };
                 }
                 atom.flags.literal_pool = true;
                 try atom.addExtra(.{ .literal_index = res.index }, macho_file);
@@ -596,7 +593,7 @@ pub fn resolveLiterals(self: *Object, lp: *MachO.LiteralPool, macho_file: *MachO
                 assert(relocs.len == 1);
                 const rel = relocs[0];
                 const target = switch (rel.tag) {
-                    .local => rel.getTargetAtom(atom.*, macho_file),
+                    .local => rel.getTargetAtom(macho_file),
                     .@"extern" => rel.getTargetSymbol(macho_file).getAtom(macho_file).?,
                 };
                 const addend = math.cast(u32, rel.addend) orelse return error.Overflow;
@@ -618,16 +615,13 @@ pub fn resolveLiterals(self: *Object, lp: *MachO.LiteralPool, macho_file: *MachO
                         .size = atom.size,
                         .atom = sub.atom,
                     });
-                    const sym_index = try macho_file.addSymbol();
-                    try self.symbols.append(gpa, sym_index);
-                    const sym = macho_file.getSymbol(sym_index);
-                    sym.* = .{
-                        .atom_ref = .{ .index = sub.atom, .file = self.index },
-                        .file = self.index,
-                        .nlist_idx = nlist_index,
-                        .extra = try macho_file.addSymbolExtra(.{}),
-                    };
-                    res.symbol.* = sym_index;
+                    const sym_index = try self.addSymbol(gpa);
+                    try self.symbols_refs.append(gpa, .{ .index = sym_index, .file = self.index });
+                    const sym = self.getSymbol(sym_index);
+                    sym.atom_ref = .{ .index = sub.atom, .file = self.index };
+                    sym.nlist_idx = nlist_index;
+                    sym.extra = try self.addSymbolExtra(gpa, .{});
+                    res.ref.* = .{ .index = sym_index, .file = self.index };
                 }
                 atom.flags.literal_pool = true;
                 try atom.addExtra(.{ .literal_index = res.index }, macho_file);
@@ -652,7 +646,7 @@ pub fn dedupLiterals(self: *Object, lp: MachO.LiteralPool, macho_file: *MachO) v
         };
         for (relocs) |*rel| switch (rel.tag) {
             .local => {
-                const target = rel.getTargetAtom(atom.*, macho_file);
+                const target = rel.getTargetAtom(macho_file);
                 if (target.getLiteralPoolIndex(macho_file)) |lp_index| {
                     const lp_sym = lp.getSymbol(lp_index, macho_file);
                     const lp_atom_ref = lp_sym.atom_ref;
@@ -662,7 +656,7 @@ pub fn dedupLiterals(self: *Object, lp: MachO.LiteralPool, macho_file: *MachO) v
                         _ = target.alive.swap(false, .seq_cst);
                         rel.mutex.lock();
                         defer rel.mutex.unlock();
-                        rel.target = lp.getSymbolIndex(lp_index);
+                        rel.target = lp.getSymbolRef(lp_index);
                         rel.tag = .@"extern";
                     }
                 }

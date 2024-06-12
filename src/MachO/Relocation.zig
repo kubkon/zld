@@ -13,12 +13,12 @@ mutex: std.Thread.Mutex = .{},
 
 pub fn getTargetSymbol(rel: Relocation, macho_file: *MachO) *Symbol {
     assert(rel.tag == .@"extern");
-    return rel.ref.getSymbol(macho_file);
+    return rel.target.getSymbol(macho_file);
 }
 
 pub fn getTargetAtom(rel: Relocation, macho_file: *MachO) *Atom {
     assert(rel.tag == .local);
-    return rel.ref.getAtom(macho_file).?;
+    return rel.target.getAtom(macho_file).?;
 }
 
 pub fn getTargetAddress(rel: Relocation, macho_file: *MachO) u64 {
