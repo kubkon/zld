@@ -47,7 +47,14 @@ pub fn initSymbols(self: *InternalObject, macho_file: *MachO) !void {
     var nsyms = macho_file.options.force_undefined_symbols.len;
     nsyms += 1; // dyld_stub_binder
     nsyms += 1; // _objc_msgSend
-    if (!macho_file.options.dylib) nsyms += 1;
+    if (!macho_file.options.dylib) {
+        nsyms += 1; // entry
+        nsyms += 1; // __mh_execute_header
+    } else {
+        nsyms += 1; // __mh_dylib_header
+    }
+    nsyms += 1; // ___dso_handle
+    nsyms += 1; // dyld_private
 
     try self.symbols.ensureTotalCapacityPrecise(gpa, nsyms);
     try self.symbols_refs.ensureTotalCapacityPrecise(gpa, nsyms);
@@ -57,34 +64,55 @@ pub fn initSymbols(self: *InternalObject, macho_file: *MachO) !void {
     self.globals.resize(gpa, nsyms) catch unreachable;
     @memset(self.globals.items, 0);
 
-    const addUndef = struct {
-        fn addUndef(obj: *InternalObject, name: u32) void {
-            const index = obj.addSymbolAssumeCapacity();
-            obj.symbols_refs.addOneAssumeCapacity().* = .{ .index = index, .file = obj.index };
-            const symbol = obj.getSymbol(index);
-            symbol.name = name;
-            symbol.extra = obj.addSymbolExtraAssumeCapacity(.{});
-
-            const nlist_idx: u32 = @intCast(obj.symtab.items.len);
-            const nlist = obj.symtab.addOneAssumeCapacity();
-            nlist.* = .{
-                .n_strx = name,
-                .n_type = macho.N_UNDF,
-                .n_sect = 0,
-                .n_desc = 0,
-                .n_value = 0,
-            };
-            symbol.nlist_idx = nlist_idx;
-        }
-    }.addUndef;
-
     for (macho_file.options.force_undefined_symbols) |name| {
-        addUndef(self, try self.addString(gpa, name));
+        self.createSymbol(try self.addString(gpa, name), .{});
     }
 
-    addUndef(self, try self.addString(gpa, macho_file.options.entry orelse "_main"));
-    addUndef(self, try self.addString(gpa, "dyld_stub_binder"));
-    addUndef(self, try self.addString(gpa, "_objc_msgSend"));
+    self.createSymbol(try self.addString(gpa, "dyld_stub_binder"), .{});
+    self.createSymbol(try self.addString(gpa, "_objc_msgSend"), .{});
+
+    if (!macho_file.options.dylib) {
+        self.createSymbol(try self.addString(gpa, macho_file.options.entry orelse "_main"), .{});
+        self.createSymbol(try self.addString(gpa, "__mh_execute_header"), .{
+            .type = macho.N_SECT | macho.N_EXT,
+            .desc = macho.REFERENCED_DYNAMICALLY,
+        });
+    } else {
+        self.createSymbol(try self.addString(gpa, "__mh_dylib_header"), .{
+            .type = macho.N_SECT | macho.N_EXT,
+        });
+    }
+
+    self.createSymbol(try self.addString(gpa, "___dso_handle"), .{
+        .type = macho.N_SECT | macho.N_EXT,
+    });
+    self.createSymbol(try self.addString(gpa, "dyld_private"), .{
+        .type = macho.N_SECT | macho.N_EXT | macho.N_PEXT,
+    });
+}
+
+fn createSymbol(self: *InternalObject, name: u32, args: struct {
+    type: u8 = macho.N_UNDF,
+    desc: u16 = 0,
+}) void {
+    const index = self.addSymbolAssumeCapacity();
+    self.symbols_refs.addOneAssumeCapacity().* = .{ .index = index, .file = self.index };
+    const symbol = self.getSymbol(index);
+    symbol.name = name;
+    symbol.extra = self.addSymbolExtraAssumeCapacity(.{});
+    symbol.flags.dyn_ref = args.desc & macho.REFERENCED_DYNAMICALLY != 0;
+    symbol.visibility = if (args.type == macho.N_EXT) .global else .local;
+
+    const nlist_idx: u32 = @intCast(self.symtab.items.len);
+    const nlist = self.symtab.addOneAssumeCapacity();
+    nlist.* = .{
+        .n_strx = name,
+        .n_type = args.type,
+        .n_sect = 0,
+        .n_desc = args.desc,
+        .n_value = 0,
+    };
+    symbol.nlist_idx = nlist_idx;
 }
 
 pub fn resolveSymbols(self: *InternalObject, macho_file: *MachO) !void {

@@ -367,14 +367,14 @@ pub fn flush(self: *MachO) !void {
     }
 
     try self.resolveSymbols();
-
-    state_log.debug("{}", .{self.dumpState()});
-    return error.ToDo;
-    //     try self.parseDebugInfo();
+    try self.parseDebugInfo();
 
     //     if (self.options.relocatable) return relocatable.flush(self);
 
-    //     try self.resolveSyntheticSymbols();
+    // try self.resolveSyntheticSymbols();
+
+    state_log.debug("{}", .{self.dumpState()});
+    return error.ToDo;
 
     //     try self.convertTentativeDefinitions();
     //     try self.createObjcSections();
@@ -1096,19 +1096,6 @@ fn initOutputSections(self: *MachO) !void {
 
 fn resolveSyntheticSymbols(self: *MachO) !void {
     const internal = self.getInternalObject() orelse return;
-
-    if (!self.options.dylib) {
-        self.mh_execute_header_index = try internal.addSymbol("__mh_execute_header", self);
-        const sym = self.getSymbol(self.mh_execute_header_index.?);
-        sym.flags.@"export" = true;
-        sym.flags.dyn_ref = true;
-        sym.visibility = .global;
-    } else if (self.options.dylib) {
-        self.mh_dylib_header_index = try internal.addSymbol("__mh_dylib_header", self);
-    }
-
-    self.dso_handle_index = try internal.addSymbol("___dso_handle", self);
-    self.dyld_private_index = try internal.addSymbol("dyld_private", self);
 
     {
         const gpa = self.base.allocator;
