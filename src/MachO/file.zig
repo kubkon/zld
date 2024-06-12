@@ -83,9 +83,9 @@ pub const File = union(enum) {
         return base + (file.getIndex() << 24);
     }
 
-    pub fn getSymbols(file: File) []const Symbol.Index {
+    pub fn getSymbols(file: File) []const MachO.Ref {
         return switch (file) {
-            inline else => |x| x.symbols.items,
+            inline else => |x| x.symbols_refs.items,
         };
     }
 
@@ -128,6 +128,21 @@ pub const File = union(enum) {
         return switch (file) {
             inline else => |x| x.getSymbol(sym_index),
         };
+    }
+
+    pub fn markImportsAndExports(file: File, macho_file: *MachO) void {
+        assert(file != .dylib);
+        for (file.getSymbols()) |ref| {
+            const sym = ref.getSymbol(macho_file);
+            if (sym.visibility != .global) continue;
+            if (sym.getFile(macho_file).? == .dylib and !sym.flags.abs) {
+                sym.flags.import = true;
+                continue;
+            }
+            if (file.getIndex() == ref.file) {
+                sym.flags.@"export" = true;
+            }
+        }
     }
 
     pub fn initOutputSections(file: File, macho_file: *MachO) !void {

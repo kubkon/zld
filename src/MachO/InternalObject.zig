@@ -54,7 +54,9 @@ pub fn initSymbols(self: *InternalObject, macho_file: *MachO) !void {
             symbol.name = name;
             symbol.extra = obj.addSymbolExtraAssumeCapacity(.{});
             symbol.flags.dyn_ref = args.desc & macho.REFERENCED_DYNAMICALLY != 0;
-            symbol.visibility = if (args.type == macho.N_EXT) .global else .local;
+            symbol.visibility = if (args.type & macho.N_EXT != 0) blk: {
+                break :blk if (args.type & macho.N_PEXT != 0) .hidden else .global;
+            } else .local;
 
             const nlist_idx: u32 = @intCast(obj.symtab.items.len);
             const nlist = obj.symtab.addOneAssumeCapacity();

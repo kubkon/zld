@@ -382,10 +382,11 @@ pub fn flush(self: *MachO) !void {
     //         try dead_strip.gcAtoms(self);
     //     }
 
+    self.markImportsAndExports();
+
     state_log.debug("{}", .{self.dumpState()});
     return error.ToDo;
 
-    //     self.markImportsAndExports();
     //     self.deadStripDylibs();
 
     //     for (self.dylibs.items, 1..) |index, ord| {
@@ -1043,41 +1044,11 @@ fn convertTentativeDefinitions(self: *MachO) !void {
 fn markImportsAndExports(self: *MachO) void {
     const tracy = trace(@src());
     defer tracy.end();
-
     for (self.objects.items) |index| {
-        for (self.getFile(index).?.getSymbols()) |sym_index| {
-            const sym = self.getSymbol(sym_index);
-            const file = sym.getFile(self) orelse continue;
-            if (sym.visibility != .global) continue;
-            if (file == .dylib and !sym.flags.abs) {
-                sym.flags.import = true;
-                continue;
-            }
-            if (file.getIndex() == index) {
-                sym.flags.@"export" = true;
-            }
-        }
+        self.getFile(index).?.markImportsAndExports(self);
     }
-
-    for (self.undefined_symbols.items) |index| {
-        const sym = self.getSymbol(index);
-        if (sym.getFile(self)) |file| {
-            if (sym.visibility != .global) continue;
-            if (file == .dylib and !sym.flags.abs) sym.flags.import = true;
-        }
-    }
-
-    for (&[_]?Symbol.Index{
-        self.entry_index,
-        self.dyld_stub_binder_index,
-        self.objc_msg_send_index,
-    }) |index| {
-        if (index) |idx| {
-            const sym = self.getSymbol(idx);
-            if (sym.getFile(self)) |file| {
-                if (file == .dylib) sym.flags.import = true;
-            }
-        }
+    if (self.getInternalObject()) |obj| {
+        obj.asFile().markImportsAndExports(self);
     }
 }
 
