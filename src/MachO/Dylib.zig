@@ -557,10 +557,9 @@ pub fn markReferenced(self: *Dylib, macho_file: *MachO) void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    for (self.symbols.items) |global_index| {
-        const global = macho_file.getSymbol(global_index);
-        const file_ptr = global.getFile(macho_file) orelse continue;
-        if (file_ptr.getIndex() != self.index) continue;
+    for (self.symbols_refs.items) |ref| {
+        if (ref.file != self.index) continue;
+        const global = ref.getSymbol(macho_file);
         if (global.isLocal()) continue;
         self.referenced = true;
         break;

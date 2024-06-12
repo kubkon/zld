@@ -383,11 +383,10 @@ pub fn flush(self: *MachO) !void {
     //     }
 
     self.markImportsAndExports();
+    self.deadStripDylibs();
 
     state_log.debug("{}", .{self.dumpState()});
     return error.ToDo;
-
-    //     self.deadStripDylibs();
 
     //     for (self.dylibs.items, 1..) |index, ord| {
     //         const dylib = self.getFile(index).?.dylib;
@@ -1007,19 +1006,6 @@ fn parseDebugInfo(self: *MachO) !void {
 }
 
 fn deadStripDylibs(self: *MachO) void {
-    for (&[_]?Symbol.Index{
-        self.entry_index,
-        self.dyld_stub_binder_index,
-        self.objc_msg_send_index,
-    }) |index| {
-        if (index) |idx| {
-            const sym = self.getSymbol(idx);
-            if (sym.getFile(self)) |file| {
-                if (file == .dylib) file.dylib.referenced = true;
-            }
-        }
-    }
-
     for (self.dylibs.items) |index| {
         self.getFile(index).?.dylib.markReferenced(self);
     }
