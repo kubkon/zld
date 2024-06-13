@@ -713,9 +713,14 @@ fn formatSymtab(
     const dylib = ctx.dylib;
     const macho_file = ctx.macho_file;
     try writer.writeAll("  globals\n");
-    for (0..dylib.symbols.items.len) |i| {
-        const sym = dylib.getSymbolRef(@intCast(i), macho_file).getSymbol(macho_file).?;
-        try writer.print("    {}\n", .{sym.fmt(macho_file)});
+    for (dylib.symbols.items, 0..) |sym, i| {
+        const ref = dylib.getSymbolRef(@intCast(i), macho_file);
+        if (ref.getFile(macho_file) == null) {
+            // TODO any better way of handling this?
+            try writer.print("    {s} : unclaimed\n", .{sym.getName(macho_file)});
+        } else {
+            try writer.print("    {}\n", .{ref.getSymbol(macho_file).?.fmt(macho_file)});
+        }
     }
 }
 

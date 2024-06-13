@@ -1148,6 +1148,7 @@ fn claimUnresolved(self: *MachO) error{OutOfMemory}!void {
                 sym.flags.weak_ref = nlist.weakRef();
                 sym.flags.import = is_import;
                 sym.visibility = .global;
+                self.resolver.refs.getPtr(object.globals.items[i]).?.* = .{ .index = @intCast(i), .file = object.index };
             }
         }
     }
