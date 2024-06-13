@@ -564,16 +564,16 @@ pub fn calcSymtabSize(self: *Dylib, macho_file: *MachO) void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    for (self.symbols.items) |global_index| {
-        const global = macho_file.getSymbol(global_index);
-        const file_ptr = global.getFile(macho_file) orelse continue;
-        if (file_ptr.getIndex() != self.index) continue;
-        if (global.isLocal()) continue;
-        assert(global.flags.import);
-        global.flags.output_symtab = true;
-        global.addExtra(.{ .symtab = self.output_symtab_ctx.nimports }, macho_file);
+    for (self.symbols.items, 0..) |*sym, i| {
+        const ref = self.getSymbolRef(@intCast(i), macho_file);
+        const file = ref.getFile(macho_file) orelse continue;
+        if (file.getIndex() != self.index) continue;
+        if (sym.isLocal()) continue;
+        assert(sym.flags.import);
+        sym.flags.output_symtab = true;
+        sym.addExtra(.{ .symtab = self.output_symtab_ctx.nimports }, macho_file);
         self.output_symtab_ctx.nimports += 1;
-        self.output_symtab_ctx.strsize += @as(u32, @intCast(global.getName(macho_file).len + 1));
+        self.output_symtab_ctx.strsize += @as(u32, @intCast(sym.getName(macho_file).len + 1));
     }
 }
 
@@ -582,15 +582,15 @@ pub fn writeSymtab(self: Dylib, macho_file: *MachO) void {
     defer tracy.end();
 
     var n_strx = self.output_symtab_ctx.stroff;
-    for (self.symbols.items) |global_index| {
-        const global = macho_file.getSymbol(global_index);
-        const file = global.getFile(macho_file) orelse continue;
+    for (self.symbols.items, 0..) |sym, i| {
+        const ref = self.getSymbolRef(@intCast(i), macho_file);
+        const file = ref.getFile(macho_file) orelse continue;
         if (file.getIndex() != self.index) continue;
-        const idx = global.getOutputSymtabIndex(macho_file) orelse continue;
+        const idx = sym.getOutputSymtabIndex(macho_file) orelse continue;
         const out_sym = &macho_file.symtab.items[idx];
         out_sym.n_strx = n_strx;
-        global.setOutputSym(macho_file, out_sym);
-        const name = global.getName(macho_file);
+        sym.setOutputSym(macho_file, out_sym);
+        const name = sym.getName(macho_file);
         @memcpy(macho_file.strtab.items[n_strx..][0..name.len], name);
         n_strx += @intCast(name.len);
         macho_file.strtab.items[n_strx] = 0;

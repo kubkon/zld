@@ -149,7 +149,7 @@ pub fn getObjcSelrefsAddress(symbol: Symbol, macho_file: *MachO) u64 {
     const extra = symbol.getExtra(macho_file);
     const file = symbol.getFile(macho_file).?;
     const ref = file.getSymbolRef(extra.objc_selrefs, macho_file);
-    return ref.getSymbol(macho_file).getAddress(.{}, macho_file);
+    return ref.getSymbol(macho_file).?.getAddress(.{}, macho_file);
 }
 
 pub fn getTlvPtrAddress(symbol: Symbol, macho_file: *MachO) u64 {

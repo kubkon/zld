@@ -315,38 +315,27 @@ pub fn updateSize(self: *Trie, macho_file: *MachO) error{OutOfMemory}!void {
     try self.init(gpa);
 
     const seg = macho_file.getTextSegment();
-    for (macho_file.objects.items) |index| {
-        for (macho_file.getFile(index).?.getSymbols()) |sym_index| {
-            const sym = macho_file.getSymbol(sym_index);
-            if (!sym.flags.@"export") continue;
-            if (sym.getAtom(macho_file)) |atom| if (!atom.alive.load(.seq_cst)) continue;
-            if (sym.getFile(macho_file).?.getIndex() != index) continue;
-            var flags: u64 = if (sym.flags.abs)
-                macho.EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE
-            else if (sym.flags.tlv)
-                macho.EXPORT_SYMBOL_FLAGS_KIND_THREAD_LOCAL
-            else
-                macho.EXPORT_SYMBOL_FLAGS_KIND_REGULAR;
-            if (sym.flags.weak) {
-                flags |= macho.EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION;
-                // TODO these should be atomic
-                macho_file.weak_defines = true;
-                macho_file.binds_to_weak = true;
-            }
-            try self.put(gpa, .{
-                .name = sym.getName(macho_file),
-                .vmaddr_offset = sym.getAddress(.{ .stubs = false }, macho_file) - seg.vmaddr,
-                .export_flags = flags,
-            });
+    for (macho_file.resolver.refs.values()) |ref| {
+        if (ref.getFile(macho_file) == null) continue;
+        const sym = ref.getSymbol(macho_file).?;
+        if (!sym.flags.@"export") continue;
+        if (sym.getAtom(macho_file)) |atom| if (!atom.alive.load(.seq_cst)) continue;
+        var flags: u64 = if (sym.flags.abs)
+            macho.EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE
+        else if (sym.flags.tlv)
+            macho.EXPORT_SYMBOL_FLAGS_KIND_THREAD_LOCAL
+        else
+            macho.EXPORT_SYMBOL_FLAGS_KIND_REGULAR;
+        if (sym.flags.weak) {
+            flags |= macho.EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION;
+            // TODO these should be atomic
+            macho_file.weak_defines = true;
+            macho_file.binds_to_weak = true;
         }
-    }
-
-    if (macho_file.mh_execute_header_index) |index| {
-        const sym = macho_file.getSymbol(index);
         try self.put(gpa, .{
             .name = sym.getName(macho_file),
-            .vmaddr_offset = sym.getAddress(.{}, macho_file) - seg.vmaddr,
-            .export_flags = macho.EXPORT_SYMBOL_FLAGS_KIND_REGULAR,
+            .vmaddr_offset = sym.getAddress(.{ .stubs = false }, macho_file) - seg.vmaddr,
+            .export_flags = flags,
         });
     }
 

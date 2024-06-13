@@ -364,7 +364,7 @@ pub fn resolveRelocs(self: Atom, macho_file: *MachO, buffer: []u8) !void {
         const subtractor = if (rel.meta.has_subtractor) relocs[i - 1] else null;
 
         if (rel.tag == .@"extern") {
-            if (rel.getTargetSymbol(macho_file).getFile(macho_file) == null) continue;
+            if (rel.getTargetSymbolRef(self, macho_file).getFile(macho_file) == null) continue;
         }
 
         try stream.seekTo(rel_offset);
@@ -401,11 +401,11 @@ fn resolveRelocInner(
     const rel_offset = rel.offset - self.off;
     const P = @as(i64, @intCast(self.getAddress(macho_file))) + @as(i64, @intCast(rel_offset));
     const A = rel.addend + rel.getRelocAddend(cpu_arch);
-    const S: i64 = @intCast(rel.getTargetAddress(macho_file));
-    const G: i64 = @intCast(rel.getGotTargetAddress(macho_file));
+    const S: i64 = @intCast(rel.getTargetAddress(self, macho_file));
+    const G: i64 = @intCast(rel.getGotTargetAddress(self, macho_file));
     const TLS = @as(i64, @intCast(macho_file.getTlsAddress()));
     const SUB = if (subtractor) |sub|
-        @as(i64, @intCast(sub.getTargetAddress(macho_file)))
+        @as(i64, @intCast(sub.getTargetAddress(self, macho_file)))
     else
         0;
 
@@ -430,7 +430,7 @@ fn resolveRelocInner(
             rel_offset,
             @tagName(rel.type),
             S + A - SUB,
-            rel.getTargetAtom(macho_file).atom_index,
+            rel.getTargetAtom(self, macho_file).atom_index,
         }),
         .@"extern" => relocs_log.debug("  {x}<+{d}>: {s}: [=> {x}] G({x}) ({s})", .{
             P,
@@ -438,7 +438,7 @@ fn resolveRelocInner(
             @tagName(rel.type),
             S + A - SUB,
             G + A,
-            rel.getTargetSymbol(macho_file).getName(macho_file),
+            rel.getTargetSymbol(self, macho_file).getName(macho_file),
         }),
     }
 
@@ -449,7 +449,7 @@ fn resolveRelocInner(
             assert(!rel.meta.pcrel);
             if (rel.meta.length == 3) {
                 if (rel.tag == .@"extern") {
-                    const sym = rel.getTargetSymbol(macho_file);
+                    const sym = rel.getTargetSymbol(self, macho_file);
                     if (sym.isTlvInit(macho_file)) {
                         try writer.writeInt(u64, @intCast(S - TLS), .little);
                         return;
@@ -479,7 +479,7 @@ fn resolveRelocInner(
                 .aarch64 => {
                     const disp: i28 = math.cast(i28, S + A - P) orelse blk: {
                         const thunk = self.getThunk(macho_file);
-                        const S_: i64 = @intCast(thunk.getTargetAddress(rel.target, macho_file));
+                        const S_: i64 = @intCast(thunk.getTargetAddress(rel.getTargetSymbolRef(self, macho_file), macho_file));
                         break :blk math.cast(i28, S_ + A - P) orelse return error.Overflow;
                     };
                     aarch64.writeBranchImm(disp, code[rel_offset..][0..4]);
@@ -492,7 +492,7 @@ fn resolveRelocInner(
             assert(rel.tag == .@"extern");
             assert(rel.meta.length == 2);
             assert(rel.meta.pcrel);
-            if (rel.getTargetSymbol(macho_file).getSectionFlags().got) {
+            if (rel.getTargetSymbol(self, macho_file).getSectionFlags().got) {
                 try writer.writeInt(i32, @intCast(G + A - P), .little);
             } else {
                 try relaxGotLoad(code[rel_offset - 3 ..]);
@@ -504,7 +504,7 @@ fn resolveRelocInner(
             assert(rel.tag == .@"extern");
             assert(rel.meta.length == 2);
             assert(rel.meta.pcrel);
-            const sym = rel.getTargetSymbol(macho_file);
+            const sym = rel.getTargetSymbol(self, macho_file);
             if (sym.getSectionFlags().tlv_ptr) {
                 const S_: i64 = @intCast(sym.getTlvPtrAddress(macho_file));
                 try writer.writeInt(i32, @intCast(S_ + A - P), .little);
@@ -527,7 +527,7 @@ fn resolveRelocInner(
             assert(rel.tag == .@"extern");
             assert(rel.meta.length == 2);
             assert(rel.meta.pcrel);
-            const sym = rel.getTargetSymbol(macho_file);
+            const sym = rel.getTargetSymbol(self, macho_file);
             const source = math.cast(u64, P) orelse return error.Overflow;
             const target = target: {
                 const target = switch (rel.type) {
@@ -586,7 +586,7 @@ fn resolveRelocInner(
             assert(rel.meta.length == 2);
             assert(!rel.meta.pcrel);
 
-            const sym = rel.getTargetSymbol(macho_file);
+            const sym = rel.getTargetSymbol(self, macho_file);
             const target = target: {
                 const target = if (sym.getSectionFlags().tlv_ptr) blk: {
                     const S_: i64 = @intCast(sym.getTlvPtrAddress(macho_file));

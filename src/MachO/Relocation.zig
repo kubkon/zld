@@ -34,10 +34,10 @@ pub fn getTargetAddress(rel: Relocation, atom: Atom, macho_file: *MachO) u64 {
     };
 }
 
-pub fn getGotTargetAddress(rel: Relocation, macho_file: *MachO) u64 {
+pub fn getGotTargetAddress(rel: Relocation, atom: Atom, macho_file: *MachO) u64 {
     return switch (rel.tag) {
         .local => 0,
-        .@"extern" => rel.getTargetSymbol(macho_file).getGotAddress(macho_file),
+        .@"extern" => rel.getTargetSymbol(atom, macho_file).getGotAddress(macho_file),
     };
 }
 

@@ -299,7 +299,7 @@ pub fn write(info: UnwindInfo, macho_file: *MachO, buffer: []u8) !void {
     try writer.writeAll(mem.sliceAsBytes(info.common_encodings[0..info.common_encodings_count]));
 
     for (info.personalities[0..info.personalities_count]) |ref| {
-        const sym = ref.getSymbol(macho_file);
+        const sym = ref.getSymbol(macho_file).?;
         try writer.writeInt(u32, @intCast(sym.getGotAddress(macho_file) - seg.vmaddr), .little);
     }
 

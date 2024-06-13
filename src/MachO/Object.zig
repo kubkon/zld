@@ -1554,9 +1554,9 @@ pub fn calcSymtabSize(self: *Object, macho_file: *MachO) void {
 
     const is_relocatable = macho_file.options.relocatable;
 
-    for (self.symbols.items) |sym_index| {
-        const sym = macho_file.getSymbol(sym_index);
-        const file = sym.getFile(macho_file) orelse continue;
+    for (self.symbols.items, 0..) |*sym, i| {
+        const ref = self.getSymbolRef(@intCast(i), macho_file);
+        const file = ref.getFile(macho_file) orelse continue;
         if (file.getIndex() != self.index) continue;
         if (sym.getAtom(macho_file)) |atom| if (!atom.alive.load(.seq_cst)) continue;
         if (sym.isSymbolStab(macho_file)) continue;
@@ -1602,9 +1602,9 @@ pub fn calcStabsSize(self: *Object, macho_file: *MachO) void {
             self.output_symtab_ctx.strsize += @as(u32, @intCast(self.path.len + 1));
         }
 
-        for (self.symbols.items) |sym_index| {
-            const sym = macho_file.getSymbol(sym_index);
-            const file = sym.getFile(macho_file) orelse continue;
+        for (self.symbols.items, 0..) |sym, i| {
+            const ref = self.getSymbolRef(@intCast(i), macho_file);
+            const file = ref.getFile(macho_file) orelse continue;
             if (file.getIndex() != self.index) continue;
             if (!sym.flags.output_symtab) continue;
             if (macho_file.options.relocatable) {
@@ -1630,7 +1630,7 @@ pub fn calcStabsSize(self: *Object, macho_file: *MachO) void {
             self.output_symtab_ctx.strsize += @as(u32, @intCast(sf.getOsoPath(self).len + 1)); // path
 
             for (sf.stabs.items) |stab| {
-                const sym = stab.getSymbol(macho_file) orelse continue;
+                const sym = stab.getSymbol(self) orelse continue;
                 const file = sym.getFile(macho_file).?;
                 if (file.getIndex() != self.index) continue;
                 if (!sym.flags.output_symtab) continue;
@@ -1646,9 +1646,9 @@ pub fn writeSymtab(self: Object, macho_file: *MachO) void {
     defer tracy.end();
 
     var n_strx = self.output_symtab_ctx.stroff;
-    for (self.symbols.items) |sym_index| {
-        const sym = macho_file.getSymbol(sym_index);
-        const file = sym.getFile(macho_file) orelse continue;
+    for (self.symbols.items, 0..) |sym, i| {
+        const ref = self.getSymbolRef(@intCast(i), macho_file);
+        const file = ref.getFile(macho_file) orelse continue;
         if (file.getIndex() != self.index) continue;
         const idx = sym.getOutputSymtabIndex(macho_file) orelse continue;
         const out_sym = &macho_file.symtab.items[idx];
@@ -1767,9 +1767,9 @@ pub fn writeStabs(self: *const Object, stroff: u32, macho_file: *MachO) void {
             n_strx += 1;
         }
 
-        for (self.symbols.items) |sym_index| {
-            const sym = macho_file.getSymbol(sym_index);
-            const file = sym.getFile(macho_file) orelse continue;
+        for (self.symbols.items, 0..) |sym, i| {
+            const ref = self.getSymbolRef(@intCast(i), macho_file);
+            const file = ref.getFile(macho_file) orelse continue;
             if (file.getIndex() != self.index) continue;
             if (!sym.flags.output_symtab) continue;
             if (macho_file.options.relocatable) {
@@ -1868,7 +1868,7 @@ pub fn writeStabs(self: *const Object, stroff: u32, macho_file: *MachO) void {
             n_strx += 1;
 
             for (sf.stabs.items) |stab| {
-                const sym = stab.getSymbol(macho_file) orelse continue;
+                const sym = stab.getSymbol(self) orelse continue;
                 const file = sym.getFile(macho_file).?;
                 if (file.getIndex() != self.index) continue;
                 if (!sym.flags.output_symtab) continue;

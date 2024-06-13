@@ -239,11 +239,11 @@ pub const StubsHelperSection = struct {
         const cpu_arch = macho_file.options.cpu_arch.?;
         const sect = macho_file.sections.items(.header)[macho_file.stubs_helper_sect_index.?];
         const dyld_private_addr = target: {
-            const sym = obj.getDyldPrivateRef().getSymbol(macho_file).?;
+            const sym = obj.getDyldPrivateRef(macho_file).?.getSymbol(macho_file).?;
             break :target sym.getAddress(.{}, macho_file);
         };
         const dyld_stub_binder_addr = target: {
-            const sym = obj.getDyldStubBinderRef().getSymbol(macho_file);
+            const sym = obj.getDyldStubBinderRef(macho_file).?.getSymbol(macho_file).?;
             break :target sym.getGotAddress(macho_file);
         };
         switch (cpu_arch) {
@@ -300,7 +300,7 @@ pub const LaSymbolPtrSection = struct {
         const sect = macho_file.sections.items(.header)[macho_file.stubs_helper_sect_index.?];
         var stub_helper_idx: u32 = 0;
         for (macho_file.stubs.symbols.items) |ref| {
-            const sym = ref.getSymbol(macho_file);
+            const sym = ref.getSymbol(macho_file).?;
             if (sym.flags.weak) {
                 const value = sym.getAddress(.{ .stubs = false }, macho_file);
                 try writer.writeInt(u64, @intCast(value), .little);
@@ -439,7 +439,7 @@ pub const ObjcStubsSection = struct {
                     }
                     try writer.writeAll(&.{ 0xff, 0x25 });
                     {
-                        const target_sym = obj.getObjcMsgSendRef().getSymbol(macho_file).?;
+                        const target_sym = obj.getObjcMsgSendRef(macho_file).?.getSymbol(macho_file).?;
                         const target = target_sym.getGotAddress(macho_file);
                         const source = addr + 7;
                         try writer.writeInt(i32, @intCast(target - source - 2 - 4), .little);
@@ -459,7 +459,7 @@ pub const ObjcStubsSection = struct {
                         );
                     }
                     {
-                        const target_sym = obj.getObjcMsgSendRef().getSymbol(macho_file).?;
+                        const target_sym = obj.getObjcMsgSendRef(macho_file).?.getSymbol(macho_file).?;
                         const target = target_sym.getGotAddress(macho_file);
                         const source = addr + 2 * @sizeOf(u32);
                         const pages = try aarch64.calcNumberOfPages(@intCast(source), @intCast(target));

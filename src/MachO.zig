@@ -383,17 +383,17 @@ pub fn flush(self: *MachO) !void {
     try self.initSyntheticSections();
     try self.sortSections();
     try self.addAtomsToSections();
-    // try self.calcSectionSizes();
-    // try self.performAllTheWork();
-    // try self.generateUnwindInfo();
+    try self.calcSectionSizes();
+    try self.performAllTheWork();
+    try self.generateUnwindInfo();
+
+    try self.initSegments();
+    try self.allocateSections();
+    self.allocateSegments();
+    self.allocateSyntheticSymbols();
 
     state_log.debug("{}", .{self.dumpState()});
     return error.ToDo;
-
-    //     try self.initSegments();
-    //     try self.allocateSections();
-    //     self.allocateSegments();
-    //     self.allocateSyntheticSymbols();
 
     //     state_log.debug("{}", .{self.dumpState()});
 
@@ -1809,75 +1809,57 @@ fn allocateSegments(self: *MachO) void {
 }
 
 fn allocateSyntheticSymbols(self: *MachO) void {
-    const text_seg = self.getTextSegment();
-
-    if (self.mh_execute_header_index) |index| {
-        const global = self.getSymbol(index);
-        global.value = text_seg.vmaddr;
+    if (self.getInternalObject()) |obj| {
+        obj.allocateSyntheticSymbols(self);
     }
 
-    if (self.data_sect_index) |idx| {
-        const sect = self.sections.items(.header)[idx];
-        for (&[_]?Symbol.Index{
-            self.dso_handle_index,
-            self.mh_dylib_header_index,
-            self.dyld_private_index,
-        }) |maybe_index| {
-            if (maybe_index) |index| {
-                const global = self.getSymbol(index);
-                global.value = sect.addr;
-                global.out_n_sect = idx;
-            }
-        }
-    }
+    // for (self.boundary_symbols.items) |sym_index| {
+    //     const sym = self.getSymbol(sym_index);
+    //     const name = sym.getName(self);
 
-    for (self.boundary_symbols.items) |sym_index| {
-        const sym = self.getSymbol(sym_index);
-        const name = sym.getName(self);
+    //     sym.flags.@"export" = false;
+    //     sym.value = text_seg.vmaddr;
 
-        sym.flags.@"export" = false;
-        sym.value = text_seg.vmaddr;
-
-        if (mem.startsWith(u8, name, "segment$start$")) {
-            const segname = name["segment$start$".len..];
-            if (self.getSegmentByName(segname)) |seg_id| {
-                const seg = self.segments.items[seg_id];
-                sym.value = seg.vmaddr;
-            }
-        } else if (mem.startsWith(u8, name, "segment$stop$")) {
-            const segname = name["segment$stop$".len..];
-            if (self.getSegmentByName(segname)) |seg_id| {
-                const seg = self.segments.items[seg_id];
-                sym.value = seg.vmaddr + seg.vmsize;
-            }
-        } else if (mem.startsWith(u8, name, "section$start$")) {
-            const actual_name = name["section$start$".len..];
-            const sep = mem.indexOfScalar(u8, actual_name, '$').?; // TODO error rather than a panic
-            const segname = actual_name[0..sep];
-            const sectname = actual_name[sep + 1 ..];
-            if (self.getSectionByName(segname, sectname)) |sect_id| {
-                const sect = self.sections.items(.header)[sect_id];
-                sym.value = sect.addr;
-                sym.out_n_sect = sect_id;
-            }
-        } else if (mem.startsWith(u8, name, "section$stop$")) {
-            const actual_name = name["section$stop$".len..];
-            const sep = mem.indexOfScalar(u8, actual_name, '$').?; // TODO error rather than a panic
-            const segname = actual_name[0..sep];
-            const sectname = actual_name[sep + 1 ..];
-            if (self.getSectionByName(segname, sectname)) |sect_id| {
-                const sect = self.sections.items(.header)[sect_id];
-                sym.value = sect.addr + sect.size;
-                sym.out_n_sect = sect_id;
-            }
-        } else unreachable;
-    }
+    //     if (mem.startsWith(u8, name, "segment$start$")) {
+    //         const segname = name["segment$start$".len..];
+    //         if (self.getSegmentByName(segname)) |seg_id| {
+    //             const seg = self.segments.items[seg_id];
+    //             sym.value = seg.vmaddr;
+    //         }
+    //     } else if (mem.startsWith(u8, name, "segment$stop$")) {
+    //         const segname = name["segment$stop$".len..];
+    //         if (self.getSegmentByName(segname)) |seg_id| {
+    //             const seg = self.segments.items[seg_id];
+    //             sym.value = seg.vmaddr + seg.vmsize;
+    //         }
+    //     } else if (mem.startsWith(u8, name, "section$start$")) {
+    //         const actual_name = name["section$start$".len..];
+    //         const sep = mem.indexOfScalar(u8, actual_name, '$').?; // TODO error rather than a panic
+    //         const segname = actual_name[0..sep];
+    //         const sectname = actual_name[sep + 1 ..];
+    //         if (self.getSectionByName(segname, sectname)) |sect_id| {
+    //             const sect = self.sections.items(.header)[sect_id];
+    //             sym.value = sect.addr;
+    //             sym.out_n_sect = sect_id;
+    //         }
+    //     } else if (mem.startsWith(u8, name, "section$stop$")) {
+    //         const actual_name = name["section$stop$".len..];
+    //         const sep = mem.indexOfScalar(u8, actual_name, '$').?; // TODO error rather than a panic
+    //         const segname = actual_name[0..sep];
+    //         const sectname = actual_name[sep + 1 ..];
+    //         if (self.getSectionByName(segname, sectname)) |sect_id| {
+    //             const sect = self.sections.items(.header)[sect_id];
+    //             sym.value = sect.addr + sect.size;
+    //             sym.out_n_sect = sect_id;
+    //         }
+    //     } else unreachable;
+    // }
 
     if (self.objc_stubs.symbols.items.len > 0) {
         const addr = self.sections.items(.header)[self.objc_stubs_sect_index.?].addr;
 
-        for (self.objc_stubs.symbols.items, 0..) |sym_index, idx| {
-            const sym = self.getSymbol(sym_index);
+        for (self.objc_stubs.symbols.items, 0..) |ref, idx| {
+            const sym = ref.getSymbol(self).?;
             sym.value = addr + idx * ObjcStubsSection.entrySize(self.options.cpu_arch.?);
             sym.out_n_sect = self.objc_stubs_sect_index.?;
         }
@@ -3064,7 +3046,7 @@ pub const Ref = struct {
 };
 
 pub const SymbolResolver = struct {
-    refs: std.AutoHashMapUnmanaged(u32, Ref) = .{},
+    refs: std.AutoArrayHashMapUnmanaged(u32, Ref) = .{},
     strtab: StringTable = .{},
 
     const Result = struct {

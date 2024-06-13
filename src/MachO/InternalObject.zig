@@ -17,8 +17,10 @@ entry_index: ?Symbol.Index = null,
 dyld_stub_binder_index: ?Symbol.Index = null,
 dyld_private_index: ?Symbol.Index = null,
 objc_msg_send_index: ?Symbol.Index = null,
+mh_execute_header_index: ?Symbol.Index = null,
+mh_dylib_header_index: ?Symbol.Index = null,
+dso_handle_index: ?Symbol.Index = null,
 
-num_rebase_relocs: u32 = 0,
 output_symtab_ctx: MachO.SymtabCtx = .{},
 
 pub fn deinit(self: *InternalObject, allocator: Allocator) void {
@@ -103,17 +105,17 @@ pub fn initSymbols(self: *InternalObject, macho_file: *MachO) !void {
 
     if (!macho_file.options.dylib) {
         self.entry_index = createSymbol(self, try self.addString(gpa, macho_file.options.entry orelse "_main"), .{});
-        _ = createSymbol(self, try self.addString(gpa, "__mh_execute_header"), .{
+        self.mh_execute_header_index = createSymbol(self, try self.addString(gpa, "__mh_execute_header"), .{
             .type = macho.N_SECT | macho.N_EXT,
             .desc = macho.REFERENCED_DYNAMICALLY,
         });
     } else {
-        _ = createSymbol(self, try self.addString(gpa, "__mh_dylib_header"), .{
+        self.mh_dylib_header_index = createSymbol(self, try self.addString(gpa, "__mh_dylib_header"), .{
             .type = macho.N_SECT | macho.N_EXT,
         });
     }
 
-    _ = createSymbol(self, try self.addString(gpa, "___dso_handle"), .{
+    self.dso_handle_index = createSymbol(self, try self.addString(gpa, "___dso_handle"), .{
         .type = macho.N_SECT | macho.N_EXT,
     });
     self.dyld_private_index = createSymbol(self, try self.addString(gpa, "dyld_private"), .{
@@ -233,7 +235,6 @@ fn addObjcSelrefsSection(self: *InternalObject, methname_atom_index: Atom.Index,
     });
     try atom.addExtra(.{ .rel_index = 0, .rel_count = 1 }, macho_file);
     atom.flags.relocs = true;
-    self.num_rebase_relocs += 1;
 
     const sym_index = try self.addSymbol(gpa);
     const sym = &self.symbols.items[sym_index];
@@ -420,10 +421,45 @@ pub fn scanRelocs(self: *InternalObject, macho_file: *MachO) void {
     }
 }
 
+pub fn allocateSyntheticSymbols(self: *InternalObject, macho_file: *MachO) void {
+    const text_seg = macho_file.getTextSegment();
+
+    if (self.mh_execute_header_index) |index| {
+        const ref = self.getSymbolRef(index, macho_file);
+        if (ref.getFile(macho_file)) |file| {
+            if (file.getIndex() == self.index) {
+                const sym = &self.symbols.items[index];
+                sym.value = text_seg.vmaddr;
+            }
+        }
+    }
+
+    if (macho_file.data_sect_index) |idx| {
+        const sect = macho_file.sections.items(.header)[idx];
+        for (&[_]?Symbol.Index{
+            self.dso_handle_index,
+            self.mh_dylib_header_index,
+            self.dyld_private_index,
+        }) |maybe_index| {
+            if (maybe_index) |index| {
+                const ref = self.getSymbolRef(index, macho_file);
+                if (ref.getFile(macho_file)) |file| {
+                    if (file.getIndex() == self.index) {
+                        const sym = &self.symbols.items[index];
+                        sym.value = sect.addr;
+                        sym.out_n_sect = idx;
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub fn calcSymtabSize(self: *InternalObject, macho_file: *MachO) void {
-    for (self.symbols.items) |sym_index| {
-        const sym = macho_file.getSymbol(sym_index);
-        if (sym.getFile(macho_file)) |file| if (file.getIndex() != self.index) continue;
+    for (self.symbols.items, 0..) |*sym, i| {
+        const ref = self.getSymbolRef(@intCast(i), macho_file);
+        const file = ref.getFile(macho_file) orelse continue;
+        if (file.getIndex() != self.index) continue;
         if (sym.getName(macho_file).len == 0) continue;
         sym.flags.output_symtab = true;
         if (sym.isLocal()) {
@@ -443,9 +479,10 @@ pub fn calcSymtabSize(self: *InternalObject, macho_file: *MachO) void {
 
 pub fn writeSymtab(self: InternalObject, macho_file: *MachO) void {
     var n_strx = self.output_symtab_ctx.stroff;
-    for (self.symbols.items) |sym_index| {
-        const sym = macho_file.getSymbol(sym_index);
-        if (sym.getFile(macho_file)) |file| if (file.getIndex() != self.index) continue;
+    for (self.symbols.items, 0..) |sym, i| {
+        const ref = self.getSymbolRef(@intCast(i), macho_file);
+        const file = ref.getFile(macho_file) orelse continue;
+        if (file.getIndex() != self.index) continue;
         const idx = sym.getOutputSymtabIndex(macho_file) orelse continue;
         const out_sym = &macho_file.symtab.items[idx];
         out_sym.n_strx = n_strx;
