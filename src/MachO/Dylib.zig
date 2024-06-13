@@ -1,5 +1,9 @@
+/// Non-zero for fat dylibs
+offset: u64,
 path: []const u8,
 index: File.Index,
+file_handle: ?File.HandleIndex = null,
+lib_stub: ?LibStub = null,
 
 exports: std.MultiArrayList(Export) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
@@ -23,6 +27,7 @@ referenced: bool = false,
 output_symtab_ctx: MachO.SymtabCtx = .{},
 
 pub fn deinit(self: *Dylib, allocator: Allocator) void {
+    if (self.lib_stub) |*ls| ls.deinit();
     self.exports.deinit(allocator);
     self.strtab.deinit(allocator);
     if (self.id) |*id| id.deinit(allocator);
@@ -39,11 +44,22 @@ pub fn deinit(self: *Dylib, allocator: Allocator) void {
     self.rpaths.deinit(allocator);
 }
 
-pub fn parse(self: *Dylib, macho_file: *MachO, file: std.fs.File, offset: u64) !void {
+pub fn parse(self: *Dylib, macho_file: *MachO) !void {
+    if (self.lib_stub) |_| {
+        try self.parseTbd(macho_file);
+    } else {
+        assert(self.file_handle != null);
+        try self.parseBinary(macho_file);
+    }
+}
+
+fn parseBinary(self: *Dylib, macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
     const gpa = macho_file.base.allocator;
+    const file = macho_file.getFileHandle(self.file_handle.?);
+    const offset = self.offset;
 
     log.debug("parsing dylib from binary", .{});
 
@@ -256,13 +272,14 @@ fn parseTrie(self: *Dylib, data: []const u8, macho_file: *MachO) !void {
     try self.parseTrieNode(&it, gpa, arena.allocator(), "");
 }
 
-pub fn parseTbd(self: *Dylib, lib_stub: LibStub, macho_file: *MachO) !void {
+fn parseTbd(self: *Dylib, macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
     const gpa = macho_file.base.allocator;
 
     log.debug("parsing dylib from stub", .{});
 
+    const lib_stub = self.lib_stub.?;
     const umbrella_lib = lib_stub.inner[0];
 
     {

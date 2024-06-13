@@ -305,26 +305,24 @@ pub fn flush(self: *MachO) !void {
         }
     }
 
-    var has_parse_error = false;
     for (resolved_objects.items) |obj| {
-        self.parsePositional(obj) catch |err| {
-            has_parse_error = true;
-            switch (err) {
-                error.ParseFailed => {}, // already reported
-                else => |e| {
-                    self.base.fatal("{s}: unexpected error occurred while parsing input file: {s}", .{
-                        obj.path, @errorName(e),
-                    });
-                    return e;
-                },
-            }
+        self.parsePositional(obj) catch |err| switch (err) {
+            else => |e| {
+                self.base.fatal("{s}: unexpected error occurred while parsing input file: {s}", .{
+                    obj.path, @errorName(e),
+                });
+                return e;
+            },
         };
     }
-    if (has_parse_error) return error.ParseFailed;
 
-    for (self.dylibs.items) |index| {
-        self.getFile(index).?.dylib.umbrella = index;
+    for (self.objects.items) |index| {
+        try self.work_queue.writeItem(.{ .parse_object = index });
     }
+    for (self.dylibs.items) |index| {
+        try self.work_queue.writeItem(.{ .parse_dylib = index });
+    }
+    try self.performAllTheWork();
 
     try self.parseDependentDylibs(arena, lib_dirs.items, framework_dirs.items);
 
@@ -344,7 +342,6 @@ pub fn flush(self: *MachO) !void {
     }
 
     try self.resolveSymbols();
-    try self.parseDebugInfo();
 
     //     if (self.options.relocatable) return relocatable.flush(self);
 
@@ -583,9 +580,9 @@ fn parsePositional(self: *MachO, obj: LinkObject) !void {
     if (readMachHeader(file, offset) catch null) |h| blk: {
         if (h.magic != macho.MH_MAGIC_64) break :blk;
         switch (h.filetype) {
-            macho.MH_OBJECT => try self.parseObject(obj, fh, offset),
+            macho.MH_OBJECT => try self.addObject(obj, fh, offset),
             macho.MH_DYLIB => if (self.options.cpu_arch) |_| {
-                _ = try self.parseDylib(obj, fh, offset, true);
+                _ = try self.addDylib(obj, fh, offset, true);
             } else {
                 self.base.fatal("{s}: ignoring library as no architecture specified", .{obj.path});
             },
@@ -596,20 +593,18 @@ fn parsePositional(self: *MachO, obj: LinkObject) !void {
     if (readArMagic(file, offset, &buffer) catch null) |ar_magic| blk: {
         if (!mem.eql(u8, ar_magic, Archive.ARMAG)) break :blk;
         if (self.options.cpu_arch) |_| {
-            try self.parseArchive(obj, fh, fat_arch);
+            try self.addArchive(obj, fh, fat_arch);
         } else {
             self.base.fatal("{s}: ignoring library as no architecture specified", .{obj.path});
         }
         return;
     }
     blk: {
-        var lib_stub = LibStub.loadFromFile(self.base.allocator, file) catch break :blk;
-        defer lib_stub.deinit();
-        if (lib_stub.inner.len == 0) break :blk;
         if (self.options.cpu_arch == null) {
             self.base.fatal("{s}: ignoring library as no architecture specified", .{obj.path});
         } else {
-            _ = try self.parseTbd(obj, lib_stub, true);
+            const lib_stub = LibStub.loadFromFile(self.base.allocator, file) catch break :blk;
+            _ = try self.addTbd(obj, lib_stub, true);
         }
         return;
     }
@@ -653,7 +648,7 @@ pub fn readArMagic(file: std.fs.File, offset: usize, buffer: *[Archive.SARMAG]u8
     return buffer[0..Archive.SARMAG];
 }
 
-fn parseObject(self: *MachO, obj: LinkObject, handle: File.HandleIndex, offset: u64) !void {
+fn addObject(self: *MachO, obj: LinkObject, handle: File.HandleIndex, offset: u64) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -672,12 +667,31 @@ fn parseObject(self: *MachO, obj: LinkObject, handle: File.HandleIndex, offset: 
         .index = index,
         .mtime = mtime,
     } });
-    const object = &self.files.items(.data)[index].object;
-    try object.parse(self);
     try self.objects.append(gpa, index);
 }
 
-fn parseArchive(self: *MachO, obj: LinkObject, handle: File.HandleIndex, fat_arch: ?fat.Arch) !void {
+fn parseObjectWorker(self: *MachO, index: File.Index) void {
+    const doWork = struct {
+        fn doWork(object: *Object, macho_file: *MachO) !void {
+            const tracy = trace(@src());
+            defer tracy.end();
+            try object.parse(macho_file);
+            // Finally, we do a post-parse check for -ObjC to see if we need to force load this member
+            // anyhow.
+            object.alive = object.alive or (macho_file.options.force_load_objc and object.hasObjc());
+        }
+    }.doWork;
+    const object = self.getFile(index).?.object;
+    doWork(object, self) catch |err| switch (err) {
+        error.ParseFailed => {}, // reported
+        else => |e| self.base.fatal("{}: unxexpected error occurred while parsing input file: {s}", .{
+            object.fmtPath(),
+            @errorName(e),
+        }),
+    };
+}
+
+fn addArchive(self: *MachO, obj: LinkObject, handle: File.HandleIndex, fat_arch: ?fat.Arch) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -687,7 +701,6 @@ fn parseArchive(self: *MachO, obj: LinkObject, handle: File.HandleIndex, fat_arc
     defer archive.deinit(gpa);
     try archive.parse(self, obj.path, handle, fat_arch);
 
-    var has_parse_error = false;
     for (archive.objects.items) |extracted| {
         const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
         self.files.set(index, .{ .object = extracted });
@@ -695,20 +708,8 @@ fn parseArchive(self: *MachO, obj: LinkObject, handle: File.HandleIndex, fat_arc
         object.index = index;
         object.alive = obj.must_link or obj.needed or self.options.all_load;
         object.hidden = obj.hidden;
-        object.parse(self) catch |err| switch (err) {
-            error.ParseFailed => {
-                has_parse_error = true;
-                continue;
-            },
-            else => |e| return e,
-        };
         try self.objects.append(gpa, index);
-
-        // Finally, we do a post-parse check for -ObjC to see if we need to force load this member
-        // anyhow.
-        object.alive = object.alive or (self.options.force_load_objc and object.hasObjc());
     }
-    if (has_parse_error) return error.ParseFailed;
 }
 
 const DylibOpts = struct {
@@ -719,15 +720,15 @@ const DylibOpts = struct {
     reexport: bool = false,
 };
 
-fn parseDylib(self: *MachO, obj: LinkObject, handle: File.HandleIndex, offset: u64, explicit: bool) anyerror!File.Index {
+fn addDylib(self: *MachO, obj: LinkObject, handle: File.HandleIndex, offset: u64, explicit: bool) anyerror!File.Index {
     const tracy = trace(@src());
     defer tracy.end();
 
     const gpa = self.base.allocator;
-    const file = self.getFileHandle(handle);
-
     const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
     self.files.set(index, .{ .dylib = .{
+        .offset = offset,
+        .file_handle = handle,
         .path = obj.path,
         .index = index,
         .needed = obj.needed,
@@ -735,14 +736,12 @@ fn parseDylib(self: *MachO, obj: LinkObject, handle: File.HandleIndex, offset: u
         .reexport = obj.reexport,
         .explicit = explicit,
     } });
-    const dylib = &self.files.items(.data)[index].dylib;
-    try dylib.parse(self, file, offset);
     try self.dylibs.append(gpa, index);
 
     return index;
 }
 
-fn parseTbd(self: *MachO, obj: LinkObject, lib_stub: LibStub, explicit: bool) anyerror!File.Index {
+fn addTbd(self: *MachO, obj: LinkObject, lib_stub: LibStub, explicit: bool) anyerror!File.Index {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -750,6 +749,8 @@ fn parseTbd(self: *MachO, obj: LinkObject, lib_stub: LibStub, explicit: bool) an
 
     const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
     self.files.set(index, .{ .dylib = .{
+        .offset = 0,
+        .lib_stub = lib_stub,
         .path = obj.path,
         .index = index,
         .needed = obj.needed,
@@ -757,11 +758,26 @@ fn parseTbd(self: *MachO, obj: LinkObject, lib_stub: LibStub, explicit: bool) an
         .reexport = obj.reexport,
         .explicit = explicit,
     } });
-    const dylib = &self.files.items(.data)[index].dylib;
-    try dylib.parseTbd(lib_stub, self);
     try self.dylibs.append(gpa, index);
 
     return index;
+}
+
+fn parseDylibWorker(self: *MachO, index: File.Index) void {
+    const doWork = struct {
+        fn doWork(dylib: *Dylib, idx: File.Index, macho_file: *MachO) !void {
+            try dylib.parse(macho_file);
+            dylib.umbrella = idx;
+        }
+    }.doWork;
+    const dylib = self.getFile(index).?.dylib;
+    doWork(dylib, index, self) catch |err| switch (err) {
+        error.ParseFailed => {}, // reported already
+        else => |e| self.base.fatal("{s}: unexpected error occurred while parsing input file: {s}", .{
+            dylib.path,
+            @errorName(e),
+        }),
+    };
 }
 
 /// According to ld64's manual, public (i.e., system) dylibs/frameworks are hoisted into the final
@@ -876,14 +892,12 @@ fn parseDependentDylibs(
                 if (readMachHeader(file, offset) catch null) |h| blk: {
                     if (h.magic != macho.MH_MAGIC_64) break :blk;
                     switch (h.filetype) {
-                        macho.MH_DYLIB => break :file_index try self.parseDylib(link_obj, fh, offset, false),
+                        macho.MH_DYLIB => break :file_index try self.addDylib(link_obj, fh, offset, false),
                         else => break :file_index @as(File.Index, 0),
                     }
                 }
-                var lib_stub = LibStub.loadFromFile(gpa, file) catch break :file_index @as(File.Index, 0);
-                defer lib_stub.deinit();
-                if (lib_stub.inner.len == 0) break :file_index @as(File.Index, 0);
-                break :file_index try self.parseTbd(link_obj, lib_stub, false);
+                const lib_stub = LibStub.loadFromFile(gpa, file) catch break :file_index @as(File.Index, 0);
+                break :file_index try self.addTbd(link_obj, lib_stub, false);
             };
             dependents.appendAssumeCapacity(file_index);
         }
@@ -962,12 +976,6 @@ fn markLive(self: *MachO) void {
         if (object.alive) object.markLive(self);
     }
     if (self.getInternalObject()) |obj| obj.markLive(self);
-}
-
-fn parseDebugInfo(self: *MachO) !void {
-    for (self.objects.items) |index| {
-        try self.getFile(index).?.object.parseDebugInfo(self);
-    }
 }
 
 fn deadStripDylibs(self: *MachO) void {
@@ -1928,6 +1936,8 @@ fn performAllTheWork(self: *MachO) !void {
     self.wait_group.reset();
     defer self.wait_group.wait();
     while (self.work_queue.readItem()) |job| switch (job) {
+        .parse_object => |x| self.base.thread_pool.spawnWg(&self.wait_group, parseObjectWorker, .{ self, x }),
+        .parse_dylib => |x| self.base.thread_pool.spawnWg(&self.wait_group, parseDylibWorker, .{ self, x }),
         .section_size => |x| self.base.thread_pool.spawnWg(&self.wait_group, calcSectionSizeWorker, .{ self, x }),
         .create_thunks => |x| self.base.thread_pool.spawnWg(&self.wait_group, createThunksWorker, .{ self, x }),
         .rebase_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLinkeditSizeWorker, .{ self, .rebase }),
@@ -2001,8 +2011,8 @@ fn writeSections(self: *MachO) !void {
         const padding_byte: u8 = if (header.isCode() and cpu_arch == .x86_64) 0xcc else 0;
         @memset(out.items, padding_byte);
 
-        const chunk_size: usize = atoms.items.len; //500_000;
-        // const chunk_size: usize = 1_000_000;
+        // const chunk_size: usize = atoms.items.len; //500_000;
+        const chunk_size: usize = 1_000_000;
         const num_chunks = std.math.cast(usize, @divTrunc(atoms.items.len, chunk_size)) orelse
             return error.Overflow;
         const actual_num_chunks = if (@rem(atoms.items.len, chunk_size) > 0) num_chunks + 1 else num_chunks;
@@ -2982,6 +2992,8 @@ pub const null_sym = macho.nlist_64{
 };
 
 pub const Job = union(enum) {
+    parse_object: File.Index,
+    parse_dylib: File.Index,
     section_size: u8,
     create_thunks: u8,
     rebase_size: void,
