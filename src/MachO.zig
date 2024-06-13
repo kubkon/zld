@@ -2025,8 +2025,8 @@ fn writeSections(self: *MachO) !void {
         const padding_byte: u8 = if (header.isCode() and cpu_arch == .x86_64) 0xcc else 0;
         @memset(out.items, padding_byte);
 
-        // const chunk_size: usize = atoms.items.len; //500_000;
-        const chunk_size: usize = 1_000_000;
+        const chunk_size: usize = atoms.items.len; //500_000;
+        // const chunk_size: usize = 1_000_000;
         const num_chunks = std.math.cast(usize, @divTrunc(atoms.items.len, chunk_size)) orelse
             return error.Overflow;
         const actual_num_chunks = if (@rem(atoms.items.len, chunk_size) > 0) num_chunks + 1 else num_chunks;
