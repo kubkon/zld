@@ -7,7 +7,6 @@ id: ?Id = null,
 ordinal: u16 = 0,
 
 symbols: std.ArrayListUnmanaged(Symbol) = .{},
-symbols_refs: std.ArrayListUnmanaged(MachO.Ref) = .{},
 symbols_extra: std.ArrayListUnmanaged(u32) = .{},
 globals: std.ArrayListUnmanaged(u32) = .{},
 dependents: std.ArrayListUnmanaged(Id) = .{},
@@ -28,7 +27,6 @@ pub fn deinit(self: *Dylib, allocator: Allocator) void {
     self.strtab.deinit(allocator);
     if (self.id) |*id| id.deinit(allocator);
     self.symbols.deinit(allocator);
-    self.symbols_refs.deinit(allocator);
     self.symbols_extra.deinit(allocator);
     self.globals.deinit(allocator);
     for (self.dependents.items) |*id| {
@@ -497,7 +495,6 @@ pub fn initSymbols(self: *Dylib, macho_file: *MachO) !void {
 
     const nsyms = self.exports.items(.name).len;
     try self.symbols.ensureTotalCapacityPrecise(gpa, nsyms);
-    try self.symbols_refs.ensureTotalCapacityPrecise(gpa, nsyms);
     try self.symbols_extra.ensureTotalCapacityPrecise(gpa, nsyms * @sizeOf(Symbol.Extra));
     try self.globals.ensureTotalCapacityPrecise(gpa, nsyms);
     self.globals.resize(gpa, nsyms) catch unreachable;
@@ -505,8 +502,7 @@ pub fn initSymbols(self: *Dylib, macho_file: *MachO) !void {
 
     for (self.exports.items(.name), self.exports.items(.flags)) |noff, flags| {
         const index = self.addSymbolAssumeCapacity();
-        const symbol = self.getSymbol(index);
-        self.symbols_refs.addOneAssumeCapacity().* = .{ .index = index, .file = self.index };
+        const symbol = &self.symbols.items[index];
         symbol.name = noff;
         symbol.extra = self.addSymbolExtraAssumeCapacity(.{});
         symbol.flags.weak = flags.weak;
@@ -523,27 +519,23 @@ pub fn resolveSymbols(self: *Dylib, macho_file: *MachO) !void {
 
     const gpa = macho_file.base.allocator;
 
-    for (self.symbols_refs.items, self.exports.items(.flags), self.globals.items) |ref, flags, *global| {
-        const symbol = ref.getSymbol(macho_file);
-        const name = symbol.getName(macho_file);
+    for (self.symbols.items, self.exports.items(.flags), self.globals.items, 0..) |sym, flags, *global, i| {
+        const name = sym.getName(macho_file);
         const gop = try macho_file.resolver.getOrPut(gpa, name);
         if (!gop.found_existing) {
-            gop.ref_ptr.* = ref;
+            gop.ref_ptr.* = .{ .index = 0, .file = 0 };
         }
         global.* = gop.off;
 
+        if (gop.ref_ptr.getFile(macho_file) == null) {
+            gop.ref_ptr.* = .{ .index = @intCast(i), .file = self.index };
+            continue;
+        }
+
         if (self.asFile().getSymbolRank(.{
             .weak = flags.weak,
-        }) < gop.ref_ptr.getSymbol(macho_file).getSymbolRank(macho_file)) {
-            gop.ref_ptr.* = ref;
-        }
-    }
-}
-
-pub fn mergeGlobals(self: *Dylib, macho_file: *MachO) void {
-    for (self.symbols_refs.items, self.globals.items) |*ref, off| {
-        if (macho_file.resolver.get(off)) |pref| {
-            ref.* = pref;
+        }) < gop.ref_ptr.getSymbol(macho_file).?.getSymbolRank(macho_file)) {
+            gop.ref_ptr.* = .{ .index = @intCast(i), .file = self.index };
         }
     }
 }
@@ -557,9 +549,11 @@ pub fn markReferenced(self: *Dylib, macho_file: *MachO) void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    for (self.symbols_refs.items) |ref| {
-        if (ref.file != self.index) continue;
-        const global = ref.getSymbol(macho_file);
+    for (0..self.symbols.items.len) |i| {
+        const ref = self.getSymbolRef(@intCast(i), macho_file);
+        const file = ref.getFile(macho_file) orelse continue;
+        if (file.getIndex() != self.index) continue;
+        const global = ref.getSymbol(macho_file).?;
         if (global.isLocal()) continue;
         self.referenced = true;
         break;
@@ -635,9 +629,10 @@ fn addSymbolAssumeCapacity(self: *Dylib) Symbol.Index {
     return index;
 }
 
-pub fn getSymbol(self: *Dylib, index: Symbol.Index) *Symbol {
-    assert(index < self.symbols.items.len);
-    return &self.symbols.items[index];
+pub fn getSymbolRef(self: Dylib, index: Symbol.Index, macho_file: *MachO) MachO.Ref {
+    const off = self.globals.items[index];
+    if (macho_file.resolver.get(off)) |ref| return ref;
+    return .{ .index = index, .file = self.index };
 }
 
 pub fn addSymbolExtra(self: *Dylib, allocator: Allocator, extra: Symbol.Extra) !u32 {
@@ -716,10 +711,11 @@ fn formatSymtab(
     _ = unused_fmt_string;
     _ = options;
     const dylib = ctx.dylib;
+    const macho_file = ctx.macho_file;
     try writer.writeAll("  globals\n");
-    for (dylib.symbols_refs.items) |ref| {
-        const global = ref.getSymbol(ctx.macho_file);
-        try writer.print("    {}\n", .{global.fmt(ctx.macho_file)});
+    for (0..dylib.symbols.items.len) |i| {
+        const sym = dylib.getSymbolRef(@intCast(i), macho_file).getSymbol(macho_file).?;
+        try writer.print("    {}\n", .{sym.fmt(macho_file)});
     }
 }
 

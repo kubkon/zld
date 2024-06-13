@@ -73,11 +73,15 @@ pub fn generate(info: *UnwindInfo, macho_file: *MachO) !void {
             }
             const cie = fde.getCie(macho_file);
             if (cie.getPersonality(macho_file)) |_| {
-                const personality_index = try info.getOrPutPersonalityFunction(cie.personality.?.index); // TODO handle error
+                const object = cie.getObject(macho_file);
+                const sym_ref = object.getSymbolRef(cie.personality.?.index, macho_file);
+                const personality_index = try info.getOrPutPersonalityFunction(sym_ref); // TODO handle error
                 rec.enc.setPersonalityIndex(personality_index + 1);
             }
         } else if (rec.getPersonality(macho_file)) |_| {
-            const personality_index = try info.getOrPutPersonalityFunction(rec.personality.?); // TODO handle error
+            const object = rec.getObject(macho_file);
+            const sym_ref = object.getSymbolRef(rec.personality.?, macho_file);
+            const personality_index = try info.getOrPutPersonalityFunction(sym_ref); // TODO handle error
             rec.enc.setPersonalityIndex(personality_index + 1);
         }
     }
@@ -456,7 +460,7 @@ pub const Record = struct {
     atom_offset: u32 = 0,
     lsda: Atom.Index = 0,
     lsda_offset: u32 = 0,
-    personality: ?MachO.Ref = null, // TODO make this zero-is-null
+    personality: ?Symbol.Index = null, // TODO make this zero-is-null
     fde: Fde.Index = 0, // TODO actually make FDE at 0 an invalid FDE
     file: File.Index = 0,
     alive: bool = true,
@@ -475,7 +479,8 @@ pub const Record = struct {
 
     pub fn getPersonality(rec: Record, macho_file: *MachO) ?*Symbol {
         const personality = rec.personality orelse return null;
-        return personality.getSymbol(macho_file);
+        const object = rec.getObject(macho_file);
+        return object.getSymbolRef(personality, macho_file).getSymbol(macho_file);
     }
 
     pub fn getFde(rec: Record, macho_file: *MachO) ?Fde {

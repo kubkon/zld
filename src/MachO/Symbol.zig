@@ -35,16 +35,6 @@ pub fn isLocal(symbol: Symbol) bool {
     return !(symbol.flags.import or symbol.flags.@"export");
 }
 
-pub fn isUndefined(symbol: Symbol, macho_file: *MachO) bool {
-    switch (symbol.getFile(macho_file).?) {
-        .dylib => return false,
-        .internal, .object => {
-            const nlist = symbol.getNlist(macho_file);
-            return nlist.undf() and !(nlist.weakRef() and symbol.flags.import and symbol.visibility == .global);
-        },
-    }
-}
-
 pub fn isSymbolStab(symbol: Symbol, macho_file: *MachO) bool {
     const file = symbol.getFile(macho_file) orelse return false;
     return switch (file) {
@@ -157,7 +147,8 @@ pub fn getObjcStubsAddress(symbol: Symbol, macho_file: *MachO) u64 {
 pub fn getObjcSelrefsAddress(symbol: Symbol, macho_file: *MachO) u64 {
     if (!symbol.getSectionFlags().objc_stubs) return 0;
     const extra = symbol.getExtra(macho_file);
-    const ref = MachO.Ref{ .index = extra.objc_selrefs_index, .file = extra.objc_selrefs_file };
+    const file = symbol.getFile(macho_file).?;
+    const ref = file.getSymbolRef(extra.objc_selrefs, macho_file);
     return ref.getSymbol(macho_file).getAddress(.{}, macho_file);
 }
 
@@ -200,8 +191,7 @@ const AddExtraOpts = struct {
     objc_stubs: ?u32 = null,
     tlv_ptr: ?u32 = null,
     symtab: ?u32 = null,
-    objc_selrefs_index: ?u32 = null,
-    objc_selrefs_file: ?u32 = null,
+    objc_selrefs: ?u32 = null,
 };
 
 pub fn addExtra(symbol: *Symbol, opts: AddExtraOpts, macho_file: *MachO) void {
@@ -215,11 +205,15 @@ pub fn addExtra(symbol: *Symbol, opts: AddExtraOpts, macho_file: *MachO) void {
 }
 
 pub inline fn getExtra(symbol: Symbol, macho_file: *MachO) Extra {
-    return macho_file.getSymbolExtra(symbol.extra);
+    return switch (symbol.getFile(macho_file).?) {
+        inline else => |x| x.getSymbolExtra(symbol.extra),
+    };
 }
 
 pub inline fn setExtra(symbol: Symbol, extra: Extra, macho_file: *MachO) void {
-    macho_file.setSymbolExtra(symbol.extra, extra);
+    return switch (symbol.getFile(macho_file).?) {
+        inline else => |x| x.setSymbolExtra(symbol.extra, extra),
+    };
 }
 
 pub fn setOutputSym(symbol: Symbol, macho_file: *MachO, out: *macho.nlist_64) void {
@@ -395,8 +389,7 @@ pub const Extra = struct {
     objc_stubs: u32 = 0,
     tlv_ptr: u32 = 0,
     symtab: u32 = 0,
-    objc_selrefs_index: u32 = 0,
-    objc_selrefs_file: u32 = 0,
+    objc_selrefs: u32 = 0,
 };
 
 pub const Index = u32;

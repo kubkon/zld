@@ -68,13 +68,14 @@ pub const Cie = struct {
 
     pub fn getPersonality(cie: Cie, macho_file: *MachO) ?*Symbol {
         const personality = cie.personality orelse return null;
-        return personality.ref.getSymbol(macho_file);
+        const object = cie.getObject(macho_file);
+        return object.getSymbolRef(personality.index, macho_file).getSymbol(macho_file);
     }
 
     pub fn eql(cie: Cie, other: Cie, macho_file: *MachO) bool {
         if (!std.mem.eql(u8, cie.getData(macho_file), other.getData(macho_file))) return false;
         if (cie.personality != null and other.personality != null) {
-            if (!cie.personality.?.ref.eql(other.personality.?.ref)) return false;
+            if (cie.personality.?.index != other.personality.?.index) return false;
         }
         if (cie.personality != null or other.personality != null) return false;
         return true;
@@ -124,7 +125,7 @@ pub const Cie = struct {
     pub const Index = u32;
 
     pub const Personality = struct {
-        ref: MachO.Ref = .{ .index = 0, .file = 0 },
+        index: Symbol.Index = 0,
         offset: u32 = 0,
     };
 };

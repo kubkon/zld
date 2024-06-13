@@ -55,7 +55,6 @@ pub fn getInputSection(self: Atom, macho_file: *MachO) macho.section_64 {
 }
 
 pub fn getAddress(self: Atom, macho_file: *MachO) u64 {
-    if (self.out_n_sect == 0) return self.value;
     const header = macho_file.sections.items(.header)[self.out_n_sect];
     return header.addr + self.value;
 }
@@ -248,7 +247,7 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
 
         switch (rel.type) {
             .branch => {
-                const symbol = rel.getTargetSymbol(macho_file);
+                const symbol = rel.getTargetSymbol(self, macho_file);
                 if (symbol.flags.import or (symbol.flags.@"export" and symbol.flags.weak) or symbol.flags.interposable) {
                     symbol.setSectionFlags(.{ .stubs = true });
                     if (symbol.flags.weak) {
@@ -263,7 +262,7 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
             .got_load_page,
             .got_load_pageoff,
             => {
-                const symbol = rel.getTargetSymbol(macho_file);
+                const symbol = rel.getTargetSymbol(self, macho_file);
                 if (symbol.flags.import or
                     (symbol.flags.@"export" and symbol.flags.weak) or
                     symbol.flags.interposable or
@@ -277,14 +276,14 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
             },
 
             .got => {
-                rel.getTargetSymbol(macho_file).setSectionFlags(.{ .got = true });
+                rel.getTargetSymbol(self, macho_file).setSectionFlags(.{ .got = true });
             },
 
             .tlv,
             .tlvp_page,
             .tlvp_pageoff,
             => {
-                const symbol = rel.getTargetSymbol(macho_file);
+                const symbol = rel.getTargetSymbol(self, macho_file);
                 if (!symbol.flags.tlv) {
                     macho_file.base.fatal(
                         "{}: {s}: illegal thread-local variable reference to regular symbol {s}",
@@ -302,7 +301,7 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
             .unsigned => {
                 if (rel.meta.length == 3) { // TODO this really should check if this is pointer width
                     if (rel.tag == .@"extern") {
-                        const symbol = rel.getTargetSymbol(macho_file);
+                        const symbol = rel.getTargetSymbol(self, macho_file);
                         if (symbol.isTlvInit(macho_file)) {
                             macho_file.has_tlv = true;
                             continue;
@@ -328,12 +327,13 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
 fn reportUndefSymbol(self: Atom, rel: Relocation, macho_file: *MachO) !bool {
     if (rel.tag == .local) return false;
 
-    const sym = rel.getTargetSymbol(macho_file);
-    if (sym.isUndefined(macho_file)) {
+    const file = self.getFile(macho_file);
+    const ref = file.getSymbolRef(rel.target, macho_file);
+    if (ref.getFile(macho_file) == null) {
         macho_file.undefs_mutex.lock();
         defer macho_file.undefs_mutex.unlock();
         const gpa = macho_file.base.allocator;
-        const gop = try macho_file.undefs.getOrPut(gpa, rel.target);
+        const gop = try macho_file.undefs.getOrPut(gpa, .{ .index = rel.target, .file = self.file });
         if (!gop.found_existing) {
             gop.value_ptr.* = .{};
         }

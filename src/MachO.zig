@@ -375,7 +375,7 @@ pub fn flush(self: *MachO) !void {
 
     try self.convertTentativeDefinitions();
     try self.createObjcSections();
-    try self.dedupLiterals();
+    // try self.dedupLiterals();
     try self.claimUnresolved();
 
     //     if (self.options.dead_strip) {
@@ -391,13 +391,13 @@ pub fn flush(self: *MachO) !void {
     }
 
     try self.scanRelocs();
+    try self.initOutputSections();
+    try self.initSyntheticSections();
+    try self.sortSections();
 
     state_log.debug("{}", .{self.dumpState()});
     return error.ToDo;
 
-    //     try self.initOutputSections();
-    //     try self.initSyntheticSections();
-    //     try self.sortSections();
     //     try self.addAtomsToSections();
     //     try self.calcSectionSizes();
     //     try self.performAllTheWork();
@@ -954,10 +954,6 @@ pub fn resolveSymbols(self: *MachO) !void {
     for (self.dylibs.items) |index| try self.getFile(index).?.resolveSymbols(self);
     if (self.getInternalObject()) |obj| try obj.resolveSymbols(self);
 
-    for (self.objects.items) |index| self.getFile(index).?.mergeGlobals(self);
-    for (self.dylibs.items) |index| self.getFile(index).?.mergeGlobals(self);
-    if (self.getInternalObject()) |obj| obj.mergeGlobals(self);
-
     // Mark live objects.
     self.markLive();
 
@@ -979,10 +975,6 @@ pub fn resolveSymbols(self: *MachO) !void {
     for (self.objects.items) |index| try self.getFile(index).?.resolveSymbols(self);
     for (self.dylibs.items) |index| try self.getFile(index).?.resolveSymbols(self);
     if (self.getInternalObject()) |obj| try obj.resolveSymbols(self);
-
-    for (self.objects.items) |index| self.getFile(index).?.mergeGlobals(self);
-    for (self.dylibs.items) |index| self.getFile(index).?.mergeGlobals(self);
-    if (self.getInternalObject()) |obj| obj.mergeGlobals(self);
 
     // Merge symbol visibility
     for (self.objects.items) |index| self.getFile(index).?.object.mergeSymbolVisibility(self);
@@ -1093,27 +1085,25 @@ fn createObjcSections(self: *MachO) !void {
     for (self.objects.items) |index| {
         const object = self.getFile(index).?.object;
 
-        for (object.symbols_refs.items, 0..) |ref, i| {
-            const nlist_idx = @as(Symbol.Index, @intCast(i));
-            const nlist = object.symtab.items(.nlist)[nlist_idx];
+        for (object.symbols.items, 0..) |sym, i| {
+            const nlist = object.symtab.items(.nlist)[i];
             if (!nlist.ext()) continue;
             if (!nlist.undf()) continue;
 
-            const sym = ref.getSymbol(self);
-            if (sym.getFile(self).? != .dylib and !sym.getNlist(self).undf()) continue;
+            const ref = object.getSymbolRef(@intCast(i), self);
+            if (ref.getFile(self) != null) continue;
             if (mem.startsWith(u8, sym.getName(self), "_objc_msgSend$")) {
-                _ = try objc_msgsend_syms.put(ref, {});
+                _ = try objc_msgsend_syms.put(.{ .index = @intCast(i), .file = index }, {});
             }
         }
     }
 
     for (objc_msgsend_syms.keys()) |ref| {
         const internal = self.getInternalObject().?;
-        const sym_name = ref.getSymbol(self).getName(self);
+        const sym_name = ref.getSymbol(self).?.getName(self);
         const name_off = try internal.addString(gpa, sym_name);
         const sym_index = try internal.addSymbol(gpa);
-        try internal.symbols_refs.append(gpa, .{ .index = sym_index, .file = internal.index });
-        const sym = internal.getSymbol(sym_index);
+        const sym = &internal.symbols.items[sym_index];
         sym.name = name_off;
         sym.visibility = .hidden;
         const nlist_idx: u32 = @intCast(internal.symtab.items.len);
@@ -1127,11 +1117,8 @@ fn createObjcSections(self: *MachO) !void {
         };
         sym.nlist_idx = nlist_idx;
         const name = eatPrefix(sym_name, "_objc_msgSend$").?;
-        const selrefs_ref = try internal.addObjcMsgsendSections(name, self);
-        sym.extra = try internal.addSymbolExtra(gpa, .{
-            .objc_selrefs_index = selrefs_ref.index,
-            .objc_selrefs_file = selrefs_ref.file,
-        });
+        const selrefs_index = try internal.addObjcMsgsendSections(name, self);
+        sym.extra = try internal.addSymbolExtra(gpa, .{ .objc_selrefs = selrefs_index });
         sym.setSectionFlags(.{ .objc_stubs = true });
     }
 }
@@ -1168,12 +1155,12 @@ fn claimUnresolved(self: *MachO) error{OutOfMemory}!void {
     for (self.objects.items) |index| {
         const object = self.getFile(index).?.object;
 
-        for (object.symbols_refs.items, 0..) |ref, i| {
-            const nlist_idx = @as(Symbol.Index, @intCast(i));
-            const nlist = object.symtab.items(.nlist)[nlist_idx];
+        for (object.symbols.items, 0..) |*sym, i| {
+            const nlist = object.symtab.items(.nlist)[i];
             if (!nlist.ext()) continue;
             if (!nlist.undf()) continue;
-            if (ref.file != object.index) continue;
+
+            if (object.getSymbolRef(@intCast(i), self).getFile(self) != null) continue;
 
             const is_import = switch (self.options.undefined_treatment) {
                 .@"error" => false,
@@ -1181,10 +1168,8 @@ fn claimUnresolved(self: *MachO) error{OutOfMemory}!void {
                 .dynamic_lookup => true,
             };
             if (is_import) {
-                const sym = ref.getSymbol(self);
                 sym.value = 0;
                 sym.atom_ref = .{ .index = 0, .file = 0 };
-                sym.nlist_idx = 0;
                 sym.flags.weak = false;
                 sym.flags.weak_ref = nlist.weakRef();
                 sym.flags.import = is_import;
@@ -1252,7 +1237,7 @@ fn reportUndefs(self: *MachO) !void {
     var has_undefs = false;
     var it = self.undefs.iterator();
     while (it.next()) |entry| {
-        const undef_sym = entry.key_ptr.getSymbol(self);
+        const undef_sym = entry.key_ptr.getSymbol(self).?;
         const notes = entry.value_ptr.*;
         const nnotes = @min(notes.items.len, max_notes) + @intFromBool(notes.items.len > max_notes);
 
@@ -3143,14 +3128,20 @@ pub const Ref = struct {
         return ref.index == other.index and ref.file == other.file;
     }
 
+    pub fn getFile(ref: Ref, macho_file: *MachO) ?File {
+        return macho_file.getFile(ref.file);
+    }
+
     pub fn getAtom(ref: Ref, macho_file: *MachO) ?*Atom {
-        const file = macho_file.getFile(ref.file) orelse return null;
+        const file = ref.getFile(macho_file) orelse return null;
         return file.getAtom(ref.index);
     }
 
-    pub fn getSymbol(ref: Ref, macho_file: *MachO) *Symbol {
-        const file = macho_file.getFile(ref.file).?;
-        return file.getSymbol(ref.index);
+    pub fn getSymbol(ref: Ref, macho_file: *MachO) ?*Symbol {
+        const file = ref.getFile(macho_file) orelse return null;
+        return switch (file) {
+            inline else => |x| &x.symbols.items[ref.index],
+        };
     }
 
     pub fn format(

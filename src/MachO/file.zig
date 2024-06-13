@@ -34,25 +34,9 @@ pub const File = union(enum) {
         }
     }
 
-    pub fn mergeGlobals(file: File, macho_file: *MachO) void {
-        switch (file) {
-            inline else => |x| x.mergeGlobals(macho_file),
-        }
-    }
-
     pub fn resetGlobals(file: File, macho_file: *MachO) void {
         switch (file) {
             inline else => |x| x.resetGlobals(macho_file),
-        }
-    }
-
-    pub fn addSymbolExtra(file: File, macho_file: *MachO) !void {
-        for (file.getSymbols()) |sym_index| {
-            const sym = macho_file.getSymbol(sym_index);
-            if (sym.getFile(macho_file)) |fsym| {
-                if (file.getIndex() != fsym.getIndex()) continue;
-            }
-            sym.extra = try macho_file.addSymbolExtra(.{});
         }
     }
 
@@ -81,12 +65,6 @@ pub const File = union(enum) {
             break :blk if (args.weak) 2 else 1;
         };
         return base + (file.getIndex() << 24);
-    }
-
-    pub fn getSymbols(file: File) []const MachO.Ref {
-        return switch (file) {
-            inline else => |x| x.symbols_refs.items,
-        };
     }
 
     pub fn getAtom(file: File, atom_index: Atom.Index) ?*Atom {
@@ -124,16 +102,22 @@ pub const File = union(enum) {
         };
     }
 
-    pub fn getSymbol(file: File, sym_index: Symbol.Index) *Symbol {
+    pub fn getSymbolRef(file: File, sym_index: Symbol.Index, macho_file: *MachO) MachO.Ref {
         return switch (file) {
-            inline else => |x| x.getSymbol(sym_index),
+            inline else => |x| x.getSymbolRef(sym_index, macho_file),
         };
     }
 
     pub fn markImportsAndExports(file: File, macho_file: *MachO) void {
         assert(file != .dylib);
-        for (file.getSymbols()) |ref| {
-            const sym = ref.getSymbol(macho_file);
+        const nsyms = switch (file) {
+            .dylib => unreachable,
+            inline else => |x| x.symbols.items.len,
+        };
+        for (0..nsyms) |i| {
+            const ref = file.getSymbolRef(@intCast(i), macho_file);
+            if (ref.getFile(macho_file) == null) continue;
+            const sym = ref.getSymbol(macho_file).?;
             if (sym.visibility != .global) continue;
             if (sym.getFile(macho_file).? == .dylib and !sym.flags.abs) {
                 sym.flags.import = true;
@@ -146,9 +130,14 @@ pub const File = union(enum) {
     }
 
     pub fn createSymbolIndirection(file: File, macho_file: *MachO) !void {
-        for (file.getSymbols()) |ref| {
+        const nsyms = switch (file) {
+            inline else => |x| x.symbols.items.len,
+        };
+        for (0..nsyms) |i| {
+            const ref = file.getSymbolRef(@intCast(i), macho_file);
+            if (ref.getFile(macho_file) == null) continue;
             if (ref.file != file.getIndex()) continue;
-            const sym = ref.getSymbol(macho_file);
+            const sym = ref.getSymbol(macho_file).?;
             if (sym.getSectionFlags().got) {
                 log.debug("'{s}' needs GOT", .{sym.getName(macho_file)});
                 try macho_file.got.addSymbol(ref, macho_file);
@@ -205,7 +194,7 @@ pub const File = union(enum) {
 
 const assert = std.debug.assert;
 const bind = @import("dyld_info/bind.zig");
-const log = std.log.scoped(.macho);
+const log = std.log.scoped(.link);
 const macho = std.macho;
 const std = @import("std");
 const trace = @import("../tracy.zig").trace;

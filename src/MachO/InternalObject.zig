@@ -7,7 +7,6 @@ atoms_extra: std.ArrayListUnmanaged(u32) = .{},
 symtab: std.ArrayListUnmanaged(macho.nlist_64) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
 symbols: std.ArrayListUnmanaged(Symbol) = .{},
-symbols_refs: std.ArrayListUnmanaged(MachO.Ref) = .{},
 symbols_extra: std.ArrayListUnmanaged(u32) = .{},
 globals: std.ArrayListUnmanaged(u32) = .{},
 
@@ -33,7 +32,6 @@ pub fn deinit(self: *InternalObject, allocator: Allocator) void {
     self.symtab.deinit(allocator);
     self.strtab.deinit(allocator);
     self.symbols.deinit(allocator);
-    self.symbols_refs.deinit(allocator);
     self.symbols_extra.deinit(allocator);
     self.globals.deinit(allocator);
     self.objc_methnames.deinit(allocator);
@@ -54,8 +52,7 @@ pub fn initSymbols(self: *InternalObject, macho_file: *MachO) !void {
             desc: u16 = 0,
         }) Symbol.Index {
             const index = obj.addSymbolAssumeCapacity();
-            obj.symbols_refs.addOneAssumeCapacity().* = .{ .index = index, .file = obj.index };
-            const symbol = obj.getSymbol(index);
+            const symbol = &obj.symbols.items[index];
             symbol.name = name;
             symbol.extra = obj.addSymbolExtraAssumeCapacity(.{});
             symbol.flags.dyn_ref = args.desc & macho.REFERENCED_DYNAMICALLY != 0;
@@ -91,7 +88,6 @@ pub fn initSymbols(self: *InternalObject, macho_file: *MachO) !void {
     nsyms += 1; // dyld_private
 
     try self.symbols.ensureTotalCapacityPrecise(gpa, nsyms);
-    try self.symbols_refs.ensureTotalCapacityPrecise(gpa, nsyms);
     try self.symbols_extra.ensureTotalCapacityPrecise(gpa, nsyms * @sizeOf(Symbol.Extra));
     try self.symtab.ensureTotalCapacityPrecise(gpa, nsyms);
     try self.globals.ensureTotalCapacityPrecise(gpa, nsyms);
@@ -131,30 +127,28 @@ pub fn resolveSymbols(self: *InternalObject, macho_file: *MachO) !void {
 
     const gpa = macho_file.base.allocator;
 
-    for (self.symbols_refs.items, 0..) |ref, i| {
+    for (self.symbols.items, 0..) |sym, i| {
+        const nlist = self.symtab.items[i];
         const global = &self.globals.items[i];
-        const symbol = ref.getSymbol(macho_file);
-        const name = symbol.getName(macho_file);
+        const name = sym.getName(macho_file);
         const gop = try macho_file.resolver.getOrPut(gpa, name);
         if (!gop.found_existing) {
-            gop.ref_ptr.* = ref;
+            gop.ref_ptr.* = .{ .index = 0, .file = 0 };
         }
         global.* = gop.off;
+
+        if (nlist.undf()) continue;
+        if (gop.ref_ptr.getFile(macho_file) == null) {
+            gop.ref_ptr.* = .{ .index = @intCast(i), .file = self.index };
+            continue;
+        }
 
         if (self.asFile().getSymbolRank(.{
             .archive = false,
             .weak = false,
             .tentative = false,
-        }) < gop.ref_ptr.getSymbol(macho_file).getSymbolRank(macho_file)) {
-            gop.ref_ptr.* = ref;
-        }
-    }
-}
-
-pub fn mergeGlobals(self: *InternalObject, macho_file: *MachO) void {
-    for (self.symbols_refs.items, self.globals.items) |*ref, off| {
-        if (macho_file.resolver.get(off)) |pref| {
-            ref.* = pref;
+        }) < gop.ref_ptr.getSymbol(macho_file).?.getSymbolRank(macho_file)) {
+            gop.ref_ptr.* = .{ .index = @intCast(i), .file = self.index };
         }
     }
 }
@@ -163,9 +157,12 @@ pub fn markLive(self: *InternalObject, macho_file: *MachO) void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    for (self.symbols_refs.items) |ref| {
-        const sym = ref.getSymbol(macho_file);
-        const file = sym.getFile(macho_file).?;
+    for (0..self.symbols.items.len) |i| {
+        const nlist = self.symtab.items[i];
+        if (!nlist.ext()) continue;
+
+        const ref = self.getSymbolRef(@intCast(i), macho_file);
+        const file = ref.getFile(macho_file) orelse continue;
         if (file == .object and !file.object.alive) {
             file.object.alive = true;
             file.object.markLive(macho_file);
@@ -174,7 +171,7 @@ pub fn markLive(self: *InternalObject, macho_file: *MachO) void {
 }
 
 /// Creates a fake input sections __TEXT,__objc_methname and __DATA,__objc_selrefs.
-pub fn addObjcMsgsendSections(self: *InternalObject, sym_name: []const u8, macho_file: *MachO) !MachO.Ref {
+pub fn addObjcMsgsendSections(self: *InternalObject, sym_name: []const u8, macho_file: *MachO) !Symbol.Index {
     const methname_atom_index = try self.addObjcMethnameSection(sym_name, macho_file);
     return try self.addObjcSelrefsSection(methname_atom_index, macho_file);
 }
@@ -202,7 +199,7 @@ fn addObjcMethnameSection(self: *InternalObject, methname: []const u8, macho_fil
     return atom_index;
 }
 
-fn addObjcSelrefsSection(self: *InternalObject, methname_atom_index: Atom.Index, macho_file: *MachO) !MachO.Ref {
+fn addObjcSelrefsSection(self: *InternalObject, methname_atom_index: Atom.Index, macho_file: *MachO) !Symbol.Index {
     const gpa = macho_file.base.allocator;
     const atom_index = try self.addAtom(gpa);
     try self.atoms_indexes.append(gpa, atom_index);
@@ -224,7 +221,7 @@ fn addObjcSelrefsSection(self: *InternalObject, methname_atom_index: Atom.Index,
     relocs.appendAssumeCapacity(.{
         .tag = .local,
         .offset = 0,
-        .target = .{ .index = methname_atom_index, .file = self.index },
+        .target = methname_atom_index,
         .addend = 0,
         .type = .unsigned,
         .meta = .{
@@ -239,8 +236,7 @@ fn addObjcSelrefsSection(self: *InternalObject, methname_atom_index: Atom.Index,
     self.num_rebase_relocs += 1;
 
     const sym_index = try self.addSymbol(gpa);
-    try self.symbols_refs.append(gpa, .{ .index = sym_index, .file = self.index });
-    const sym = self.getSymbol(sym_index);
+    const sym = &self.symbols.items[sym_index];
     sym.atom_ref = .{ .index = atom_index, .file = self.index };
     sym.extra = try self.addSymbolExtra(gpa, .{});
     const nlist_idx: u32 = @intCast(self.symtab.items.len);
@@ -253,7 +249,7 @@ fn addObjcSelrefsSection(self: *InternalObject, methname_atom_index: Atom.Index,
         .n_value = 0,
     };
     sym.nlist_idx = nlist_idx;
-    return .{ .index = sym_index, .file = self.index };
+    return sym_index;
 }
 
 pub fn resolveLiterals(self: *InternalObject, lp: *MachO.LiteralPool, macho_file: *MachO) !void {
@@ -273,8 +269,7 @@ pub fn resolveLiterals(self: *InternalObject, lp: *MachO.LiteralPool, macho_file
             const res = try lp.insert(gpa, header.type(), data);
             if (!res.found_existing) {
                 const sym_index = try self.addSymbol(gpa);
-                try self.symbols_refs.append(gpa, .{ .index = sym_index, .file = self.index });
-                const sym = self.getSymbol(sym_index);
+                const sym = &self.symbols.items[sym_index];
                 sym.atom_ref = .{ .index = atom_index, .file = self.index };
                 sym.extra = try self.addSymbolExtra(gpa, .{});
                 const nlist_idx: u32 = @intCast(self.symtab.items.len);
@@ -297,7 +292,7 @@ pub fn resolveLiterals(self: *InternalObject, lp: *MachO.LiteralPool, macho_file
             assert(relocs.len == 1);
             const rel = relocs[0];
             assert(rel.tag == .local);
-            const target = rel.getTargetAtom(macho_file);
+            const target = rel.getTargetAtom(atom.*, macho_file);
             const addend = std.math.cast(u32, rel.addend) orelse return error.Overflow;
             try buffer.ensureUnusedCapacity(target.size);
             buffer.resize(target.size) catch unreachable;
@@ -306,8 +301,7 @@ pub fn resolveLiterals(self: *InternalObject, lp: *MachO.LiteralPool, macho_file
             buffer.clearRetainingCapacity();
             if (!res.found_existing) {
                 const sym_index = try self.addSymbol(gpa);
-                try self.symbols_refs.append(gpa, .{ .index = sym_index, .file = self.index });
-                const sym = self.getSymbol(sym_index);
+                const sym = &self.symbols.items[sym_index];
                 sym.atom_ref = .{ .index = atom_index, .file = self.index };
                 sym.extra = try self.addSymbolExtra(gpa, .{});
                 const nlist_idx: u32 = @intCast(self.symtab.items.len);
@@ -405,21 +399,21 @@ pub fn dedupLiterals(self: *InternalObject, lp: MachO.LiteralPool, macho_file: *
 }
 
 pub fn scanRelocs(self: *InternalObject, macho_file: *MachO) void {
-    if (self.getEntryRef()) |ref| {
-        const sym = ref.getSymbol(macho_file);
-        if (!sym.isUndefined(macho_file)) {
+    if (self.getEntryRef(macho_file)) |ref| {
+        if (ref.getFile(macho_file) != null) {
+            const sym = ref.getSymbol(macho_file).?;
             if (sym.flags.import) sym.setSectionFlags(.{ .stubs = true });
         }
     }
-    if (self.getDyldStubBinderRef()) |ref| {
-        const sym = ref.getSymbol(macho_file);
-        if (!sym.isUndefined(macho_file)) {
+    if (self.getDyldStubBinderRef(macho_file)) |ref| {
+        if (ref.getFile(macho_file) != null) {
+            const sym = ref.getSymbol(macho_file).?;
             sym.setSectionFlags(.{ .got = true });
         }
     }
-    if (self.getObjcMsgSendRef()) |ref| {
-        const sym = ref.getSymbol(macho_file);
-        if (!sym.isUndefined(macho_file)) {
+    if (self.getObjcMsgSendRef(macho_file)) |ref| {
+        if (ref.getFile(macho_file) != null) {
+            const sym = ref.getSymbol(macho_file).?;
             // TODO is it always needed, or only if we are synthesising fast stubs
             sym.setSectionFlags(.{ .got = true });
         }
@@ -565,24 +559,24 @@ pub fn setAtomExtra(self: *InternalObject, index: u32, extra: Atom.Extra) void {
     }
 }
 
-pub fn getEntryRef(self: InternalObject) ?MachO.Ref {
+pub fn getEntryRef(self: InternalObject, macho_file: *MachO) ?MachO.Ref {
     const index = self.entry_index orelse return null;
-    return self.symbols_refs.items[index];
+    return self.getSymbolRef(index, macho_file);
 }
 
-pub fn getDyldStubBinderRef(self: InternalObject) ?MachO.Ref {
+pub fn getDyldStubBinderRef(self: InternalObject, macho_file: *MachO) ?MachO.Ref {
     const index = self.dyld_stub_binder_index orelse return null;
-    return self.symbols_refs.items[index];
+    return self.getSymbolRef(index, macho_file);
 }
 
-pub fn getDyldPrivateRef(self: InternalObject) ?MachO.Ref {
+pub fn getDyldPrivateRef(self: InternalObject, macho_file: *MachO) ?MachO.Ref {
     const index = self.dyld_private_index orelse return null;
-    return self.symbols_refs.items[index];
+    return self.getSymbolRef(index, macho_file);
 }
 
-pub fn getObjcMsgSendRef(self: InternalObject) ?MachO.Ref {
+pub fn getObjcMsgSendRef(self: InternalObject, macho_file: *MachO) ?MachO.Ref {
     const index = self.objc_msg_send_index orelse return null;
-    return self.symbols_refs.items[index];
+    return self.getSymbolRef(index, macho_file);
 }
 
 pub fn addSymbol(self: *InternalObject, allocator: Allocator) !Symbol.Index {
@@ -597,9 +591,10 @@ pub fn addSymbolAssumeCapacity(self: *InternalObject) Symbol.Index {
     return index;
 }
 
-pub fn getSymbol(self: *InternalObject, index: Symbol.Index) *Symbol {
-    assert(index < self.symbols.items.len);
-    return &self.symbols.items[index];
+pub fn getSymbolRef(self: InternalObject, index: Symbol.Index, macho_file: *MachO) MachO.Ref {
+    const off = self.globals.items[index];
+    if (macho_file.resolver.get(off)) |ref| return ref;
+    return .{ .index = index, .file = self.index };
 }
 
 pub fn addSymbolExtra(self: *InternalObject, allocator: Allocator, extra: Symbol.Extra) !u32 {
@@ -686,10 +681,17 @@ fn formatSymtab(
 ) !void {
     _ = unused_fmt_string;
     _ = options;
+    const macho_file = ctx.macho_file;
+    const self = ctx.self;
     try writer.writeAll("  symbols\n");
-    for (ctx.self.symbols_refs.items) |ref| {
-        const global = ref.getSymbol(ctx.macho_file);
-        try writer.print("    {}\n", .{global.fmt(ctx.macho_file)});
+    for (self.symbols.items, 0..) |sym, i| {
+        const ref = self.getSymbolRef(@intCast(i), macho_file);
+        if (ref.getFile(macho_file) == null) {
+            // TODO any better way of handling this?
+            try writer.print("    {s} : unclaimed\n", .{sym.getName(macho_file)});
+        } else {
+            try writer.print("    {}\n", .{ref.getSymbol(macho_file).?.fmt(macho_file)});
+        }
     }
 }
 
