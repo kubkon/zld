@@ -41,17 +41,6 @@ eh_frame_sect_index: ?u8 = null,
 unwind_info_sect_index: ?u8 = null,
 objc_stubs_sect_index: ?u8 = null,
 
-mh_execute_header_index: ?Symbol.Index = null,
-mh_dylib_header_index: ?Symbol.Index = null,
-dyld_private_index: ?Symbol.Index = null,
-dyld_stub_binder_index: ?Symbol.Index = null,
-dso_handle_index: ?Symbol.Index = null,
-objc_msg_send_index: ?Symbol.Index = null,
-
-entry_index: ?Symbol.Index = null,
-
-string_intern: StringTable = .{},
-
 symtab: std.ArrayListUnmanaged(macho.nlist_64) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
 indsymtab: Indsymtab = .{},
@@ -393,47 +382,45 @@ pub fn flush(self: *MachO) !void {
     self.allocateSyntheticSymbols();
 
     state_log.debug("{}", .{self.dumpState()});
-    return error.ToDo;
 
-    //     state_log.debug("{}", .{self.dumpState()});
+    try self.updateLinkeditSizes();
+    try self.writeSections();
+    try self.writeSyntheticSections();
+    try self.performAllTheWork();
 
-    //     try self.updateLinkeditSizes();
-    //     try self.writeSections();
-    //     try self.writeSyntheticSections();
-    //     try self.performAllTheWork();
-    //     try self.writeSectionsToFile();
-    //     try self.allocateLinkeditSegment();
-    //     try self.writeLinkeditSectionsToFile();
+    try self.writeSectionsToFile();
+    try self.allocateLinkeditSegment();
+    try self.writeLinkeditSectionsToFile();
 
-    //     var codesig: ?CodeSignature = if (self.requiresCodeSig()) blk: {
-    //         // Preallocate space for the code signature.
-    //         // We need to do this at this stage so that we have the load commands with proper values
-    //         // written out to the file.
-    //         // The most important here is to have the correct vm and filesize of the __LINKEDIT segment
-    //         // where the code signature goes into.
-    //         var codesig = CodeSignature.init(self.getPageSize());
-    //         codesig.code_directory.ident = std.fs.path.basename(self.options.emit.sub_path);
-    //         if (self.options.entitlements) |path| try codesig.addEntitlements(gpa, path);
-    //         try self.writeCodeSignaturePadding(&codesig);
-    //         break :blk codesig;
-    //     } else null;
-    //     defer if (codesig) |*csig| csig.deinit(gpa);
+    var codesig: ?CodeSignature = if (self.requiresCodeSig()) blk: {
+        // Preallocate space for the code signature.
+        // We need to do this at this stage so that we have the load commands with proper values
+        // written out to the file.
+        // The most important here is to have the correct vm and filesize of the __LINKEDIT segment
+        // where the code signature goes into.
+        var codesig = CodeSignature.init(self.getPageSize());
+        codesig.code_directory.ident = std.fs.path.basename(self.options.emit.sub_path);
+        if (self.options.entitlements) |path| try codesig.addEntitlements(gpa, path);
+        try self.writeCodeSignaturePadding(&codesig);
+        break :blk codesig;
+    } else null;
+    defer if (codesig) |*csig| csig.deinit(gpa);
 
-    //     self.getLinkeditSegment().vmsize = mem.alignForward(
-    //         u64,
-    //         self.getLinkeditSegment().filesize,
-    //         self.getPageSize(),
-    //     );
+    self.getLinkeditSegment().vmsize = mem.alignForward(
+        u64,
+        self.getLinkeditSegment().filesize,
+        self.getPageSize(),
+    );
 
-    //     const ncmds, const sizeofcmds, const uuid_cmd_offset = try self.writeLoadCommands();
-    //     try self.writeHeader(ncmds, sizeofcmds);
-    //     try self.writeUuid(uuid_cmd_offset, self.requiresCodeSig());
+    const ncmds, const sizeofcmds, const uuid_cmd_offset = try self.writeLoadCommands();
+    try self.writeHeader(ncmds, sizeofcmds);
+    try self.writeUuid(uuid_cmd_offset, self.requiresCodeSig());
 
-    //     if (codesig) |*csig| {
-    //         try self.writeCodeSignature(csig); // code signing always comes last
-    //         const emit = self.options.emit;
-    //         try invalidateKernelCache(emit.directory, emit.sub_path);
-    //     }
+    if (codesig) |*csig| {
+        try self.writeCodeSignature(csig); // code signing always comes last
+        const emit = self.options.emit;
+        try invalidateKernelCache(emit.directory, emit.sub_path);
+    }
 }
 
 fn resolveSearchDir(
@@ -2364,18 +2351,20 @@ fn writeLoadCommands(self: *MachO) !struct { usize, usize, usize } {
     try load_commands.writeDylinkerLC(writer);
     ncmds += 1;
 
-    if (self.entry_index) |global_index| {
-        const sym = self.getSymbol(global_index);
-        const seg = self.getTextSegment();
-        const entryoff: u32 = if (sym.getFile(self) == null)
-            0
-        else
-            @as(u32, @intCast(sym.getAddress(.{ .stubs = true }, self) - seg.vmaddr));
-        try writer.writeStruct(macho.entry_point_command{
-            .entryoff = entryoff,
-            .stacksize = self.options.stack_size orelse 0,
-        });
-        ncmds += 1;
+    if (self.getInternalObject()) |obj| {
+        if (obj.getEntryRef(self)) |ref| {
+            const sym = ref.getSymbol(self).?;
+            const seg = self.getTextSegment();
+            const entryoff: u32 = if (sym.getFile(self) == null)
+                0
+            else
+                @as(u32, @intCast(sym.getAddress(.{ .stubs = true }, self) - seg.vmaddr));
+            try writer.writeStruct(macho.entry_point_command{
+                .entryoff = entryoff,
+                .stacksize = self.options.stack_size orelse 0,
+            });
+            ncmds += 1;
+        }
     }
 
     if (self.options.dylib) {
