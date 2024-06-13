@@ -50,7 +50,7 @@ pub fn init(self: *InternalObject, allocator: Allocator) !void {
 pub fn initSymbols(self: *InternalObject, macho_file: *MachO) !void {
     const createSymbol = struct {
         fn createSymbol(obj: *InternalObject, name: u32, args: struct {
-            type: u8 = macho.N_UNDF,
+            type: u8 = macho.N_UNDF | macho.N_EXT,
             desc: u16 = 0,
         }) Symbol.Index {
             const index = obj.addSymbolAssumeCapacity();
