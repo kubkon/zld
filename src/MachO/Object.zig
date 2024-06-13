@@ -63,12 +63,6 @@ pub fn deinit(self: *Object, allocator: Allocator) void {
     self.data_in_code.deinit(allocator);
 }
 
-pub fn init(self: *Object, allocator: Allocator) !void {
-    // Atom at index 0 is reserved as null atom
-    try self.atoms.append(allocator, .{});
-    try self.atoms_extra.append(allocator, 0);
-}
-
 pub fn parse(self: *Object, macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
@@ -77,6 +71,10 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
 
     const gpa = macho_file.base.allocator;
     const file = macho_file.getFileHandle(self.file_handle);
+
+    // Atom at index 0 is reserved as null atom
+    try self.atoms.append(gpa, .{});
+    try self.atoms_extra.append(gpa, 0);
 
     var header_buffer: [@sizeOf(macho.mach_header_64)]u8 = undefined;
     {

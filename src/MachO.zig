@@ -673,7 +673,6 @@ fn parseObject(self: *MachO, obj: LinkObject, handle: File.HandleIndex, offset: 
         .mtime = mtime,
     } });
     const object = &self.files.items(.data)[index].object;
-    try object.init(gpa);
     try object.parse(self);
     try self.objects.append(gpa, index);
 }
