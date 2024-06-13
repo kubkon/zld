@@ -20,16 +20,12 @@ file_handles: std.ArrayListUnmanaged(File.Handle) = .{},
 segments: std.ArrayListUnmanaged(macho.segment_command_64) = .{},
 sections: std.MultiArrayList(Section) = .{},
 
-symbols: std.ArrayListUnmanaged(Symbol) = .{},
-symbols_extra: std.ArrayListUnmanaged(u32) = .{},
-globals: std.AutoHashMapUnmanaged(u32, Symbol.Index) = .{},
 resolver: SymbolResolver = .{},
 /// This table will be populated after `scanRelocs` has run.
 /// Key is symbol index.
 undefs: std.AutoHashMapUnmanaged(Ref, std.ArrayListUnmanaged(Ref)) = .{},
 undefs_mutex: std.Thread.Mutex = .{},
 /// Global symbols we need to resolve for the link to succeed.
-undefined_symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 boundary_symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 
 pagezero_seg_index: ?u8 = null,
@@ -121,13 +117,8 @@ pub fn deinit(self: *MachO) void {
     }
     self.file_handles.deinit(gpa);
 
-    self.symbols.deinit(gpa);
-    self.symbols_extra.deinit(gpa);
-    self.globals.deinit(gpa);
     self.resolver.deinit(gpa);
     self.undefs.deinit(gpa);
-    self.undefined_symbols.deinit(gpa);
-    self.string_intern.deinit(gpa);
 
     self.objects.deinit(gpa);
     self.dylibs.deinit(gpa);
@@ -172,13 +163,10 @@ pub fn flush(self: *MachO) !void {
     const gpa = self.base.allocator;
 
     // Append empty string to string tables
-    try self.string_intern.buffer.append(gpa, 0);
     try self.resolver.strtab.buffer.append(gpa, 0);
     try self.strtab.append(gpa, 0);
     // Append null file
     try self.files.append(gpa, .null);
-    // Append null symbols
-    try self.symbols.append(gpa, .{});
 
     var arena_allocator = std.heap.ArenaAllocator.init(gpa);
     defer arena_allocator.deinit();
@@ -394,14 +382,13 @@ pub fn flush(self: *MachO) !void {
     try self.initOutputSections();
     try self.initSyntheticSections();
     try self.sortSections();
+    try self.addAtomsToSections();
+    // try self.calcSectionSizes();
+    // try self.performAllTheWork();
+    // try self.generateUnwindInfo();
 
     state_log.debug("{}", .{self.dumpState()});
     return error.ToDo;
-
-    //     try self.addAtomsToSections();
-    //     try self.calcSectionSizes();
-    //     try self.performAllTheWork();
-    //     try self.generateUnwindInfo();
 
     //     try self.initSegments();
     //     try self.allocateSections();
@@ -1318,47 +1305,47 @@ fn initSyntheticSections(self: *MachO) !void {
         self.eh_frame_sect_index = try self.addSection("__TEXT", "__eh_frame", .{});
     }
 
-    for (self.boundary_symbols.items) |sym_index| {
-        const gpa = self.base.allocator;
-        const sym = self.getSymbol(sym_index);
-        const name = sym.getName(self);
+    // for (self.boundary_symbols.items) |sym_index| {
+    //     const gpa = self.base.allocator;
+    //     const sym = self.getSymbol(sym_index);
+    //     const name = sym.getName(self);
 
-        if (eatPrefix(name, "segment$start$")) |segname| {
-            if (self.getSegmentByName(segname) == null) { // TODO check segname is valid
-                const prot = getSegmentProt(segname);
-                _ = try self.segments.append(gpa, .{
-                    .cmdsize = @sizeOf(macho.segment_command_64),
-                    .segname = makeStaticString(segname),
-                    .initprot = prot,
-                    .maxprot = prot,
-                });
-            }
-        } else if (eatPrefix(name, "segment$stop$")) |segname| {
-            if (self.getSegmentByName(segname) == null) { // TODO check segname is valid
-                const prot = getSegmentProt(segname);
-                _ = try self.segments.append(gpa, .{
-                    .cmdsize = @sizeOf(macho.segment_command_64),
-                    .segname = makeStaticString(segname),
-                    .initprot = prot,
-                    .maxprot = prot,
-                });
-            }
-        } else if (eatPrefix(name, "section$start$")) |actual_name| {
-            const sep = mem.indexOfScalar(u8, actual_name, '$').?; // TODO error rather than a panic
-            const segname = actual_name[0..sep]; // TODO check segname is valid
-            const sectname = actual_name[sep + 1 ..]; // TODO check sectname is valid
-            if (self.getSectionByName(segname, sectname) == null) {
-                _ = try self.addSection(segname, sectname, .{});
-            }
-        } else if (eatPrefix(name, "section$stop$")) |actual_name| {
-            const sep = mem.indexOfScalar(u8, actual_name, '$').?; // TODO error rather than a panic
-            const segname = actual_name[0..sep]; // TODO check segname is valid
-            const sectname = actual_name[sep + 1 ..]; // TODO check sectname is valid
-            if (self.getSectionByName(segname, sectname) == null) {
-                _ = try self.addSection(segname, sectname, .{});
-            }
-        } else unreachable;
-    }
+    //     if (eatPrefix(name, "segment$start$")) |segname| {
+    //         if (self.getSegmentByName(segname) == null) { // TODO check segname is valid
+    //             const prot = getSegmentProt(segname);
+    //             _ = try self.segments.append(gpa, .{
+    //                 .cmdsize = @sizeOf(macho.segment_command_64),
+    //                 .segname = makeStaticString(segname),
+    //                 .initprot = prot,
+    //                 .maxprot = prot,
+    //             });
+    //         }
+    //     } else if (eatPrefix(name, "segment$stop$")) |segname| {
+    //         if (self.getSegmentByName(segname) == null) { // TODO check segname is valid
+    //             const prot = getSegmentProt(segname);
+    //             _ = try self.segments.append(gpa, .{
+    //                 .cmdsize = @sizeOf(macho.segment_command_64),
+    //                 .segname = makeStaticString(segname),
+    //                 .initprot = prot,
+    //                 .maxprot = prot,
+    //             });
+    //         }
+    //     } else if (eatPrefix(name, "section$start$")) |actual_name| {
+    //         const sep = mem.indexOfScalar(u8, actual_name, '$').?; // TODO error rather than a panic
+    //         const segname = actual_name[0..sep]; // TODO check segname is valid
+    //         const sectname = actual_name[sep + 1 ..]; // TODO check sectname is valid
+    //         if (self.getSectionByName(segname, sectname) == null) {
+    //             _ = try self.addSection(segname, sectname, .{});
+    //         }
+    //     } else if (eatPrefix(name, "section$stop$")) |actual_name| {
+    //         const sep = mem.indexOfScalar(u8, actual_name, '$').?; // TODO error rather than a panic
+    //         const segname = actual_name[0..sep]; // TODO check segname is valid
+    //         const sectname = actual_name[sep + 1 ..]; // TODO check sectname is valid
+    //         if (self.getSectionByName(segname, sectname) == null) {
+    //             _ = try self.addSection(segname, sectname, .{});
+    //         }
+    //     } else unreachable;
+    // }
 }
 
 fn getSegmentProt(segname: []const u8) macho.vm_prot_t {
@@ -1505,7 +1492,7 @@ pub fn addAtomsToSections(self: *MachO) !void {
             const atom = file.getAtom(atom_index) orelse continue;
             if (!atom.alive.load(.seq_cst)) continue;
             const atoms = &self.sections.items(.atoms)[atom.out_n_sect];
-            try atoms.append(self.base.allocator, .{ .atom = atom.atom_index, .file = index });
+            try atoms.append(self.base.allocator, .{ .index = atom.atom_index, .file = index });
         }
     }
     if (self.getInternalObject()) |object| {
@@ -1513,7 +1500,7 @@ pub fn addAtomsToSections(self: *MachO) !void {
             const atom = object.getAtom(atom_index) orelse continue;
             if (!atom.alive.load(.seq_cst)) continue;
             const atoms = &self.sections.items(.atoms)[atom.out_n_sect];
-            try atoms.append(self.base.allocator, .{ .atom = atom.atom_index, .file = object.index });
+            try atoms.append(self.base.allocator, .{ .index = atom.atom_index, .file = object.index });
         }
     }
 }
@@ -2703,86 +2690,6 @@ pub fn addFileHandle(self: *MachO, file: std.fs.File) !File.HandleIndex {
 pub fn getFileHandle(self: MachO, index: File.HandleIndex) File.Handle {
     assert(index < self.file_handles.items.len);
     return self.file_handles.items[index];
-}
-
-pub fn addSymbol(self: *MachO) !Symbol.Index {
-    const index = @as(Symbol.Index, @intCast(self.symbols.items.len));
-    const symbol = try self.symbols.addOne(self.base.allocator);
-    symbol.* = .{};
-    return index;
-}
-
-pub fn getSymbol(self: *MachO, index: Symbol.Index) *Symbol {
-    assert(index < self.symbols.items.len);
-    return &self.symbols.items[index];
-}
-
-pub fn addSymbolExtra(self: *MachO, extra: Symbol.Extra) !u32 {
-    const fields = @typeInfo(Symbol.Extra).Struct.fields;
-    try self.symbols_extra.ensureUnusedCapacity(self.base.allocator, fields.len);
-    return self.addSymbolExtraAssumeCapacity(extra);
-}
-
-fn addSymbolExtraAssumeCapacity(self: *MachO, extra: Symbol.Extra) u32 {
-    const index = @as(u32, @intCast(self.symbols_extra.items.len));
-    const fields = @typeInfo(Symbol.Extra).Struct.fields;
-    inline for (fields) |field| {
-        self.symbols_extra.appendAssumeCapacity(switch (field.type) {
-            u32 => @field(extra, field.name),
-            else => @compileError("bad field type"),
-        });
-    }
-    return index;
-}
-
-pub fn getSymbolExtra(self: MachO, index: u32) Symbol.Extra {
-    const fields = @typeInfo(Symbol.Extra).Struct.fields;
-    var i: usize = index;
-    var result: Symbol.Extra = undefined;
-    inline for (fields) |field| {
-        @field(result, field.name) = switch (field.type) {
-            u32 => self.symbols_extra.items[i],
-            else => @compileError("bad field type"),
-        };
-        i += 1;
-    }
-    return result;
-}
-
-pub fn setSymbolExtra(self: *MachO, index: u32, extra: Symbol.Extra) void {
-    const fields = @typeInfo(Symbol.Extra).Struct.fields;
-    inline for (fields, 0..) |field, i| {
-        self.symbols_extra.items[index + i] = switch (field.type) {
-            u32 => @field(extra, field.name),
-            else => @compileError("bad field type"),
-        };
-    }
-}
-
-const GetOrCreateGlobalResult = struct {
-    found_existing: bool,
-    index: Symbol.Index,
-};
-
-pub fn getOrCreateGlobal(self: *MachO, off: u32) !GetOrCreateGlobalResult {
-    const gpa = self.base.allocator;
-    const gop = try self.globals.getOrPut(gpa, off);
-    if (!gop.found_existing) {
-        const index = try self.addSymbol();
-        const global = self.getSymbol(index);
-        global.flags.global = true;
-        global.name = off;
-        gop.value_ptr.* = index;
-    }
-    return .{
-        .found_existing = gop.found_existing,
-        .index = gop.value_ptr.*,
-    };
-}
-
-pub fn getGlobalByName(self: *MachO, name: []const u8) ?Symbol.Index {
-    const off = self.string_intern.getOffset(name) orelse return null;
-    return self.globals.get(off);
 }
 
 pub fn addThunk(self: *MachO) !Thunk.Index {

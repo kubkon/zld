@@ -42,7 +42,7 @@ pub fn createThunks(sect_id: u8, macho_file: *MachO) !void {
             for (atom.getRelocs(macho_file)) |rel| {
                 if (rel.type != .branch) continue;
                 if (isReachable(atom, rel, macho_file)) continue;
-                try thunk.symbols.put(gpa, rel.target, {});
+                try thunk.symbols.put(gpa, rel.getTargetSymbolRef(atom.*, macho_file), {});
             }
             try atom.addExtra(.{ .thunk = thunk_index }, macho_file);
             atom.flags.thunk = true;
@@ -64,7 +64,7 @@ fn advance(sect: *macho.section_64, size: u64, pow2_align: u32) !u64 {
 }
 
 fn isReachable(atom: *const Atom, rel: Relocation, macho_file: *MachO) bool {
-    const target = rel.getTargetSymbol(macho_file);
+    const target = rel.getTargetSymbol(atom.*, macho_file);
     if (target.getSectionFlags().stubs or target.getSectionFlags().objc_stubs) return false;
     if (atom.out_n_sect != target.getOutputSectionIndex(macho_file)) return false;
     const target_atom = target.getAtom(macho_file).?;
@@ -78,7 +78,7 @@ fn isReachable(atom: *const Atom, rel: Relocation, macho_file: *MachO) bool {
 pub const Thunk = struct {
     value: u64 = 0,
     out_n_sect: u8 = 0,
-    symbols: std.AutoArrayHashMapUnmanaged(Symbol.Index, void) = .{},
+    symbols: std.AutoArrayHashMapUnmanaged(MachO.Ref, void) = .{},
 
     pub fn deinit(thunk: *Thunk, allocator: Allocator) void {
         thunk.symbols.deinit(allocator);
@@ -93,13 +93,13 @@ pub const Thunk = struct {
         return header.addr + thunk.value;
     }
 
-    pub fn getTargetAddress(thunk: Thunk, sym_index: Symbol.Index, macho_file: *MachO) u64 {
-        return thunk.getAddress(macho_file) + thunk.symbols.getIndex(sym_index).? * trampoline_size;
+    pub fn getTargetAddress(thunk: Thunk, ref: MachO.Ref, macho_file: *MachO) u64 {
+        return thunk.getAddress(macho_file) + thunk.symbols.getIndex(ref).? * trampoline_size;
     }
 
     pub fn write(thunk: Thunk, macho_file: *MachO, writer: anytype) !void {
-        for (thunk.symbols.keys(), 0..) |sym_index, i| {
-            const sym = macho_file.getSymbol(sym_index);
+        for (thunk.symbols.keys(), 0..) |ref, i| {
+            const sym = ref.getSymbol(macho_file).?;
             const saddr = thunk.getAddress(macho_file) + i * trampoline_size;
             const taddr = sym.getAddress(.{}, macho_file);
             const pages = try aarch64.calcNumberOfPages(@intCast(saddr), @intCast(taddr));
@@ -146,9 +146,9 @@ pub const Thunk = struct {
         const thunk = ctx.thunk;
         const macho_file = ctx.macho_file;
         try writer.print("@{x} : size({x})\n", .{ thunk.value, thunk.size() });
-        for (thunk.symbols.keys()) |index| {
-            const sym = macho_file.getSymbol(index);
-            try writer.print("  %{d} : {s} : @{x}\n", .{ index, sym.getName(macho_file), sym.value });
+        for (thunk.symbols.keys()) |ref| {
+            const sym = ref.getSymbol(macho_file).?;
+            try writer.print("  {} : {s} : @{x}\n", .{ ref, sym.getName(macho_file), sym.value });
         }
     }
 

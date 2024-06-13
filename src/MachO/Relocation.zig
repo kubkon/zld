@@ -11,6 +11,11 @@ meta: packed struct {
 },
 mutex: std.Thread.Mutex = .{},
 
+pub fn getTargetSymbolRef(rel: Relocation, atom: Atom, macho_file: *MachO) MachO.Ref {
+    assert(rel.tag == .@"extern");
+    return atom.getFile(macho_file).getSymbolRef(rel.target, macho_file);
+}
+
 pub fn getTargetSymbol(rel: Relocation, atom: Atom, macho_file: *MachO) *Symbol {
     assert(rel.tag == .@"extern");
     const ref = atom.getFile(macho_file).getSymbolRef(rel.target, macho_file);
@@ -22,10 +27,10 @@ pub fn getTargetAtom(rel: Relocation, atom: Atom, macho_file: *MachO) *Atom {
     return atom.getFile(macho_file).getAtom(rel.target).?;
 }
 
-pub fn getTargetAddress(rel: Relocation, macho_file: *MachO) u64 {
+pub fn getTargetAddress(rel: Relocation, atom: Atom, macho_file: *MachO) u64 {
     return switch (rel.tag) {
-        .local => rel.getTargetAtom(macho_file).getAddress(macho_file),
-        .@"extern" => rel.getTargetSymbol(macho_file).getAddress(.{}, macho_file),
+        .local => rel.getTargetAtom(atom, macho_file).getAddress(macho_file),
+        .@"extern" => rel.getTargetSymbol(atom, macho_file).getAddress(.{}, macho_file),
     };
 }
 
