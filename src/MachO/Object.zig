@@ -2073,6 +2073,8 @@ fn addSymbolAssumeCapacity(self: *Object) Symbol.Index {
 }
 
 pub fn getSymbolRef(self: Object, index: Symbol.Index, macho_file: *MachO) MachO.Ref {
+    const msym = self.symtab.items(.nlist)[index];
+    if (!msym.ext()) return .{ .index = index, .file = self.index };
     const off = self.globals.items[index];
     if (macho_file.resolver.get(off)) |ref| return ref;
     return .{ .index = index, .file = self.index };

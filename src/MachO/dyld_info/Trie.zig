@@ -315,7 +315,7 @@ pub fn updateSize(self: *Trie, macho_file: *MachO) error{OutOfMemory}!void {
     try self.init(gpa);
 
     const seg = macho_file.getTextSegment();
-    for (macho_file.resolver.refs.values()) |ref| {
+    for (macho_file.resolver.refs.items) |ref| {
         if (ref.getFile(macho_file) == null) continue;
         const sym = ref.getSymbol(macho_file).?;
         if (!sym.flags.@"export") continue;

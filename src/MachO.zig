@@ -933,13 +933,15 @@ fn parseDependentDylibs(
 /// 5. Remove references to dead objects/shared objects
 /// 6. Re-run symbol resolution on pruned objects and shared objects sets.
 pub fn resolveSymbols(self: *MachO) !void {
-    const tracy = trace(@src());
-    defer tracy.end();
+    {
+        const tracy = trace(@src());
+        defer tracy.end();
 
-    // Resolve symbols on the set of all objects and shared objects (even if some are unneeded).
-    for (self.objects.items) |index| try self.getFile(index).?.resolveSymbols(self);
-    for (self.dylibs.items) |index| try self.getFile(index).?.resolveSymbols(self);
-    if (self.getInternalObject()) |obj| try obj.resolveSymbols(self);
+        // Resolve symbols on the set of all objects and shared objects (even if some are unneeded).
+        for (self.objects.items) |index| try self.getFile(index).?.resolveSymbols(self);
+        for (self.dylibs.items) |index| try self.getFile(index).?.resolveSymbols(self);
+        if (self.getInternalObject()) |obj| try obj.resolveSymbols(self);
+    }
 
     // Mark live objects.
     self.markLive();
@@ -958,13 +960,23 @@ pub fn resolveSymbols(self: *MachO) !void {
         } else i += 1;
     }
 
-    // Re-resolve the symbols.
-    for (self.objects.items) |index| try self.getFile(index).?.resolveSymbols(self);
-    for (self.dylibs.items) |index| try self.getFile(index).?.resolveSymbols(self);
-    if (self.getInternalObject()) |obj| try obj.resolveSymbols(self);
+    {
+        const tracy = trace(@src());
+        defer tracy.end();
 
-    // Merge symbol visibility
-    for (self.objects.items) |index| self.getFile(index).?.object.mergeSymbolVisibility(self);
+        // Re-resolve the symbols.
+        for (self.objects.items) |index| try self.getFile(index).?.resolveSymbols(self);
+        for (self.dylibs.items) |index| try self.getFile(index).?.resolveSymbols(self);
+        if (self.getInternalObject()) |obj| try obj.resolveSymbols(self);
+    }
+
+    {
+        const tracy = trace(@src());
+        defer tracy.end();
+
+        // Merge symbol visibility
+        for (self.objects.items) |index| self.getFile(index).?.object.mergeSymbolVisibility(self);
+    }
 }
 
 fn markLive(self: *MachO) void {
@@ -1155,7 +1167,9 @@ fn claimUnresolved(self: *MachO) error{OutOfMemory}!void {
                 sym.flags.weak_ref = nlist.weakRef();
                 sym.flags.import = is_import;
                 sym.visibility = .global;
-                self.resolver.refs.getPtr(object.globals.items[i]).?.* = .{ .index = @intCast(i), .file = object.index };
+
+                const idx = self.resolver.map.get(object.globals.items[i]).?;
+                self.resolver.refs.items[idx] = .{ .index = @intCast(i), .file = object.index };
             }
         }
     }
@@ -3047,8 +3061,9 @@ pub const Ref = struct {
 };
 
 pub const SymbolResolver = struct {
-    refs: std.AutoArrayHashMapUnmanaged(u32, Ref) = .{},
+    refs: std.ArrayListUnmanaged(Ref) = .{},
     strtab: StringTable = .{},
+    map: std.AutoHashMapUnmanaged(u32, u32) = .{},
 
     const Result = struct {
         found_existing: bool,
@@ -3059,24 +3074,32 @@ pub const SymbolResolver = struct {
     pub fn deinit(resolver: *SymbolResolver, allocator: Allocator) void {
         resolver.refs.deinit(allocator);
         resolver.strtab.deinit(allocator);
+        resolver.map.deinit(allocator);
     }
 
     pub fn getOrPut(resolver: *SymbolResolver, allocator: Allocator, name: []const u8) !Result {
         const off = try resolver.strtab.insert(allocator, name);
-        const gop = try resolver.refs.getOrPut(allocator, off);
+        const gop = try resolver.map.getOrPut(allocator, off);
+        if (!gop.found_existing) {
+            const index: u32 = @intCast(resolver.refs.items.len);
+            _ = try resolver.refs.addOne(allocator);
+            gop.value_ptr.* = index;
+        }
         return .{
             .found_existing = gop.found_existing,
             .off = off,
-            .ref_ptr = gop.value_ptr,
+            .ref_ptr = &resolver.refs.items[gop.value_ptr.*],
         };
     }
 
     pub fn get(resolver: SymbolResolver, off: u32) ?Ref {
-        return resolver.refs.get(off);
+        const index = resolver.map.get(off) orelse return null;
+        return resolver.refs.items[index];
     }
 
     pub fn reset(resolver: *SymbolResolver) void {
         resolver.refs.clearRetainingCapacity();
+        resolver.map.clearRetainingCapacity();
     }
 };
 
