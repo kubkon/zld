@@ -349,7 +349,7 @@ pub fn flush(self: *MachO) !void {
 
     try self.convertTentativeDefinitions();
     try self.createObjcSections();
-    // try self.dedupLiterals();
+    try self.dedupLiterals();
     try self.claimUnresolved();
 
     //     if (self.options.dead_strip) {
@@ -1136,12 +1136,29 @@ pub fn dedupLiterals(self: *MachO) !void {
         wg.reset();
         defer wg.wait();
         for (self.objects.items) |index| {
-            self.base.thread_pool.spawnWg(&wg, Object.dedupLiterals, .{ self.getFile(index).?.object, lp, self });
+            self.base.thread_pool.spawnWg(&wg, dedupLiteralsWorker, .{ self, self.getFile(index).?, lp });
         }
         if (self.getInternalObject()) |object| {
-            self.base.thread_pool.spawnWg(&wg, InternalObject.dedupLiterals, .{ object, lp, self });
+            self.base.thread_pool.spawnWg(&wg, dedupLiteralsWorker, .{ self, object.asFile(), lp });
         }
     }
+}
+
+fn dedupLiteralsWorker(self: *MachO, file: File, lp: LiteralPool) void {
+    const doWork = struct {
+        fn doWork(file_: File, lp_: LiteralPool, macho_file: *MachO) !void {
+            return switch (file_) {
+                .dylib => unreachable,
+                inline else => |x| x.dedupLiterals(lp_, macho_file),
+            };
+        }
+    }.doWork;
+    doWork(file, lp, self) catch |err| {
+        self.base.fatal("failed to dedup literals in {}: {s}", .{
+            file.fmtPath(),
+            @errorName(err),
+        });
+    };
 }
 
 fn claimUnresolved(self: *MachO) error{OutOfMemory}!void {
@@ -2916,7 +2933,7 @@ pub const LiteralPool = struct {
     }
 
     pub fn getSymbol(lp: LiteralPool, index: Index, macho_file: *MachO) *Symbol {
-        return lp.getSymbolRef(index).getSymbol(macho_file);
+        return lp.getSymbolRef(index).getSymbol(macho_file).?;
     }
 
     pub fn insert(lp: *LiteralPool, allocator: Allocator, @"type": u8, string: []const u8) !InsertResult {
@@ -3100,6 +3117,25 @@ pub const SymbolResolver = struct {
     pub fn reset(resolver: *SymbolResolver) void {
         resolver.refs.clearRetainingCapacity();
         resolver.map.clearRetainingCapacity();
+    }
+
+    pub fn format(
+        resolver: SymbolResolver,
+        comptime unused_fmt_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = unused_fmt_string;
+        _ = options;
+        var it = resolver.map.iterator();
+        while (it.next()) |entry| {
+            const off = entry.key_ptr.*;
+            const index = entry.value_ptr.*;
+            try writer.print("{d} => {s} {}\n", .{
+                off,                        resolver.strtab.getAssumeExists(off),
+                resolver.refs.items[index],
+            });
+        }
     }
 };
 

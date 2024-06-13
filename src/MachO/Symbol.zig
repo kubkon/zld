@@ -148,8 +148,10 @@ pub fn getObjcSelrefsAddress(symbol: Symbol, macho_file: *MachO) u64 {
     if (!symbol.getSectionFlags().objc_stubs) return 0;
     const extra = symbol.getExtra(macho_file);
     const file = symbol.getFile(macho_file).?;
-    const ref = file.getSymbolRef(extra.objc_selrefs, macho_file);
-    return ref.getSymbol(macho_file).?.getAddress(.{}, macho_file);
+    return switch (file) {
+        .dylib => unreachable,
+        inline else => |x| x.symbols.items[extra.objc_selrefs].getAddress(.{}, macho_file),
+    };
 }
 
 pub fn getTlvPtrAddress(symbol: Symbol, macho_file: *MachO) u64 {
