@@ -905,6 +905,7 @@ fn parseDependentDylibs(
         for (dylib.dependents.items, dependents.items) |id, file_index| {
             if (self.getFile(file_index)) |file| {
                 const dep_dylib = file.dylib;
+                try dep_dylib.parse(self); // TODO in parallel
                 dep_dylib.hoisted = self.isHoisted(id.name);
                 if (self.getFile(dep_dylib.umbrella) == null) {
                     dep_dylib.umbrella = dylib.umbrella;
