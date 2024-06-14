@@ -9,6 +9,7 @@ pub const Entry = struct {
             if (entry.target.eql(other.target)) {
                 return entry.offset < other.offset;
             }
+            // TODO this is way too slow; is it needed?
             const entry_name = entry.target.getSymbol(ctx).?.getName(ctx);
             const other_name = other.target.getSymbol(ctx).?.getName(ctx);
             return std.mem.lessThan(u8, entry_name, other_name);
