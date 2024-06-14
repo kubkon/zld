@@ -103,9 +103,11 @@ pub fn getDylibOrdinal(symbol: Symbol, macho_file: *MachO) ?u16 {
 
 pub fn getSymbolRank(symbol: Symbol, macho_file: *MachO) u32 {
     const file = symbol.getFile(macho_file).?;
-    const undef = file != .dylib and symbol.getNlist(macho_file).undf();
-    const in_archive = file == .object and !file.object.alive;
-    return if (undef) std.math.maxInt(u32) else file.getSymbolRank(.{
+    const in_archive = switch (file) {
+        .object => |x| !x.alive,
+        else => false,
+    };
+    return file.getSymbolRank(.{
         .archive = in_archive,
         .weak = symbol.flags.weak,
         .tentative = symbol.flags.tentative,
