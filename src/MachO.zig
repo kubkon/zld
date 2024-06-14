@@ -152,7 +152,6 @@ pub fn flush(self: *MachO) !void {
     const gpa = self.base.allocator;
 
     // Append empty string to string tables
-    try self.resolver.strtab.buffer.append(gpa, 0);
     try self.strtab.append(gpa, 0);
     // Append null file
     try self.files.append(gpa, .null);
@@ -1185,8 +1184,8 @@ fn claimUnresolved(self: *MachO) error{OutOfMemory}!void {
                 sym.flags.import = is_import;
                 sym.visibility = .global;
 
-                const idx = self.resolver.map.get(object.globals.items[i]).?;
-                self.resolver.refs.items[idx] = .{ .index = @intCast(i), .file = object.index };
+                const idx = object.globals.items[i];
+                self.resolver.values.items[idx - 1] = .{ .index = @intCast(i), .file = object.index };
             }
         }
     }
@@ -3078,65 +3077,90 @@ pub const Ref = struct {
 };
 
 pub const SymbolResolver = struct {
-    refs: std.ArrayListUnmanaged(Ref) = .{},
-    strtab: StringTable = .{},
-    map: std.AutoHashMapUnmanaged(u32, u32) = .{},
+    keys: std.ArrayListUnmanaged(Key) = .{},
+    values: std.ArrayListUnmanaged(Ref) = .{},
+    table: std.AutoArrayHashMapUnmanaged(void, void) = .{},
 
     const Result = struct {
         found_existing: bool,
-        off: u32,
-        ref_ptr: *Ref,
+        index: Index,
+        ref: *Ref,
     };
 
     pub fn deinit(resolver: *SymbolResolver, allocator: Allocator) void {
-        resolver.refs.deinit(allocator);
-        resolver.strtab.deinit(allocator);
-        resolver.map.deinit(allocator);
+        resolver.keys.deinit(allocator);
+        resolver.values.deinit(allocator);
+        resolver.table.deinit(allocator);
     }
 
-    pub fn getOrPut(resolver: *SymbolResolver, allocator: Allocator, name: []const u8) !Result {
-        const off = try resolver.strtab.insert(allocator, name);
-        const gop = try resolver.map.getOrPut(allocator, off);
+    pub fn getOrPut(
+        resolver: *SymbolResolver,
+        allocator: Allocator,
+        ref: Ref,
+        macho_file: *MachO,
+    ) !Result {
+        const adapter = Adapter{ .keys = resolver.keys.items, .macho_file = macho_file };
+        const key = Key{ .index = ref.index, .file = ref.file };
+        const gop = try resolver.table.getOrPutAdapted(allocator, key, adapter);
         if (!gop.found_existing) {
-            const index: u32 = @intCast(resolver.refs.items.len);
-            _ = try resolver.refs.addOne(allocator);
-            gop.value_ptr.* = index;
+            try resolver.keys.append(allocator, key);
+            _ = try resolver.values.addOne(allocator);
         }
         return .{
             .found_existing = gop.found_existing,
-            .off = off,
-            .ref_ptr = &resolver.refs.items[gop.value_ptr.*],
+            .index = @intCast(gop.index + 1),
+            .ref = &resolver.values.items[gop.index],
         };
     }
 
-    pub fn get(resolver: SymbolResolver, off: u32) ?Ref {
-        const index = resolver.map.get(off) orelse return null;
-        return resolver.refs.items[index];
+    pub fn get(resolver: SymbolResolver, index: Index) ?Ref {
+        if (index == 0) return null;
+        return resolver.values.items[index - 1];
     }
 
     pub fn reset(resolver: *SymbolResolver) void {
-        resolver.refs.clearRetainingCapacity();
-        resolver.map.clearRetainingCapacity();
+        resolver.keys.clearRetainingCapacity();
+        resolver.values.clearRetainingCapacity();
+        resolver.table.clearRetainingCapacity();
     }
 
-    pub fn format(
-        resolver: SymbolResolver,
-        comptime unused_fmt_string: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = unused_fmt_string;
-        _ = options;
-        var it = resolver.map.iterator();
-        while (it.next()) |entry| {
-            const off = entry.key_ptr.*;
-            const index = entry.value_ptr.*;
-            try writer.print("{d} => {s} {}\n", .{
-                off,                        resolver.strtab.getAssumeExists(off),
-                resolver.refs.items[index],
-            });
+    const Key = struct {
+        index: Symbol.Index,
+        file: File.Index,
+
+        fn getName(key: Key, macho_file: *MachO) [:0]const u8 {
+            const ref = Ref{ .index = key.index, .file = key.file };
+            return ref.getSymbol(macho_file).?.getName(macho_file);
         }
-    }
+
+        fn eql(key: Key, other: Key, macho_file: *MachO) bool {
+            const key_name = key.getName(macho_file);
+            const other_name = other.getName(macho_file);
+            return mem.eql(u8, key_name, other_name);
+        }
+
+        fn hash(key: Key, macho_file: *MachO) u32 {
+            const name = key.getName(macho_file);
+            return @truncate(Hash.hash(0, name));
+        }
+    };
+
+    const Adapter = struct {
+        keys: []const Key,
+        macho_file: *MachO,
+
+        pub fn eql(ctx: @This(), key: Key, b_void: void, b_map_index: usize) bool {
+            _ = b_void;
+            const other = ctx.keys[b_map_index];
+            return key.eql(other, ctx.macho_file);
+        }
+
+        pub fn hash(ctx: @This(), key: Key) u32 {
+            return key.hash(ctx.macho_file);
+        }
+    };
+
+    pub const Index = u32;
 };
 
 pub const base_tag = Zld.Tag.macho;

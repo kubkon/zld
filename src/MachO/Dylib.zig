@@ -12,7 +12,7 @@ ordinal: u16 = 0,
 
 symbols: std.ArrayListUnmanaged(Symbol) = .{},
 symbols_extra: std.ArrayListUnmanaged(u32) = .{},
-globals: std.ArrayListUnmanaged(u32) = .{},
+globals: std.ArrayListUnmanaged(MachO.SymbolResolver.Index) = .{},
 dependents: std.ArrayListUnmanaged(Id) = .{},
 rpaths: std.StringArrayHashMapUnmanaged(void) = .{},
 umbrella: File.Index = 0,
@@ -536,23 +536,25 @@ pub fn resolveSymbols(self: *Dylib, macho_file: *MachO) !void {
 
     const gpa = macho_file.base.allocator;
 
-    for (self.symbols.items, self.exports.items(.flags), self.globals.items, 0..) |sym, flags, *global, i| {
-        const name = sym.getName(macho_file);
-        const gop = try macho_file.resolver.getOrPut(gpa, name);
+    for (self.exports.items(.flags), self.globals.items, 0..) |flags, *global, i| {
+        const gop = try macho_file.resolver.getOrPut(gpa, .{
+            .index = @intCast(i),
+            .file = self.index,
+        }, macho_file);
         if (!gop.found_existing) {
-            gop.ref_ptr.* = .{ .index = 0, .file = 0 };
+            gop.ref.* = .{ .index = 0, .file = 0 };
         }
-        global.* = gop.off;
+        global.* = gop.index;
 
-        if (gop.ref_ptr.getFile(macho_file) == null) {
-            gop.ref_ptr.* = .{ .index = @intCast(i), .file = self.index };
+        if (gop.ref.getFile(macho_file) == null) {
+            gop.ref.* = .{ .index = @intCast(i), .file = self.index };
             continue;
         }
 
         if (self.asFile().getSymbolRank(.{
             .weak = flags.weak,
-        }) < gop.ref_ptr.getSymbol(macho_file).?.getSymbolRank(macho_file)) {
-            gop.ref_ptr.* = .{ .index = @intCast(i), .file = self.index };
+        }) < gop.ref.getSymbol(macho_file).?.getSymbolRank(macho_file)) {
+            gop.ref.* = .{ .index = @intCast(i), .file = self.index };
         }
     }
 }
@@ -647,8 +649,8 @@ fn addSymbolAssumeCapacity(self: *Dylib) Symbol.Index {
 }
 
 pub fn getSymbolRef(self: Dylib, index: Symbol.Index, macho_file: *MachO) MachO.Ref {
-    const off = self.globals.items[index];
-    if (macho_file.resolver.get(off)) |ref| return ref;
+    const global_index = self.globals.items[index];
+    if (macho_file.resolver.get(global_index)) |ref| return ref;
     return .{ .index = index, .file = self.index };
 }
 

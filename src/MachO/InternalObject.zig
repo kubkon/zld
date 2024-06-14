@@ -8,7 +8,7 @@ symtab: std.ArrayListUnmanaged(macho.nlist_64) = .{},
 strtab: std.ArrayListUnmanaged(u8) = .{},
 symbols: std.ArrayListUnmanaged(Symbol) = .{},
 symbols_extra: std.ArrayListUnmanaged(u32) = .{},
-globals: std.ArrayListUnmanaged(u32) = .{},
+globals: std.ArrayListUnmanaged(MachO.SymbolResolver.Index) = .{},
 
 objc_methnames: std.ArrayListUnmanaged(u8) = .{},
 objc_selrefs: [@sizeOf(u64)]u8 = [_]u8{0} ** @sizeOf(u64),
@@ -129,19 +129,19 @@ pub fn resolveSymbols(self: *InternalObject, macho_file: *MachO) !void {
 
     const gpa = macho_file.base.allocator;
 
-    for (self.symbols.items, 0..) |sym, i| {
-        const nlist = self.symtab.items[i];
-        const global = &self.globals.items[i];
-        const name = sym.getName(macho_file);
-        const gop = try macho_file.resolver.getOrPut(gpa, name);
+    for (self.symtab.items, self.globals.items, 0..) |nlist, *global, i| {
+        const gop = try macho_file.resolver.getOrPut(gpa, .{
+            .index = @intCast(i),
+            .file = self.index,
+        }, macho_file);
         if (!gop.found_existing) {
-            gop.ref_ptr.* = .{ .index = 0, .file = 0 };
+            gop.ref.* = .{ .index = 0, .file = 0 };
         }
-        global.* = gop.off;
+        global.* = gop.index;
 
         if (nlist.undf()) continue;
-        if (gop.ref_ptr.getFile(macho_file) == null) {
-            gop.ref_ptr.* = .{ .index = @intCast(i), .file = self.index };
+        if (gop.ref.getFile(macho_file) == null) {
+            gop.ref.* = .{ .index = @intCast(i), .file = self.index };
             continue;
         }
 
@@ -149,8 +149,8 @@ pub fn resolveSymbols(self: *InternalObject, macho_file: *MachO) !void {
             .archive = false,
             .weak = false,
             .tentative = false,
-        }) < gop.ref_ptr.getSymbol(macho_file).?.getSymbolRank(macho_file)) {
-            gop.ref_ptr.* = .{ .index = @intCast(i), .file = self.index };
+        }) < gop.ref.getSymbol(macho_file).?.getSymbolRank(macho_file)) {
+            gop.ref.* = .{ .index = @intCast(i), .file = self.index };
         }
     }
 }
@@ -652,8 +652,8 @@ pub fn addSymbolAssumeCapacity(self: *InternalObject) Symbol.Index {
 }
 
 pub fn getSymbolRef(self: InternalObject, index: Symbol.Index, macho_file: *MachO) MachO.Ref {
-    const off = self.globals.items[index];
-    if (macho_file.resolver.get(off)) |ref| return ref;
+    const global_index = self.globals.items[index];
+    if (macho_file.resolver.get(global_index)) |ref| return ref;
     return .{ .index = index, .file = self.index };
 }
 
