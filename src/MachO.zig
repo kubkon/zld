@@ -349,7 +349,6 @@ pub fn flush(self: *MachO) !void {
     try self.convertTentativeDefinitions();
     try self.createObjcSections();
     try self.dedupLiterals();
-    try self.claimUnresolved();
 
     //     if (self.options.dead_strip) {
     //         try dead_strip.gcAtoms(self);
@@ -363,6 +362,7 @@ pub fn flush(self: *MachO) !void {
         dylib.ordinal = @intCast(ord);
     }
 
+    try self.claimUnresolved();
     try self.scanRelocs();
     try self.initOutputSections();
     try self.initSyntheticSections();
