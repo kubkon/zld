@@ -1072,7 +1072,8 @@ fn resolveSyntheticSymbols(self: *MachO) !void {
 
 fn createObjcSections(self: *MachO) !void {
     const gpa = self.base.allocator;
-    var objc_msgsend_syms = std.AutoArrayHashMap(Ref, void).init(gpa);
+
+    var objc_msgsend_syms = std.StringArrayHashMap(Ref).init(gpa);
     defer objc_msgsend_syms.deinit();
 
     for (self.objects.items) |index| {
@@ -1085,15 +1086,19 @@ fn createObjcSections(self: *MachO) !void {
 
             const ref = object.getSymbolRef(@intCast(i), self);
             if (ref.getFile(self) != null) continue;
-            if (mem.startsWith(u8, sym.getName(self), "_objc_msgSend$")) {
-                _ = try objc_msgsend_syms.put(.{ .index = @intCast(i), .file = index }, {});
+
+            const name = sym.getName(self);
+            if (mem.startsWith(u8, name, "_objc_msgSend$")) {
+                const gop = try objc_msgsend_syms.getOrPut(name);
+                if (!gop.found_existing) {
+                    gop.value_ptr.* = .{ .index = @intCast(i), .file = index };
+                }
             }
         }
     }
 
-    for (objc_msgsend_syms.keys()) |ref| {
+    for (objc_msgsend_syms.keys(), objc_msgsend_syms.values()) |sym_name, ref| {
         const internal = self.getInternalObject().?;
-        const sym_name = ref.getSymbol(self).?.getName(self);
         const name_off = try internal.addString(gpa, sym_name);
         const sym_index = try internal.addSymbol(gpa);
         const sym = &internal.symbols.items[sym_index];
@@ -1113,6 +1118,10 @@ fn createObjcSections(self: *MachO) !void {
         const selrefs_index = try internal.addObjcMsgsendSections(name, self);
         sym.extra = try internal.addSymbolExtra(gpa, .{ .objc_selrefs = selrefs_index });
         sym.setSectionFlags(.{ .objc_stubs = true });
+
+        const idx = ref.getFile(self).?.object.globals.items[ref.index];
+        try internal.globals.append(gpa, idx);
+        self.resolver.values.items[idx - 1] = .{ .index = sym_index, .file = internal.index };
     }
 }
 

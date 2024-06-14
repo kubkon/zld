@@ -250,6 +250,7 @@ fn addObjcSelrefsSection(self: *InternalObject, methname_atom_index: Atom.Index,
         .n_value = 0,
     };
     sym.nlist_idx = nlist_idx;
+    try self.globals.append(gpa, 0);
     return sym_index;
 }
 
