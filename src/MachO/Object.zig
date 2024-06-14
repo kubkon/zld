@@ -1487,6 +1487,9 @@ pub fn mergeSymbolVisibility(self: *Object, macho_file: *MachO) void {
         if (global.visibility != .global) {
             global.visibility = sym.visibility;
         }
+        if (sym.flags.weak_ref) {
+            global.flags.weak_ref = true;
+        }
     }
 }
 
