@@ -323,12 +323,6 @@ pub fn flush(self: *MachO) !void {
 
     try self.parseDependentDylibs(arena, lib_dirs.items, framework_dirs.items);
 
-    for (self.dylibs.items) |index| {
-        const dylib = self.getFile(index).?.dylib;
-        if (!dylib.explicit and !dylib.hoisted) continue;
-        try dylib.initSymbols(self);
-    }
-
     {
         const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
         self.files.set(index, .{ .internal = .{ .index = index } });
@@ -910,6 +904,7 @@ fn parseDependentDylibs(
                 if (!dep_dylib.hoisted) {
                     const umbrella = dep_dylib.getUmbrella(self);
                     for (dep_dylib.exports.items(.name), dep_dylib.exports.items(.flags)) |off, flags| {
+                        // TODO rethink this entire algorithm
                         try umbrella.addExport(gpa, dep_dylib.getString(off), flags);
                     }
                     try umbrella.rpaths.ensureUnusedCapacity(gpa, dep_dylib.rpaths.keys().len);

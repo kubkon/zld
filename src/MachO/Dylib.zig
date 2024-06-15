@@ -51,6 +51,7 @@ pub fn parse(self: *Dylib, macho_file: *MachO) !void {
         assert(self.file_handle != null);
         try self.parseBinary(macho_file);
     }
+    try self.initSymbols(macho_file);
 }
 
 fn parseBinary(self: *Dylib, macho_file: *MachO) !void {
@@ -210,10 +211,16 @@ const TrieIterator = struct {
 };
 
 pub fn addExport(self: *Dylib, allocator: Allocator, name: []const u8, flags: Export.Flags) !void {
-    try self.exports.append(allocator, .{
-        .name = try self.addString(allocator, name),
-        .flags = flags,
-    });
+    const noff = try self.addString(allocator, name);
+    const index = try self.addSymbol(allocator);
+    const symbol = &self.symbols.items[index];
+    symbol.name = noff;
+    symbol.extra = try self.addSymbolExtra(allocator, .{});
+    symbol.flags.weak = flags.weak;
+    symbol.flags.tlv = flags.tlv;
+    symbol.visibility = .global;
+    try self.exports.append(allocator, .{ .name = noff, .flags = flags });
+    try self.globals.append(allocator, 0);
 }
 
 fn parseTrieNode(
@@ -237,14 +244,23 @@ fn parseTrieNode(
         if (flags & macho.EXPORT_SYMBOL_FLAGS_REEXPORT != 0) {
             _ = try it.readULEB128(); // dylib ordinal
             const name = try it.readString();
-            try self.addExport(allocator, if (name.len > 0) name else prefix, out_flags);
+            try self.exports.append(allocator, .{
+                .name = try self.addString(allocator, if (name.len > 0) name else prefix),
+                .flags = out_flags,
+            });
         } else if (flags & macho.EXPORT_SYMBOL_FLAGS_STUB_AND_RESOLVER != 0) {
             _ = try it.readULEB128(); // stub offset
             _ = try it.readULEB128(); // resolver offset
-            try self.addExport(allocator, prefix, out_flags);
+            try self.exports.append(allocator, .{
+                .name = try self.addString(allocator, prefix),
+                .flags = out_flags,
+            });
         } else {
             _ = try it.readULEB128(); // VM offset
-            try self.addExport(allocator, prefix, out_flags);
+            try self.exports.append(allocator, .{
+                .name = try self.addString(allocator, prefix),
+                .flags = out_flags,
+            });
         }
     }
 
@@ -325,13 +341,19 @@ fn parseTbd(self: *Dylib, macho_file: *MachO) !void {
 
                         if (exp.symbols) |symbols| {
                             for (symbols) |sym_name| {
-                                try self.addExport(gpa, sym_name, .{});
+                                try self.exports.append(gpa, .{
+                                    .name = try self.addString(gpa, sym_name),
+                                    .flags = .{},
+                                });
                             }
                         }
 
                         if (exp.weak_symbols) |symbols| {
                             for (symbols) |sym_name| {
-                                try self.addExport(gpa, sym_name, .{ .weak = true });
+                                try self.exports.append(gpa, .{
+                                    .name = try self.addString(gpa, sym_name),
+                                    .flags = .{ .weak = true },
+                                });
                             }
                         }
 
@@ -373,13 +395,19 @@ fn parseTbd(self: *Dylib, macho_file: *MachO) !void {
 
                         if (exp.symbols) |symbols| {
                             for (symbols) |sym_name| {
-                                try self.addExport(gpa, sym_name, .{});
+                                try self.exports.append(gpa, .{
+                                    .name = try self.addString(gpa, sym_name),
+                                    .flags = .{},
+                                });
                             }
                         }
 
                         if (exp.weak_symbols) |symbols| {
                             for (symbols) |sym_name| {
-                                try self.addExport(gpa, sym_name, .{ .weak = true });
+                                try self.exports.append(gpa, .{
+                                    .name = try self.addString(gpa, sym_name),
+                                    .flags = .{ .weak = true },
+                                });
                             }
                         }
 
@@ -409,13 +437,19 @@ fn parseTbd(self: *Dylib, macho_file: *MachO) !void {
 
                         if (reexp.symbols) |symbols| {
                             for (symbols) |sym_name| {
-                                try self.addExport(gpa, sym_name, .{});
+                                try self.exports.append(gpa, .{
+                                    .name = try self.addString(gpa, sym_name),
+                                    .flags = .{},
+                                });
                             }
                         }
 
                         if (reexp.weak_symbols) |symbols| {
                             for (symbols) |sym_name| {
-                                try self.addExport(gpa, sym_name, .{ .weak = true });
+                                try self.exports.append(gpa, .{
+                                    .name = try self.addString(gpa, sym_name),
+                                    .flags = .{ .weak = true },
+                                });
                             }
                         }
 
@@ -504,10 +538,13 @@ fn addObjCExport(
 ) !void {
     const full_name = try std.fmt.allocPrint(allocator, prefix ++ "$_{s}", .{name});
     defer allocator.free(full_name);
-    try self.addExport(allocator, full_name, .{});
+    try self.exports.append(allocator, .{
+        .name = try self.addString(allocator, full_name),
+        .flags = .{},
+    });
 }
 
-pub fn initSymbols(self: *Dylib, macho_file: *MachO) !void {
+fn initSymbols(self: *Dylib, macho_file: *MachO) !void {
     const gpa = macho_file.base.allocator;
 
     const nsyms = self.exports.items(.name).len;
