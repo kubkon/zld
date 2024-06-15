@@ -13,6 +13,7 @@ globals: std.ArrayListUnmanaged(MachO.SymbolResolver.Index) = .{},
 objc_methnames: std.ArrayListUnmanaged(u8) = .{},
 objc_selrefs: [@sizeOf(u64)]u8 = [_]u8{0} ** @sizeOf(u64),
 
+force_undefined: std.ArrayListUnmanaged(Symbol.Index) = .{},
 entry_index: ?Symbol.Index = null,
 dyld_stub_binder_index: ?Symbol.Index = null,
 dyld_private_index: ?Symbol.Index = null,
@@ -37,6 +38,7 @@ pub fn deinit(self: *InternalObject, allocator: Allocator) void {
     self.symbols_extra.deinit(allocator);
     self.globals.deinit(allocator);
     self.objc_methnames.deinit(allocator);
+    self.force_undefined.deinit(allocator);
 }
 
 pub fn init(self: *InternalObject, allocator: Allocator) !void {
@@ -96,8 +98,9 @@ pub fn initSymbols(self: *InternalObject, macho_file: *MachO) !void {
     self.globals.resize(gpa, nsyms) catch unreachable;
     @memset(self.globals.items, 0);
 
+    try self.force_undefined.ensureTotalCapacityPrecise(gpa, macho_file.options.force_undefined_symbols.len);
     for (macho_file.options.force_undefined_symbols) |name| {
-        _ = createSymbol(self, try self.addString(gpa, name), .{});
+        self.force_undefined.addOneAssumeCapacity().* = createSymbol(self, try self.addString(gpa, name), .{});
     }
 
     self.dyld_stub_binder_index = createSymbol(self, try self.addString(gpa, "dyld_stub_binder"), .{});

@@ -102,6 +102,12 @@ pub const File = union(enum) {
         };
     }
 
+    pub fn getSymbols(file: File) []Symbol {
+        return switch (file) {
+            inline else => |x| x.symbols.items,
+        };
+    }
+
     pub fn getSymbolRef(file: File, sym_index: Symbol.Index, macho_file: *MachO) MachO.Ref {
         return switch (file) {
             inline else => |x| x.getSymbolRef(sym_index, macho_file),

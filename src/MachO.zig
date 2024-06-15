@@ -350,9 +350,9 @@ pub fn flush(self: *MachO) !void {
     try self.createObjcSections();
     try self.dedupLiterals();
 
-    //     if (self.options.dead_strip) {
-    //         try dead_strip.gcAtoms(self);
-    //     }
+    if (self.options.dead_strip) {
+        try dead_strip.gcAtoms(self);
+    }
 
     self.markImportsAndExports();
     self.deadStripDylibs();
