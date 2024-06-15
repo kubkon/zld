@@ -25,8 +25,6 @@ resolver: SymbolResolver = .{},
 /// Key is symbol index.
 undefs: std.AutoHashMapUnmanaged(Ref, std.ArrayListUnmanaged(Ref)) = .{},
 undefs_mutex: std.Thread.Mutex = .{},
-/// Global symbols we need to resolve for the link to succeed.
-boundary_symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 
 pagezero_seg_index: ?u8 = null,
 text_seg_index: ?u8 = null,
@@ -344,8 +342,7 @@ pub fn flush(self: *MachO) !void {
 
     //     if (self.options.relocatable) return relocatable.flush(self);
 
-    // try self.resolveSyntheticSymbols();
-
+    if (self.getInternalObject()) |obj| try obj.resolveBoundarySymbols(self);
     try self.convertTentativeDefinitions();
     try self.createObjcSections();
     try self.dedupLiterals();
@@ -1036,40 +1033,6 @@ fn initOutputSections(self: *MachO) !void {
         try self.addSection("__DATA", "__data", .{});
 }
 
-fn resolveSyntheticSymbols(self: *MachO) !void {
-    const internal = self.getInternalObject() orelse return;
-
-    {
-        const gpa = self.base.allocator;
-        var boundary_symbols = std.AutoHashMap(Symbol.Index, void).init(gpa);
-        defer boundary_symbols.deinit();
-
-        for (self.objects.items) |index| {
-            const object = self.getFile(index).?.object;
-            for (object.symbols.items, 0..) |sym_index, i| {
-                const nlist = object.symtab.items(.nlist)[i];
-                const name = self.getSymbol(sym_index).getName(self);
-                if (!nlist.undf() or !nlist.ext()) continue;
-                if (mem.startsWith(u8, name, "segment$start$") or
-                    mem.startsWith(u8, name, "segment$stop$") or
-                    mem.startsWith(u8, name, "section$start$") or
-                    mem.startsWith(u8, name, "section$stop$"))
-                {
-                    _ = try boundary_symbols.put(sym_index, {});
-                }
-            }
-        }
-
-        try self.boundary_symbols.ensureTotalCapacityPrecise(gpa, boundary_symbols.count());
-
-        var it = boundary_symbols.iterator();
-        while (it.next()) |entry| {
-            _ = try internal.addSymbol(self.getSymbol(entry.key_ptr.*).getName(self), self);
-            self.boundary_symbols.appendAssumeCapacity(entry.key_ptr.*);
-        }
-    }
-}
-
 fn createObjcSections(self: *MachO) !void {
     const gpa = self.base.allocator;
 
@@ -1340,47 +1303,51 @@ fn initSyntheticSections(self: *MachO) !void {
         self.eh_frame_sect_index = try self.addSection("__TEXT", "__eh_frame", .{});
     }
 
-    // for (self.boundary_symbols.items) |sym_index| {
-    //     const gpa = self.base.allocator;
-    //     const sym = self.getSymbol(sym_index);
-    //     const name = sym.getName(self);
+    if (self.getInternalObject()) |obj| {
+        const gpa = self.base.allocator;
 
-    //     if (eatPrefix(name, "segment$start$")) |segname| {
-    //         if (self.getSegmentByName(segname) == null) { // TODO check segname is valid
-    //             const prot = getSegmentProt(segname);
-    //             _ = try self.segments.append(gpa, .{
-    //                 .cmdsize = @sizeOf(macho.segment_command_64),
-    //                 .segname = makeStaticString(segname),
-    //                 .initprot = prot,
-    //                 .maxprot = prot,
-    //             });
-    //         }
-    //     } else if (eatPrefix(name, "segment$stop$")) |segname| {
-    //         if (self.getSegmentByName(segname) == null) { // TODO check segname is valid
-    //             const prot = getSegmentProt(segname);
-    //             _ = try self.segments.append(gpa, .{
-    //                 .cmdsize = @sizeOf(macho.segment_command_64),
-    //                 .segname = makeStaticString(segname),
-    //                 .initprot = prot,
-    //                 .maxprot = prot,
-    //             });
-    //         }
-    //     } else if (eatPrefix(name, "section$start$")) |actual_name| {
-    //         const sep = mem.indexOfScalar(u8, actual_name, '$').?; // TODO error rather than a panic
-    //         const segname = actual_name[0..sep]; // TODO check segname is valid
-    //         const sectname = actual_name[sep + 1 ..]; // TODO check sectname is valid
-    //         if (self.getSectionByName(segname, sectname) == null) {
-    //             _ = try self.addSection(segname, sectname, .{});
-    //         }
-    //     } else if (eatPrefix(name, "section$stop$")) |actual_name| {
-    //         const sep = mem.indexOfScalar(u8, actual_name, '$').?; // TODO error rather than a panic
-    //         const segname = actual_name[0..sep]; // TODO check segname is valid
-    //         const sectname = actual_name[sep + 1 ..]; // TODO check sectname is valid
-    //         if (self.getSectionByName(segname, sectname) == null) {
-    //             _ = try self.addSection(segname, sectname, .{});
-    //         }
-    //     } else unreachable;
-    // }
+        for (obj.boundary_symbols.items) |sym_index| {
+            const ref = obj.getSymbolRef(sym_index, self);
+            const sym = ref.getSymbol(self).?;
+            const name = sym.getName(self);
+
+            if (eatPrefix(name, "segment$start$")) |segname| {
+                if (self.getSegmentByName(segname) == null) { // TODO check segname is valid
+                    const prot = getSegmentProt(segname);
+                    _ = try self.segments.append(gpa, .{
+                        .cmdsize = @sizeOf(macho.segment_command_64),
+                        .segname = makeStaticString(segname),
+                        .initprot = prot,
+                        .maxprot = prot,
+                    });
+                }
+            } else if (eatPrefix(name, "segment$stop$")) |segname| {
+                if (self.getSegmentByName(segname) == null) { // TODO check segname is valid
+                    const prot = getSegmentProt(segname);
+                    _ = try self.segments.append(gpa, .{
+                        .cmdsize = @sizeOf(macho.segment_command_64),
+                        .segname = makeStaticString(segname),
+                        .initprot = prot,
+                        .maxprot = prot,
+                    });
+                }
+            } else if (eatPrefix(name, "section$start$")) |actual_name| {
+                const sep = mem.indexOfScalar(u8, actual_name, '$').?; // TODO error rather than a panic
+                const segname = actual_name[0..sep]; // TODO check segname is valid
+                const sectname = actual_name[sep + 1 ..]; // TODO check sectname is valid
+                if (self.getSectionByName(segname, sectname) == null) {
+                    _ = try self.addSection(segname, sectname, .{});
+                }
+            } else if (eatPrefix(name, "section$stop$")) |actual_name| {
+                const sep = mem.indexOfScalar(u8, actual_name, '$').?; // TODO error rather than a panic
+                const segname = actual_name[0..sep]; // TODO check segname is valid
+                const sectname = actual_name[sep + 1 ..]; // TODO check sectname is valid
+                if (self.getSectionByName(segname, sectname) == null) {
+                    _ = try self.addSection(segname, sectname, .{});
+                }
+            } else unreachable;
+        }
+    }
 }
 
 fn getSegmentProt(segname: []const u8) macho.vm_prot_t {
@@ -1846,49 +1813,52 @@ fn allocateSegments(self: *MachO) void {
 fn allocateSyntheticSymbols(self: *MachO) void {
     if (self.getInternalObject()) |obj| {
         obj.allocateSyntheticSymbols(self);
+
+        const text_seg = self.getTextSegment();
+
+        for (obj.boundary_symbols.items) |sym_index| {
+            const ref = obj.getSymbolRef(sym_index, self);
+            const sym = ref.getSymbol(self).?;
+            const name = sym.getName(self);
+
+            sym.flags.@"export" = false;
+            sym.value = text_seg.vmaddr;
+
+            if (mem.startsWith(u8, name, "segment$start$")) {
+                const segname = name["segment$start$".len..];
+                if (self.getSegmentByName(segname)) |seg_id| {
+                    const seg = self.segments.items[seg_id];
+                    sym.value = seg.vmaddr;
+                }
+            } else if (mem.startsWith(u8, name, "segment$stop$")) {
+                const segname = name["segment$stop$".len..];
+                if (self.getSegmentByName(segname)) |seg_id| {
+                    const seg = self.segments.items[seg_id];
+                    sym.value = seg.vmaddr + seg.vmsize;
+                }
+            } else if (mem.startsWith(u8, name, "section$start$")) {
+                const actual_name = name["section$start$".len..];
+                const sep = mem.indexOfScalar(u8, actual_name, '$').?; // TODO error rather than a panic
+                const segname = actual_name[0..sep];
+                const sectname = actual_name[sep + 1 ..];
+                if (self.getSectionByName(segname, sectname)) |sect_id| {
+                    const sect = self.sections.items(.header)[sect_id];
+                    sym.value = sect.addr;
+                    sym.out_n_sect = sect_id;
+                }
+            } else if (mem.startsWith(u8, name, "section$stop$")) {
+                const actual_name = name["section$stop$".len..];
+                const sep = mem.indexOfScalar(u8, actual_name, '$').?; // TODO error rather than a panic
+                const segname = actual_name[0..sep];
+                const sectname = actual_name[sep + 1 ..];
+                if (self.getSectionByName(segname, sectname)) |sect_id| {
+                    const sect = self.sections.items(.header)[sect_id];
+                    sym.value = sect.addr + sect.size;
+                    sym.out_n_sect = sect_id;
+                }
+            } else unreachable;
+        }
     }
-
-    // for (self.boundary_symbols.items) |sym_index| {
-    //     const sym = self.getSymbol(sym_index);
-    //     const name = sym.getName(self);
-
-    //     sym.flags.@"export" = false;
-    //     sym.value = text_seg.vmaddr;
-
-    //     if (mem.startsWith(u8, name, "segment$start$")) {
-    //         const segname = name["segment$start$".len..];
-    //         if (self.getSegmentByName(segname)) |seg_id| {
-    //             const seg = self.segments.items[seg_id];
-    //             sym.value = seg.vmaddr;
-    //         }
-    //     } else if (mem.startsWith(u8, name, "segment$stop$")) {
-    //         const segname = name["segment$stop$".len..];
-    //         if (self.getSegmentByName(segname)) |seg_id| {
-    //             const seg = self.segments.items[seg_id];
-    //             sym.value = seg.vmaddr + seg.vmsize;
-    //         }
-    //     } else if (mem.startsWith(u8, name, "section$start$")) {
-    //         const actual_name = name["section$start$".len..];
-    //         const sep = mem.indexOfScalar(u8, actual_name, '$').?; // TODO error rather than a panic
-    //         const segname = actual_name[0..sep];
-    //         const sectname = actual_name[sep + 1 ..];
-    //         if (self.getSectionByName(segname, sectname)) |sect_id| {
-    //             const sect = self.sections.items(.header)[sect_id];
-    //             sym.value = sect.addr;
-    //             sym.out_n_sect = sect_id;
-    //         }
-    //     } else if (mem.startsWith(u8, name, "section$stop$")) {
-    //         const actual_name = name["section$stop$".len..];
-    //         const sep = mem.indexOfScalar(u8, actual_name, '$').?; // TODO error rather than a panic
-    //         const segname = actual_name[0..sep];
-    //         const sectname = actual_name[sep + 1 ..];
-    //         if (self.getSectionByName(segname, sectname)) |sect_id| {
-    //             const sect = self.sections.items(.header)[sect_id];
-    //             sym.value = sect.addr + sect.size;
-    //             sym.out_n_sect = sect_id;
-    //         }
-    //     } else unreachable;
-    // }
 
     if (self.objc_stubs.symbols.items.len > 0) {
         const addr = self.sections.items(.header)[self.objc_stubs_sect_index.?].addr;

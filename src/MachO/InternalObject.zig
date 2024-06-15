@@ -21,6 +21,7 @@ objc_msg_send_index: ?Symbol.Index = null,
 mh_execute_header_index: ?Symbol.Index = null,
 mh_dylib_header_index: ?Symbol.Index = null,
 dso_handle_index: ?Symbol.Index = null,
+boundary_symbols: std.ArrayListUnmanaged(Symbol.Index) = .{},
 
 output_symtab_ctx: MachO.SymtabCtx = .{},
 
@@ -39,6 +40,7 @@ pub fn deinit(self: *InternalObject, allocator: Allocator) void {
     self.globals.deinit(allocator);
     self.objc_methnames.deinit(allocator);
     self.force_undefined.deinit(allocator);
+    self.boundary_symbols.deinit(allocator);
 }
 
 pub fn init(self: *InternalObject, allocator: Allocator) !void {
@@ -155,6 +157,64 @@ pub fn resolveSymbols(self: *InternalObject, macho_file: *MachO) !void {
         }) < gop.ref.getSymbol(macho_file).?.getSymbolRank(macho_file)) {
             gop.ref.* = .{ .index = @intCast(i), .file = self.index };
         }
+    }
+}
+
+pub fn resolveBoundarySymbols(self: *InternalObject, macho_file: *MachO) !void {
+    const gpa = macho_file.base.allocator;
+    var boundary_symbols = std.StringArrayHashMap(MachO.Ref).init(gpa);
+    defer boundary_symbols.deinit();
+
+    for (macho_file.objects.items) |index| {
+        const object = macho_file.getFile(index).?.object;
+        for (object.symbols.items, 0..) |sym, i| {
+            const nlist = object.symtab.items(.nlist)[i];
+            if (!nlist.undf() or !nlist.ext()) continue;
+            const ref = object.getSymbolRef(@intCast(i), macho_file);
+            if (ref.getFile(macho_file) != null) continue;
+            const name = sym.getName(macho_file);
+            if (mem.startsWith(u8, name, "segment$start$") or
+                mem.startsWith(u8, name, "segment$stop$") or
+                mem.startsWith(u8, name, "section$start$") or
+                mem.startsWith(u8, name, "section$stop$"))
+            {
+                const gop = try boundary_symbols.getOrPut(name);
+                if (!gop.found_existing) {
+                    gop.value_ptr.* = .{ .index = @intCast(i), .file = index };
+                }
+            }
+        }
+    }
+
+    const nsyms = boundary_symbols.values().len;
+    try self.boundary_symbols.ensureTotalCapacityPrecise(gpa, nsyms);
+    try self.symbols.ensureUnusedCapacity(gpa, nsyms);
+    try self.symtab.ensureUnusedCapacity(gpa, nsyms);
+    try self.symbols_extra.ensureUnusedCapacity(gpa, nsyms * @sizeOf(Symbol.Extra));
+    try self.globals.ensureUnusedCapacity(gpa, nsyms);
+
+    for (boundary_symbols.keys(), boundary_symbols.values()) |name, ref| {
+        const name_off = try self.addString(gpa, name);
+        const sym_index = self.addSymbolAssumeCapacity();
+        self.boundary_symbols.appendAssumeCapacity(sym_index);
+        const sym = &self.symbols.items[sym_index];
+        sym.name = name_off;
+        sym.visibility = .global;
+        const nlist_idx: u32 = @intCast(self.symtab.items.len);
+        const nlist = self.symtab.addOneAssumeCapacity();
+        nlist.* = .{
+            .n_strx = name_off,
+            .n_type = macho.N_SECT | macho.N_EXT,
+            .n_sect = 0,
+            .n_desc = 0,
+            .n_value = 0,
+        };
+        sym.nlist_idx = nlist_idx;
+        sym.extra = self.addSymbolExtraAssumeCapacity(.{});
+
+        const idx = ref.getFile(macho_file).?.object.globals.items[ref.index];
+        self.globals.addOneAssumeCapacity().* = idx;
+        macho_file.resolver.values.items[idx - 1] = .{ .index = sym_index, .file = self.index };
     }
 }
 
