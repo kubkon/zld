@@ -60,13 +60,13 @@ pub fn flush(macho_file: *MachO) !void {
 
 fn markExports(macho_file: *MachO) void {
     for (macho_file.objects.items) |index| {
-        for (macho_file.getFile(index).?.getSymbols()) |sym_index| {
-            const sym = macho_file.getSymbol(sym_index);
-            const file = sym.getFile(macho_file) orelse continue;
+        const object = macho_file.getFile(index).?.object;
+        for (object.symbols.items, 0..) |*sym, i| {
+            const ref = object.getSymbolRef(@intCast(i), macho_file);
+            const file = ref.getFile(macho_file) orelse continue;
+            if (file.getIndex() != index) continue;
             if (sym.visibility != .global) continue;
-            if (file.getIndex() == index) {
-                sym.flags.@"export" = true;
-            }
+            sym.flags.@"export" = true;
         }
     }
 }
@@ -75,22 +75,19 @@ fn claimUnresolved(macho_file: *MachO) void {
     for (macho_file.objects.items) |index| {
         const object = macho_file.getFile(index).?.object;
 
-        for (object.symbols.items, 0..) |sym_index, i| {
-            const nlist_idx = @as(Symbol.Index, @intCast(i));
-            const nlist = object.symtab.items(.nlist)[nlist_idx];
+        for (object.symbols.items, object.symtab.items(.nlist), 0..) |*sym, nlist, i| {
             if (!nlist.ext()) continue;
             if (!nlist.undf()) continue;
-
-            const sym = macho_file.getSymbol(sym_index);
-            if (sym.getFile(macho_file) != null) continue;
+            if (object.getSymbolRef(@intCast(i), macho_file).getFile(macho_file) != null) continue;
 
             sym.value = 0;
-            sym.atom_ref = .{};
-            sym.nlist_idx = nlist_idx;
-            sym.file = index;
+            sym.atom_ref = .{ .index = 0, .file = 0 };
             sym.flags.weak_ref = nlist.weakRef();
             sym.flags.import = true;
             sym.visibility = .global;
+
+            const idx = object.globals.items[i];
+            macho_file.resolver.values.items[idx - 1] = .{ .index = @intCast(i), .file = index };
         }
     }
 }

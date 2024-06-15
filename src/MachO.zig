@@ -334,7 +334,7 @@ pub fn flush(self: *MachO) !void {
 
     try self.resolveSymbols();
 
-    //     if (self.options.relocatable) return relocatable.flush(self);
+    if (self.options.relocatable) return relocatable.flush(self);
 
     if (self.getInternalObject()) |obj| try obj.resolveBoundarySymbols(self);
     try self.convertTentativeDefinitions();
