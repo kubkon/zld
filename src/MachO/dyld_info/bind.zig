@@ -68,7 +68,7 @@ pub const Bind = struct {
                         .segment_id = seg_id,
                         .addend = addend,
                     };
-                    if (sym.flags.import or sym.flags.interposable) {
+                    if (sym.flags.import or (!(sym.flags.@"export" and sym.flags.weak) and sym.flags.interposable)) {
                         try self.entries.append(gpa, entry);
                     }
                 }
@@ -87,7 +87,7 @@ pub const Bind = struct {
                     .segment_id = seg_id,
                     .addend = 0,
                 };
-                if (sym.flags.import or sym.flags.interposable) {
+                if (sym.flags.import or (sym.flags.@"export" and sym.flags.interposable and !sym.flags.weak)) {
                     try self.entries.append(gpa, entry);
                 }
             }
@@ -125,7 +125,7 @@ pub const Bind = struct {
                     .segment_id = seg_id,
                     .addend = 0,
                 };
-                if (sym.flags.import or sym.flags.interposable) {
+                if (sym.flags.import or (sym.flags.@"export" and sym.flags.interposable and !sym.flags.weak)) {
                     try self.entries.append(gpa, entry);
                 }
             }
@@ -322,7 +322,7 @@ pub const WeakBind = struct {
                         .segment_id = seg_id,
                         .addend = addend,
                     };
-                    if (sym.flags.weak) {
+                    if (!sym.isLocal() and sym.flags.weak) {
                         try self.entries.append(gpa, entry);
                     }
                 }
