@@ -317,6 +317,61 @@ fn addObjcSelrefsSection(self: *InternalObject, methname_atom_index: Atom.Index,
     return sym_index;
 }
 
+pub fn resolveObjcMsgSendSymbols(self: *InternalObject, macho_file: *MachO) !void {
+    const gpa = macho_file.base.allocator;
+
+    var objc_msgsend_syms = std.StringArrayHashMap(MachO.Ref).init(gpa);
+    defer objc_msgsend_syms.deinit();
+
+    for (macho_file.objects.items) |index| {
+        const object = macho_file.getFile(index).?.object;
+
+        for (object.symbols.items, 0..) |sym, i| {
+            const nlist = object.symtab.items(.nlist)[i];
+            if (!nlist.ext()) continue;
+            if (!nlist.undf()) continue;
+
+            const ref = object.getSymbolRef(@intCast(i), macho_file);
+            if (ref.getFile(macho_file) != null) continue;
+
+            const name = sym.getName(macho_file);
+            if (mem.startsWith(u8, name, "_objc_msgSend$")) {
+                const gop = try objc_msgsend_syms.getOrPut(name);
+                if (!gop.found_existing) {
+                    gop.value_ptr.* = .{ .index = @intCast(i), .file = index };
+                }
+            }
+        }
+    }
+
+    for (objc_msgsend_syms.keys(), objc_msgsend_syms.values()) |sym_name, ref| {
+        const name = MachO.eatPrefix(sym_name, "_objc_msgSend$").?;
+        const selrefs_index = try self.addObjcMsgsendSections(name, macho_file);
+
+        const name_off = try self.addString(gpa, sym_name);
+        const sym_index = try self.addSymbol(gpa);
+        const sym = &self.symbols.items[sym_index];
+        sym.name = name_off;
+        sym.visibility = .hidden;
+        const nlist_idx: u32 = @intCast(self.symtab.items.len);
+        const nlist = try self.symtab.addOne(gpa);
+        nlist.* = .{
+            .n_strx = name_off,
+            .n_type = macho.N_SECT | macho.N_EXT | macho.N_PEXT,
+            .n_sect = 0,
+            .n_desc = 0,
+            .n_value = 0,
+        };
+        sym.nlist_idx = nlist_idx;
+        sym.extra = try self.addSymbolExtra(gpa, .{ .objc_selrefs = selrefs_index });
+        sym.setSectionFlags(.{ .objc_stubs = true });
+
+        const idx = ref.getFile(macho_file).?.object.globals.items[ref.index];
+        try self.globals.append(gpa, idx);
+        macho_file.resolver.values.items[idx - 1] = .{ .index = sym_index, .file = self.index };
+    }
+}
+
 pub fn resolveLiterals(self: *InternalObject, lp: *MachO.LiteralPool, macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();

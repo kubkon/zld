@@ -336,9 +336,11 @@ pub fn flush(self: *MachO) !void {
 
     if (self.options.relocatable) return relocatable.flush(self);
 
-    if (self.getInternalObject()) |obj| try obj.resolveBoundarySymbols(self);
     try self.convertTentativeDefinitions();
-    try self.createObjcSections();
+    if (self.getInternalObject()) |obj| {
+        try obj.resolveBoundarySymbols(self);
+        try obj.resolveObjcMsgSendSymbols(self);
+    }
     try self.dedupLiterals();
 
     if (self.options.dead_strip) {
@@ -1026,61 +1028,6 @@ fn initOutputSections(self: *MachO) !void {
     }
     self.data_sect_index = self.getSectionByName("__DATA", "__data") orelse
         try self.addSection("__DATA", "__data", .{});
-}
-
-fn createObjcSections(self: *MachO) !void {
-    const gpa = self.base.allocator;
-
-    var objc_msgsend_syms = std.StringArrayHashMap(Ref).init(gpa);
-    defer objc_msgsend_syms.deinit();
-
-    for (self.objects.items) |index| {
-        const object = self.getFile(index).?.object;
-
-        for (object.symbols.items, 0..) |sym, i| {
-            const nlist = object.symtab.items(.nlist)[i];
-            if (!nlist.ext()) continue;
-            if (!nlist.undf()) continue;
-
-            const ref = object.getSymbolRef(@intCast(i), self);
-            if (ref.getFile(self) != null) continue;
-
-            const name = sym.getName(self);
-            if (mem.startsWith(u8, name, "_objc_msgSend$")) {
-                const gop = try objc_msgsend_syms.getOrPut(name);
-                if (!gop.found_existing) {
-                    gop.value_ptr.* = .{ .index = @intCast(i), .file = index };
-                }
-            }
-        }
-    }
-
-    for (objc_msgsend_syms.keys(), objc_msgsend_syms.values()) |sym_name, ref| {
-        const internal = self.getInternalObject().?;
-        const name_off = try internal.addString(gpa, sym_name);
-        const sym_index = try internal.addSymbol(gpa);
-        const sym = &internal.symbols.items[sym_index];
-        sym.name = name_off;
-        sym.visibility = .hidden;
-        const nlist_idx: u32 = @intCast(internal.symtab.items.len);
-        const nlist = try internal.symtab.addOne(gpa);
-        nlist.* = .{
-            .n_strx = name_off,
-            .n_type = macho.N_SECT | macho.N_EXT | macho.N_PEXT,
-            .n_sect = 0,
-            .n_desc = 0,
-            .n_value = 0,
-        };
-        sym.nlist_idx = nlist_idx;
-        const name = eatPrefix(sym_name, "_objc_msgSend$").?;
-        const selrefs_index = try internal.addObjcMsgsendSections(name, self);
-        sym.extra = try internal.addSymbolExtra(gpa, .{ .objc_selrefs = selrefs_index });
-        sym.setSectionFlags(.{ .objc_stubs = true });
-
-        const idx = ref.getFile(self).?.object.globals.items[ref.index];
-        try internal.globals.append(gpa, idx);
-        self.resolver.values.items[idx - 1] = .{ .index = sym_index, .file = internal.index };
-    }
 }
 
 pub fn dedupLiterals(self: *MachO) !void {
