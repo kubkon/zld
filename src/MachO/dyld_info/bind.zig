@@ -5,14 +5,15 @@ pub const Entry = struct {
     addend: i64,
 
     pub fn lessThan(ctx: *MachO, entry: Entry, other: Entry) bool {
+        _ = ctx;
         if (entry.segment_id == other.segment_id) {
             if (entry.target.eql(other.target)) {
                 return entry.offset < other.offset;
             }
-            // TODO this is way too slow; is it needed?
-            const entry_name = entry.target.getSymbol(ctx).?.getName(ctx);
-            const other_name = other.target.getSymbol(ctx).?.getName(ctx);
-            return std.mem.lessThan(u8, entry_name, other_name);
+            if (entry.target.file == other.target.file) {
+                return entry.target.index < other.target.index;
+            }
+            return entry.target.file < other.target.file;
         }
         return entry.segment_id < other.segment_id;
     }
