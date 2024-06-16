@@ -1895,7 +1895,7 @@ fn validateFeatures(wasm: *Wasm) !void {
     // When the user has given an explicit list of features to enable,
     // we extract them and insert each into the 'allowed' list.
     if (!infer) {
-        var it = std.mem.split(u8, wasm.options.features, ",");
+        var it = std.mem.splitScalar(u8, wasm.options.features, ',');
         while (it.next()) |feature_name| {
             const feature = types.known_features.get(feature_name) orelse {
                 log.err("Unknown feature name '{s}' passed as option", .{feature_name});

@@ -253,7 +253,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         } else if (p.flagZ("muldefs")) {
             opts.allow_multiple_definition = true;
         } else if (p.argAny("section-start")) |pair| {
-            var pair_it = std.mem.split(u8, pair, "=");
+            var pair_it = std.mem.splitScalar(u8, pair, '=');
             const name = pair_it.next() orelse ctx.fatal("expected section=address mapping", .{});
             const value = pair_it.next() orelse ctx.fatal("expected section=address mapping", .{});
             try opts.parseSectionStart(arena, name, value, ctx);

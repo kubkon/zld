@@ -250,7 +250,7 @@ fn resolveFile(
         }
 
         const path = path: {
-            var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
+            var buffer: [fs.max_path_bytes]u8 = undefined;
             const path = std.fs.realpath(obj.path, &buffer) catch |err| switch (err) {
                 error.FileNotFound => {
                     for (search_dirs) |search_dir| {
@@ -508,7 +508,7 @@ fn sortInitFini(self: *Elf) !void {
                 }
                 const default: i32 = if (is_ctor_dtor) -1 else std.math.maxInt(i32);
                 const name = atom.getName(self);
-                var it = mem.splitBackwards(u8, name, ".");
+                var it = mem.splitBackwardsScalar(u8, name, '.');
                 const priority = std.fmt.parseUnsigned(u16, it.first(), 10) catch default;
                 break :blk priority;
             };
