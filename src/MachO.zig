@@ -210,7 +210,7 @@ pub fn flush(self: *MachO) !void {
         const full_path = blk: {
             switch (obj.tag) {
                 .obj => {
-                    var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
+                    var buffer: [fs.max_path_bytes]u8 = undefined;
                     const full_path = std.fs.realpath(obj.path, &buffer) catch |err| switch (err) {
                         error.FileNotFound => {
                             self.base.fatal("file not found {}", .{obj});
@@ -944,7 +944,7 @@ fn parseDependentDylibs(
                     for (self.getFile(dylib.umbrella).?.dylib.rpaths.keys()) |rpath| {
                         const prefix = eatPrefix(rpath, "@loader_path/") orelse rpath;
                         const rel_path = try std.fs.path.join(arena, &.{ prefix, path });
-                        var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+                        var buffer: [std.fs.max_path_bytes]u8 = undefined;
                         const full_path = std.fs.realpath(rel_path, &buffer) catch continue;
                         break :full_path try arena.dupe(u8, full_path);
                     }
@@ -958,7 +958,7 @@ fn parseDependentDylibs(
                     });
                 }
 
-                var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+                var buffer: [std.fs.max_path_bytes]u8 = undefined;
                 if (std.fs.realpath(id.name, &buffer)) |full_path| {
                     break :full_path try arena.dupe(u8, full_path);
                 } else |_| {
