@@ -4,7 +4,7 @@
 value: u64 = 0,
 
 /// Offset into the linker's intern table.
-name: u32 = 0,
+name: MachO.String = .{},
 
 /// File where this symbol is defined.
 file: File.Index = 0,

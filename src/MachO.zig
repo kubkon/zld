@@ -3085,6 +3085,11 @@ pub const SymbolResolver = struct {
     pub const Index = u32;
 };
 
+pub const String = struct {
+    pos: u32 = 0,
+    len: u32 = 0,
+};
+
 pub const base_tag = Zld.Tag.macho;
 
 const aarch64 = @import("aarch64.zig");

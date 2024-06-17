@@ -205,7 +205,7 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
 
         fn rank(ctx: *const Object, nl: macho.nlist_64) u8 {
             if (!nl.ext()) {
-                const name = ctx.getString(nl.n_strx);
+                const name = ctx.getNStrx(nl.n_strx);
                 if (name.len == 0) return 5;
                 if (name[0] == 'l' or name[0] == 'L') return 4;
                 return 3;
@@ -344,7 +344,7 @@ fn initSubsections(self: *Object, allocator: Allocator, nlists: anytype) !void {
             else
                 sect.@"align";
             const atom_index = try self.addAtom(allocator, .{
-                .name = nlist.nlist.n_strx,
+                .name = .{ .pos = nlist.nlist.n_strx, .len = @intCast(self.getNStrx(nlist.nlist.n_strx).len + 1) },
                 .n_sect = @intCast(n_sect),
                 .off = nlist.nlist.n_value - sect.addr,
                 .size = size,
@@ -443,7 +443,7 @@ fn initCstringLiterals(self: *Object, allocator: Allocator, file: File.Handle, m
             end += 1;
 
             const atom_index = try self.addAtom(allocator, .{
-                .name = 0,
+                .name = .{},
                 .n_sect = @intCast(n_sect),
                 .off = start,
                 .size = end - start,
@@ -487,7 +487,7 @@ fn initFixedSizeLiterals(self: *Object, allocator: Allocator, macho_file: *MachO
         var pos: u32 = 0;
         while (pos < sect.size) : (pos += rec_size) {
             const atom_index = try self.addAtom(allocator, .{
-                .name = 0,
+                .name = .{},
                 .n_sect = @intCast(n_sect),
                 .off = pos,
                 .size = rec_size,
@@ -525,7 +525,7 @@ fn initPointerLiterals(self: *Object, allocator: Allocator, macho_file: *MachO) 
         for (0..num_ptrs) |i| {
             const pos: u32 = @as(u32, @intCast(i)) * rec_size;
             const atom_index = try self.addAtom(allocator, .{
-                .name = 0,
+                .name = .{},
                 .n_sect = @intCast(n_sect),
                 .off = pos,
                 .size = rec_size,
@@ -766,7 +766,7 @@ fn linkNlistToAtom(self: *Object, macho_file: *MachO) !void {
                 atom.* = atom_index;
             } else {
                 macho_file.base.fatal("{}: symbol {s} not attached to any (sub)section", .{
-                    self.fmtPath(), self.getString(nlist.n_strx),
+                    self.fmtPath(), self.getNStrx(nlist.n_strx),
                 });
                 return error.ParseFailed;
             }
@@ -791,7 +791,7 @@ fn initSymbols(self: *Object, allocator: Allocator, macho_file: *MachO) !void {
         const index = self.addSymbolAssumeCapacity();
         const symbol = &self.symbols.items[index];
         symbol.value = nlist.n_value;
-        symbol.name = nlist.n_strx;
+        symbol.name = .{ .pos = nlist.n_strx, .len = @intCast(self.getNStrx(nlist.n_strx).len + 1) };
         symbol.nlist_idx = @intCast(i);
         symbol.extra = self.addSymbolExtraAssumeCapacity(.{});
 
@@ -862,7 +862,7 @@ fn initSymbolStabs(self: *Object, allocator: Allocator, nlists: anytype, macho_f
     defer addr_lookup.deinit();
     for (syms) |sym| {
         if (sym.sect() and (sym.ext() or sym.pext())) {
-            try addr_lookup.putNoClobber(self.getString(sym.n_strx), sym.n_value);
+            try addr_lookup.putNoClobber(self.getNStrx(sym.n_strx), sym.n_value);
         }
     }
 
@@ -895,7 +895,7 @@ fn initSymbolStabs(self: *Object, allocator: Allocator, nlists: anytype, macho_f
                 },
                 macho.N_GSYM => {
                     stab.is_func = false;
-                    stab.index = sym_lookup.find(addr_lookup.get(self.getString(nlist.n_strx)).?);
+                    stab.index = sym_lookup.find(addr_lookup.get(self.getNStrx(nlist.n_strx)).?);
                 },
                 macho.N_STSYM => {
                     stab.is_func = false;
@@ -1957,17 +1957,23 @@ pub fn getSectionData(self: *const Object, allocator: Allocator, index: u32, fil
     return buffer;
 }
 
-fn addString(self: *Object, allocator: Allocator, name: [:0]const u8) error{OutOfMemory}!u32 {
+fn addString(self: *Object, allocator: Allocator, name: [:0]const u8) error{OutOfMemory}!MachO.String {
     const off: u32 = @intCast(self.strtab.items.len);
     try self.strtab.ensureUnusedCapacity(allocator, name.len + 1);
     self.strtab.appendSliceAssumeCapacity(name);
     self.strtab.appendAssumeCapacity(0);
-    return off;
+    return .{ .pos = off, .len = @intCast(name.len + 1) };
 }
 
-pub fn getString(self: Object, off: u32) [:0]const u8 {
-    assert(off < self.strtab.items.len);
-    return mem.sliceTo(@as([*:0]const u8, @ptrCast(self.strtab.items.ptr + off)), 0);
+pub fn getString(self: Object, name: MachO.String) [:0]const u8 {
+    assert(name.pos < self.strtab.items.len and name.pos + name.len <= self.strtab.items.len);
+    if (name.len == 0) return "";
+    return self.strtab.items[name.pos..][0 .. name.len - 1 :0];
+}
+
+fn getNStrx(self: Object, n_strx: u32) [:0]const u8 {
+    assert(n_strx < self.strtab.items.len);
+    return mem.sliceTo(@as([*:0]const u8, @ptrCast(self.strtab.items.ptr + n_strx)), 0);
 }
 
 /// TODO handle multiple CUs
@@ -1981,7 +1987,7 @@ fn hasSymbolStabs(self: Object) bool {
 
 pub fn hasObjc(self: Object) bool {
     for (self.symtab.items(.nlist)) |nlist| {
-        const name = self.getString(nlist.n_strx);
+        const name = self.getNStrx(nlist.n_strx);
         if (mem.startsWith(u8, name, "_OBJC_CLASS_$_")) return true;
     }
     for (self.sections.items(.header)) |sect| {
@@ -2012,7 +2018,7 @@ pub fn asFile(self: *Object) File {
 }
 
 const AddAtomArgs = struct {
-    name: u32,
+    name: MachO.String,
     n_sect: u8,
     off: u64,
     size: u64,
@@ -2357,17 +2363,17 @@ const StabFile = struct {
 
     fn getCompDir(sf: StabFile, object: *const Object) [:0]const u8 {
         const nlist = object.symtab.items(.nlist)[sf.comp_dir];
-        return object.getString(nlist.n_strx);
+        return object.getNStrx(nlist.n_strx);
     }
 
     fn getTuName(sf: StabFile, object: *const Object) [:0]const u8 {
         const nlist = object.symtab.items(.nlist)[sf.comp_dir + 1];
-        return object.getString(nlist.n_strx);
+        return object.getNStrx(nlist.n_strx);
     }
 
     fn getOsoPath(sf: StabFile, object: *const Object) [:0]const u8 {
         const nlist = object.symtab.items(.nlist)[sf.comp_dir + 2];
-        return object.getString(nlist.n_strx);
+        return object.getNStrx(nlist.n_strx);
     }
 
     fn getOsoModTime(sf: StabFile, object: *const Object) u64 {
@@ -2425,8 +2431,8 @@ const StabFile = struct {
 };
 
 const CompileUnit = struct {
-    comp_dir: u32,
-    tu_name: u32,
+    comp_dir: MachO.String,
+    tu_name: MachO.String,
 
     fn getCompDir(cu: CompileUnit, object: *const Object) [:0]const u8 {
         return object.getString(cu.comp_dir);

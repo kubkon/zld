@@ -53,7 +53,7 @@ pub fn init(self: *InternalObject, allocator: Allocator) !void {
 
 pub fn initSymbols(self: *InternalObject, macho_file: *MachO) !void {
     const createSymbol = struct {
-        fn createSymbol(obj: *InternalObject, name: u32, args: struct {
+        fn createSymbol(obj: *InternalObject, name: MachO.String, args: struct {
             type: u8 = macho.N_UNDF | macho.N_EXT,
             desc: u16 = 0,
         }) Symbol.Index {
@@ -69,7 +69,7 @@ pub fn initSymbols(self: *InternalObject, macho_file: *MachO) !void {
             const nlist_idx: u32 = @intCast(obj.symtab.items.len);
             const nlist = obj.symtab.addOneAssumeCapacity();
             nlist.* = .{
-                .n_strx = name,
+                .n_strx = name.pos,
                 .n_type = args.type,
                 .n_sect = 0,
                 .n_desc = args.desc,
@@ -203,7 +203,7 @@ pub fn resolveBoundarySymbols(self: *InternalObject, macho_file: *MachO) !void {
         const nlist_idx: u32 = @intCast(self.symtab.items.len);
         const nlist = self.symtab.addOneAssumeCapacity();
         nlist.* = .{
-            .n_strx = name_off,
+            .n_strx = name_off.pos,
             .n_type = macho.N_SECT | macho.N_EXT,
             .n_sect = 0,
             .n_desc = 0,
@@ -356,7 +356,7 @@ pub fn resolveObjcMsgSendSymbols(self: *InternalObject, macho_file: *MachO) !voi
         const nlist_idx: u32 = @intCast(self.symtab.items.len);
         const nlist = try self.symtab.addOne(gpa);
         nlist.* = .{
-            .n_strx = name_off,
+            .n_strx = name_off.pos,
             .n_type = macho.N_SECT | macho.N_EXT | macho.N_PEXT,
             .n_sect = 0,
             .n_desc = 0,
@@ -660,15 +660,21 @@ pub fn getSectionData(self: *const InternalObject, index: u32) []const u8 {
     } else @panic("ref to non-existent section");
 }
 
-pub fn addString(self: *InternalObject, allocator: Allocator, name: []const u8) !u32 {
+pub fn addString(self: *InternalObject, allocator: Allocator, name: []const u8) !MachO.String {
     const off: u32 = @intCast(self.strtab.items.len);
     try self.strtab.ensureUnusedCapacity(allocator, name.len + 1);
     self.strtab.appendSliceAssumeCapacity(name);
     self.strtab.appendAssumeCapacity(0);
-    return off;
+    return .{ .pos = off, .len = @intCast(name.len + 1) };
 }
 
-pub fn getString(self: InternalObject, off: u32) [:0]const u8 {
+pub fn getString(self: InternalObject, name: MachO.String) [:0]const u8 {
+    assert(name.pos < self.strtab.items.len and name.pos + name.len <= self.strtab.items.len);
+    if (name.len == 0) return "";
+    return self.strtab.items[name.pos..][0 .. name.len - 1 :0];
+}
+
+pub fn getNStrx(self: InternalObject, off: u32) [:0]const u8 {
     assert(off < self.strtab.items.len);
     return mem.sliceTo(@as([*:0]const u8, @ptrCast(self.strtab.items.ptr + off)), 0);
 }

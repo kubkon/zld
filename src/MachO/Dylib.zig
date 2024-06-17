@@ -211,15 +211,15 @@ const TrieIterator = struct {
 };
 
 pub fn addExport(self: *Dylib, allocator: Allocator, name: []const u8, flags: Export.Flags) !void {
-    const noff = try self.addString(allocator, name);
+    const str = try self.addString(allocator, name);
     const index = try self.addSymbol(allocator);
     const symbol = &self.symbols.items[index];
-    symbol.name = noff;
+    symbol.name = str;
     symbol.extra = try self.addSymbolExtra(allocator, .{});
     symbol.flags.weak = flags.weak;
     symbol.flags.tlv = flags.tlv;
     symbol.visibility = .global;
-    try self.exports.append(allocator, .{ .name = noff, .flags = flags });
+    try self.exports.append(allocator, .{ .name = str, .flags = flags });
     try self.globals.append(allocator, 0);
 }
 
@@ -658,15 +658,18 @@ pub inline fn getUmbrella(self: Dylib, macho_file: *MachO) *Dylib {
     return macho_file.getFile(self.umbrella).?.dylib;
 }
 
-fn addString(self: *Dylib, allocator: Allocator, name: []const u8) !u32 {
+fn addString(self: *Dylib, allocator: Allocator, name: []const u8) !MachO.String {
     const off = @as(u32, @intCast(self.strtab.items.len));
-    try self.strtab.writer(allocator).print("{s}\x00", .{name});
-    return off;
+    try self.strtab.ensureUnusedCapacity(allocator, name.len + 1);
+    self.strtab.appendSliceAssumeCapacity(name);
+    self.strtab.appendAssumeCapacity(0);
+    return .{ .pos = off, .len = @intCast(name.len + 1) };
 }
 
-pub inline fn getString(self: Dylib, off: u32) [:0]const u8 {
-    assert(off < self.strtab.items.len);
-    return mem.sliceTo(@as([*:0]const u8, @ptrCast(self.strtab.items.ptr + off)), 0);
+pub fn getString(self: Dylib, name: MachO.String) [:0]const u8 {
+    assert(name.pos < self.strtab.items.len and name.pos + name.len <= self.strtab.items.len);
+    if (name.len == 0) return "";
+    return self.strtab.items[name.pos..][0 .. name.len - 1 :0];
 }
 
 pub fn asFile(self: *Dylib) File {
@@ -965,7 +968,7 @@ pub const Id = struct {
 };
 
 const Export = struct {
-    name: u32,
+    name: MachO.String,
     flags: Flags,
 
     const Flags = packed struct {

@@ -2,7 +2,7 @@
 value: u64 = 0,
 
 /// Name of this Atom.
-name: u32 = 0,
+name: MachO.String = .{},
 
 /// Index into linker's input file table.
 file: File.Index = 0,
