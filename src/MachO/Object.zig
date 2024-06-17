@@ -582,7 +582,7 @@ pub fn resolveLiterals(self: *Object, lp: *MachO.LiteralPool, macho_file: *MachO
                     try self.globals.append(gpa, 0);
                 }
                 atom.flags.literal_pool = true;
-                try atom.addExtra(.{ .literal_index = res.index }, macho_file);
+                atom.addExtra(.{ .literal_index = res.index }, macho_file);
             }
         } else if (isPtrLiteral(header)) {
             for (subs.items) |sub| {
@@ -622,7 +622,7 @@ pub fn resolveLiterals(self: *Object, lp: *MachO.LiteralPool, macho_file: *MachO
                     try self.globals.append(gpa, 0);
                 }
                 atom.flags.literal_pool = true;
-                try atom.addExtra(.{ .literal_index = res.index }, macho_file);
+                atom.addExtra(.{ .literal_index = res.index }, macho_file);
             }
         }
     }
@@ -968,7 +968,7 @@ fn initRelocs(self: *Object, file: File.Handle, cpu_arch: std.Target.Cpu.Arch, m
             while (next_reloc < relocs.items.len and relocs.items[next_reloc].offset < end_addr) : (next_reloc += 1) {}
 
             const rel_count = next_reloc - rel_index;
-            try atom.addExtra(.{ .rel_index = @intCast(rel_index), .rel_count = @intCast(rel_count) }, macho_file);
+            atom.addExtra(.{ .rel_index = @intCast(rel_index), .rel_count = @intCast(rel_count) }, macho_file);
             atom.flags.relocs = true;
         }
     }
@@ -1281,7 +1281,7 @@ fn parseUnwindRecords(self: *Object, allocator: Allocator, cpu_arch: std.Target.
         {}
 
         const atom = rec.getAtom(macho_file);
-        try atom.addExtra(.{ .unwind_index = start, .unwind_count = next_cu - start }, macho_file);
+        atom.addExtra(.{ .unwind_index = start, .unwind_count = next_cu - start }, macho_file);
         atom.flags.unwind = true;
     }
 }
@@ -2029,6 +2029,7 @@ fn addAtom(self: *Object, allocator: Allocator, args: AddAtomArgs) !Atom.Index {
         .n_sect = args.n_sect,
         .size = args.size,
         .off = args.off,
+        .extra = try self.addAtomExtra(allocator, .{}),
     };
     atom.alignment.store(args.alignment, .seq_cst);
     return atom_index;
@@ -2044,13 +2045,13 @@ pub fn getAtoms(self: *Object) []const Atom.Index {
     return self.atoms_indexes.items;
 }
 
-pub fn addAtomExtra(self: *Object, allocator: Allocator, extra: Atom.Extra) !u32 {
+fn addAtomExtra(self: *Object, allocator: Allocator, extra: Atom.Extra) !u32 {
     const fields = @typeInfo(Atom.Extra).Struct.fields;
     try self.atoms_extra.ensureUnusedCapacity(allocator, fields.len);
     return self.addAtomExtraAssumeCapacity(extra);
 }
 
-pub fn addAtomExtraAssumeCapacity(self: *Object, extra: Atom.Extra) u32 {
+fn addAtomExtraAssumeCapacity(self: *Object, extra: Atom.Extra) u32 {
     const index = @as(u32, @intCast(self.atoms_extra.items.len));
     const fields = @typeInfo(Atom.Extra).Struct.fields;
     inline for (fields) |field| {

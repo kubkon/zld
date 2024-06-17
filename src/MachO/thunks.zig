@@ -44,7 +44,7 @@ pub fn createThunks(sect_id: u8, macho_file: *MachO) !void {
                 if (isReachable(atom, rel, macho_file)) continue;
                 try thunk.symbols.put(gpa, rel.getTargetSymbolRef(atom.*, macho_file), {});
             }
-            try atom.addExtra(.{ .thunk = thunk_index }, macho_file);
+            atom.addExtra(.{ .thunk = thunk_index }, macho_file);
             atom.flags.thunk = true;
         }
 

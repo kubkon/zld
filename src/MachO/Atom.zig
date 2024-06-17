@@ -137,11 +137,8 @@ const AddExtraOpts = struct {
     literal_index: ?u32 = null,
 };
 
-pub fn addExtra(atom: *Atom, opts: AddExtraOpts, macho_file: *MachO) !void {
+pub fn addExtra(atom: *Atom, opts: AddExtraOpts, macho_file: *MachO) void {
     const file = atom.getFile(macho_file);
-    if (file.getAtomExtra(atom.extra) == null) {
-        atom.extra = try file.addAtomExtra(macho_file.base.allocator, .{});
-    }
     var extra = file.getAtomExtra(atom.extra).?;
     inline for (@typeInfo(@TypeOf(opts)).Struct.fields) |field| {
         if (@field(opts, field.name)) |x| {

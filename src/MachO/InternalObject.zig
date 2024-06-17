@@ -296,7 +296,7 @@ fn addObjcSelrefsSection(self: *InternalObject, methname_atom_index: Atom.Index,
             .has_subtractor = false,
         },
     });
-    try atom.addExtra(.{ .rel_index = 0, .rel_count = 1 }, macho_file);
+    atom.addExtra(.{ .rel_index = 0, .rel_count = 1 }, macho_file);
     atom.flags.relocs = true;
 
     const sym_index = try self.addSymbol(gpa);
@@ -406,7 +406,7 @@ pub fn resolveLiterals(self: *InternalObject, lp: *MachO.LiteralPool, macho_file
                 res.ref.* = .{ .index = sym_index, .file = self.index };
             }
             atom.flags.literal_pool = true;
-            try atom.addExtra(.{ .literal_index = res.index }, macho_file);
+            atom.addExtra(.{ .literal_index = res.index }, macho_file);
         } else if (Object.isPtrLiteral(header)) {
             const atom = self.getAtom(atom_index).?;
             const relocs = atom.getRelocs(macho_file);
@@ -439,7 +439,7 @@ pub fn resolveLiterals(self: *InternalObject, lp: *MachO.LiteralPool, macho_file
                 res.ref.* = .{ .index = sym_index, .file = self.index };
             }
             atom.flags.literal_pool = true;
-            try atom.addExtra(.{ .literal_index = res.index }, macho_file);
+            atom.addExtra(.{ .literal_index = res.index }, macho_file);
         }
     }
 }
@@ -680,7 +680,11 @@ pub fn asFile(self: *InternalObject) File {
 fn addAtom(self: *InternalObject, allocator: Allocator) !Atom.Index {
     const atom_index: Atom.Index = @intCast(self.atoms.items.len);
     const atom = try self.atoms.addOne(allocator);
-    atom.* = .{ .file = self.index, .atom_index = atom_index };
+    atom.* = .{
+        .file = self.index,
+        .atom_index = atom_index,
+        .extra = try self.addAtomExtra(allocator, .{}),
+    };
     return atom_index;
 }
 
@@ -694,13 +698,13 @@ pub fn getAtoms(self: *InternalObject) []const Atom.Index {
     return self.atoms_indexes.items;
 }
 
-pub fn addAtomExtra(self: *InternalObject, allocator: Allocator, extra: Atom.Extra) !u32 {
+fn addAtomExtra(self: *InternalObject, allocator: Allocator, extra: Atom.Extra) !u32 {
     const fields = @typeInfo(Atom.Extra).Struct.fields;
     try self.atoms_extra.ensureUnusedCapacity(allocator, fields.len);
     return self.addAtomExtraAssumeCapacity(extra);
 }
 
-pub fn addAtomExtraAssumeCapacity(self: *InternalObject, extra: Atom.Extra) u32 {
+fn addAtomExtraAssumeCapacity(self: *InternalObject, extra: Atom.Extra) u32 {
     const index = @as(u32, @intCast(self.atoms_extra.items.len));
     const fields = @typeInfo(Atom.Extra).Struct.fields;
     inline for (fields) |field| {
