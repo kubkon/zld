@@ -58,9 +58,9 @@ data_in_code: DataInCode = .{},
 
 thunks: std.ArrayListUnmanaged(Thunk) = .{},
 
-has_tlv: bool = false,
-binds_to_weak: bool = false,
-weak_defines: bool = false,
+has_tlv: AtomicBool = AtomicBool.init(false),
+binds_to_weak: AtomicBool = AtomicBool.init(false),
+weak_defines: AtomicBool = AtomicBool.init(false),
 
 work_queue: std.fifo.LinearFifo(Job, .Dynamic),
 wait_group: WaitGroup = .{},
@@ -2426,13 +2426,13 @@ fn writeHeader(self: *MachO, ncmds: usize, sizeofcmds: usize) !void {
         header.flags |= macho.MH_NO_REEXPORTED_DYLIBS;
     }
 
-    if (self.has_tlv) {
+    if (self.has_tlv.load(.seq_cst)) {
         header.flags |= macho.MH_HAS_TLV_DESCRIPTORS;
     }
-    if (self.binds_to_weak) {
+    if (self.binds_to_weak.load(.seq_cst)) {
         header.flags |= macho.MH_BINDS_TO_WEAK;
     }
-    if (self.weak_defines) {
+    if (self.weak_defines.load(.seq_cst)) {
         header.flags |= macho.MH_WEAK_DEFINES;
     }
 
@@ -3136,6 +3136,7 @@ const Allocator = mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const Archive = @import("MachO/Archive.zig");
 const Atom = @import("MachO/Atom.zig");
+const AtomicBool = std.atomic.Value(bool);
 const Bind = synthetic.Bind;
 const CodeSignature = @import("MachO/CodeSignature.zig");
 const DataInCode = synthetic.DataInCode;

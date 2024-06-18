@@ -248,7 +248,7 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
                 if (symbol.flags.import or (symbol.flags.@"export" and symbol.flags.weak) or symbol.flags.interposable) {
                     symbol.setSectionFlags(.{ .stubs = true });
                     if (symbol.flags.weak) {
-                        macho_file.binds_to_weak = true;
+                        macho_file.binds_to_weak.store(true, .seq_cst);
                     }
                 } else if (mem.startsWith(u8, symbol.getName(macho_file), "_objc_msgSend$")) {
                     symbol.setSectionFlags(.{ .objc_stubs = true });
@@ -267,7 +267,7 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
                 {
                     symbol.setSectionFlags(.{ .got = true });
                     if (symbol.flags.weak) {
-                        macho_file.binds_to_weak = true;
+                        macho_file.binds_to_weak.store(true, .seq_cst);
                     }
                 }
             },
@@ -290,7 +290,7 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
                 if (symbol.flags.import or (symbol.flags.@"export" and symbol.flags.weak) or symbol.flags.interposable) {
                     symbol.setSectionFlags(.{ .tlv_ptr = true });
                     if (symbol.flags.weak) {
-                        macho_file.binds_to_weak = true;
+                        macho_file.binds_to_weak.store(true, .seq_cst);
                     }
                 }
             },
@@ -300,17 +300,17 @@ pub fn scanRelocs(self: Atom, macho_file: *MachO) !void {
                     if (rel.tag == .@"extern") {
                         const symbol = rel.getTargetSymbol(self, macho_file);
                         if (symbol.isTlvInit(macho_file)) {
-                            macho_file.has_tlv = true;
+                            macho_file.has_tlv.store(true, .seq_cst);
                             continue;
                         }
                         if (symbol.flags.import) {
                             if (symbol.flags.weak) {
-                                macho_file.binds_to_weak = true;
+                                macho_file.binds_to_weak.store(true, .seq_cst);
                             }
                             continue;
                         }
                         if (symbol.flags.@"export" and symbol.flags.weak) {
-                            macho_file.binds_to_weak = true;
+                            macho_file.binds_to_weak.store(true, .seq_cst);
                         }
                     }
                 }

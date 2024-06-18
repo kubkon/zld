@@ -74,9 +74,8 @@ pub fn updateSize(self: *Trie, macho_file: *MachO) !void {
             macho.EXPORT_SYMBOL_FLAGS_KIND_REGULAR;
         if (sym.flags.weak) {
             flags |= macho.EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION;
-            // TODO these should be atomic
-            macho_file.weak_defines = true;
-            macho_file.binds_to_weak = true;
+            macho_file.weak_defines.store(true, .seq_cst);
+            macho_file.binds_to_weak.store(true, .seq_cst);
         }
         try self.put(gpa, .{
             .name = sym.getName(macho_file),
