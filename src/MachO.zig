@@ -1983,6 +1983,9 @@ fn writeSections(self: *MachO) !void {
 }
 
 fn writeSectionsToFile(self: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const slice = self.sections.slice();
     for (slice.items(.header), slice.items(.out)) |header, out| {
         try self.base.file.pwriteAll(out.items, header.offset);
@@ -2101,6 +2104,8 @@ fn writeSyntheticSections(self: *MachO) !void {
 }
 
 fn writeLinkeditSectionsToFile(self: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
     try self.writeDyldInfo();
     try self.writeDataInCode();
     try self.writeSymtabToFile();
@@ -2269,6 +2274,8 @@ fn writeIndsymtab(self: *MachO) !void {
 }
 
 pub fn writeSymtabToFile(self: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
     const cmd = self.symtab_cmd;
     try self.base.file.pwriteAll(mem.sliceAsBytes(self.symtab.items), cmd.symoff);
     try self.base.file.pwriteAll(self.strtab.items, cmd.stroff);
@@ -2438,6 +2445,9 @@ fn writeHeader(self: *MachO, ncmds: usize, sizeofcmds: usize) !void {
 }
 
 fn writeUuid(self: *MachO, uuid_cmd_offset: usize, has_codesig: bool) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const file_size = if (!has_codesig) blk: {
         const seg = self.getLinkeditSegment();
         break :blk seg.fileoff + seg.filesize;
@@ -2448,6 +2458,9 @@ fn writeUuid(self: *MachO, uuid_cmd_offset: usize, has_codesig: bool) !void {
 }
 
 pub fn writeCodeSignaturePadding(self: *MachO, code_sig: *CodeSignature) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const seg = self.getLinkeditSegment();
     // Code signature data has to be 16-bytes aligned for Apple tools to recognize the file
     // https://github.com/opensource-apple/cctools/blob/fdb4825f303fd5c0751be524babd32958181b3ed/libstuff/checkout.c#L271
@@ -2465,6 +2478,9 @@ pub fn writeCodeSignaturePadding(self: *MachO, code_sig: *CodeSignature) !void {
 }
 
 pub fn writeCodeSignature(self: *MachO, code_sig: *CodeSignature) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const seg = self.getTextSegment();
     const offset = self.codesig_cmd.dataoff;
 
