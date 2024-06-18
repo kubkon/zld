@@ -372,9 +372,9 @@ pub fn flush(self: *MachO) !void {
 
     state_log.debug("{}", .{self.dumpState()});
 
-    try self.updateLinkeditSizes();
     try self.writeSections();
     try self.writeSyntheticSections();
+    try self.updateLinkeditSizes();
     try self.performAllTheWork();
 
     try self.writeSectionsToFile();
@@ -1899,8 +1899,8 @@ fn performAllTheWork(self: *MachO) !void {
         .export_trie_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLinkeditSizeWorker, .{ self, .export_trie }),
         .data_in_code_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLinkeditSizeWorker, .{ self, .data_in_code }),
         .calc_symtab_size => self.base.thread_pool.spawnWg(&self.wait_group, calcSymtabSize, .{self}),
-        .write_atoms => |x| self.base.thread_pool.spawnWg(&self.wait_group, writeAtomsWorker, .{ self, x[0], x[1] }),
-        .write_thunk => |x| self.base.thread_pool.spawnWg(&self.wait_group, writeThunkWorker, .{ self, x[0], x[1] }),
+        .write_atoms => |x| self.base.thread_pool.spawnWg(&self.wait_group, writeAtomsWorker, .{ self, x }),
+        .write_thunk => |x| self.base.thread_pool.spawnWg(&self.wait_group, writeThunkWorker, .{ self, x }),
         .write_synthetic_section => |x| self.base.thread_pool.spawnWg(&self.wait_group, writeSyntheticSectionWorker, .{ self, x[0], x[1] }),
     };
 }
@@ -1950,35 +1950,21 @@ fn updateLinkeditSizeWorker(self: *MachO, tag: enum {
 
 fn writeSections(self: *MachO) !void {
     const slice = self.sections.slice();
-    for (
-        slice.items(.header),
-        slice.items(.atoms),
-        slice.items(.thunks),
-        slice.items(.out),
-    ) |header, atoms, thnks, *out| {
-        if (atoms.items.len == 0) continue;
+    for (slice.items(.header), slice.items(.out)) |header, *out| {
         if (header.isZerofill()) continue;
         const cpu_arch = self.options.cpu_arch.?;
         try out.resize(self.base.allocator, header.size);
         const padding_byte: u8 = if (header.isCode() and cpu_arch == .x86_64) 0xcc else 0;
         @memset(out.items, padding_byte);
-
-        const chunk_size: usize = atoms.items.len; //500_000;
-        // const chunk_size: usize = 1_000_000;
-        const num_chunks = std.math.cast(usize, @divTrunc(atoms.items.len, chunk_size)) orelse
-            return error.Overflow;
-        const actual_num_chunks = if (@rem(atoms.items.len, chunk_size) > 0) num_chunks + 1 else num_chunks;
-        for (0..actual_num_chunks) |nn| {
-            const start = nn * chunk_size;
-            const maybe_end = start + chunk_size;
-            const end = if (maybe_end > atoms.items.len) atoms.items.len else maybe_end;
-            const chunk = atoms.items[start..end];
-            try self.work_queue.writeItem(.{ .write_atoms = .{ chunk, out.items } });
-        }
-        for (thnks.items) |thunk_index| {
-            const thunk = self.getThunk(thunk_index);
-            try self.work_queue.writeItem(.{ .write_thunk = .{ thunk, out.items } });
-        }
+    }
+    for (self.objects.items) |index| {
+        try self.work_queue.writeItem(.{ .write_atoms = index });
+    }
+    if (self.getInternalObject()) |obj| {
+        try self.work_queue.writeItem(.{ .write_atoms = obj.index });
+    }
+    for (self.thunks.items) |thunk| {
+        try self.work_queue.writeItem(.{ .write_thunk = thunk });
     }
 }
 
@@ -1992,39 +1978,73 @@ fn writeSectionsToFile(self: *MachO) !void {
     }
 }
 
-fn writeAtomsWorker(
-    self: *MachO,
-    atoms: []const Ref,
-    out: []u8,
-) void {
+fn writeAtomsWorker(self: *MachO, index: File.Index) void {
     const tracy = trace(@src());
     defer tracy.end();
     const doWork = struct {
-        fn doWork(as: []const Ref, buffer: []u8, macho_file: *MachO) !void {
-            for (as) |ref| {
-                const atom = ref.getAtom(macho_file).?;
-                const off = atom.value;
-                try atom.getCode(macho_file, buffer[off..][0..atom.size]);
-                try atom.resolveRelocs(macho_file, buffer[off..][0..atom.size]);
+        fn doWork(file: File, macho_file: *MachO) !void {
+            switch (file) {
+                .dylib => unreachable,
+                .object => |x| {
+                    const gpa = macho_file.base.allocator;
+                    const sections = x.sections.items(.header);
+                    const sections_data = try gpa.alloc(?[]const u8, sections.len);
+                    defer {
+                        for (sections_data) |maybe_data| if (maybe_data) |data| {
+                            gpa.free(data);
+                        };
+                        gpa.free(sections_data);
+                    }
+                    @memset(sections_data, null);
+                    for (sections, 0..) |sect, n_sect| {
+                        if (sect.isZerofill()) continue;
+                        sections_data[n_sect] = try x.getSectionData(gpa, @intCast(n_sect), macho_file.getFileHandle(x.file_handle));
+                    }
+                    for (file.getAtoms()) |atom_index| {
+                        const atom = file.getAtom(atom_index) orelse continue;
+                        if (!atom.alive.load(.seq_cst)) continue;
+                        const sect = atom.getInputSection(macho_file);
+                        if (sect.isZerofill()) continue;
+                        const off = atom.value;
+                        const buffer = macho_file.sections.items(.out)[atom.out_n_sect].items;
+                        const data = sections_data[atom.n_sect].?;
+                        @memcpy(buffer[off..][0..atom.size], data[atom.off..][0..atom.size]);
+                        try atom.resolveRelocs(macho_file, buffer[off..][0..atom.size]);
+                    }
+                },
+                .internal => {
+                    for (file.getAtoms()) |atom_index| {
+                        const atom = file.getAtom(atom_index) orelse continue;
+                        if (!atom.alive.load(.seq_cst)) continue;
+                        const sect = atom.getInputSection(macho_file);
+                        if (sect.isZerofill()) continue;
+                        const off = atom.value;
+                        const buffer = macho_file.sections.items(.out)[atom.out_n_sect].items;
+                        try atom.getCode(macho_file, buffer[off..][0..atom.size]);
+                        try atom.resolveRelocs(macho_file, buffer[off..][0..atom.size]);
+                    }
+                },
             }
         }
     }.doWork;
-    doWork(atoms, out, self) catch |err| {
+    const file = self.getFile(index).?;
+    doWork(file, self) catch |err| {
         self.base.fatal("failed to write atoms: {s}", .{@errorName(err)});
     };
 }
 
-fn writeThunkWorker(self: *MachO, thunk: *const Thunk, out: []u8) void {
+fn writeThunkWorker(self: *MachO, thunk: Thunk) void {
     const tracy = trace(@src());
     defer tracy.end();
     const doWork = struct {
-        fn doWork(th: *const Thunk, buffer: []u8, macho_file: *MachO) !void {
+        fn doWork(th: Thunk, buffer: []u8, macho_file: *MachO) !void {
             const off = th.value;
             const size = th.size();
             var stream = std.io.fixedBufferStream(buffer[off..][0..size]);
             try th.write(macho_file, stream.writer());
         }
     }.doWork;
+    const out = self.sections.items(.out)[thunk.out_n_sect].items;
     doWork(thunk, out, self) catch |err| {
         self.base.fatal("failed to write contents of thunk: {s}", .{@errorName(err)});
     };
@@ -2971,8 +2991,8 @@ pub const Job = union(enum) {
     export_trie_size: void,
     data_in_code_size: void,
     calc_symtab_size: void,
-    write_atoms: struct { []const Ref, []u8 },
-    write_thunk: struct { *const Thunk, []u8 },
+    write_atoms: File.Index,
+    write_thunk: Thunk,
     write_synthetic_section: struct { u8, []u8 },
 };
 
