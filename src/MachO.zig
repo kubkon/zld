@@ -188,35 +188,7 @@ pub fn flush(self: *MachO) !void {
     try self.resolvePaths(arena, lib_dirs.items, framework_dirs.items, &resolved_objects);
 
     if (self.options.cpu_arch == null) {
-        var has_parse_error = false;
-        var platforms = std.ArrayList(struct { std.Target.Cpu.Arch, ?Options.Platform }).init(self.base.allocator);
-        defer platforms.deinit();
-        try platforms.ensureUnusedCapacity(resolved_objects.items.len);
-
-        for (resolved_objects.items) |obj| {
-            self.inferCpuArchAndPlatform(obj, &platforms) catch |err| {
-                has_parse_error = true;
-                switch (err) {
-                    error.UnhandledCpuArch => {}, // already reported
-                    else => |e| {
-                        self.base.fatal("{s}: unexpected error occurred while parsing input file: {s}", .{
-                            obj.path, @errorName(e),
-                        });
-                        return e;
-                    },
-                }
-            };
-        }
-        if (has_parse_error) return error.ParseFailed;
-        if (platforms.items.len == 0) {
-            self.base.fatal("could not infer CPU architecture", .{});
-            return error.InferCpuFailed;
-        }
-
-        self.options.cpu_arch = platforms.items[0][0];
-        self.options.platform = for (platforms.items) |platform| {
-            if (platform[1]) |p| break p;
-        } else null;
+        try self.inferCpuArchAndPlatform(resolved_objects.items);
     }
 
     if (self.options.platform == null) {
@@ -525,7 +497,42 @@ fn resolvePaths(
     if (has_resolve_error) return error.ResolveFailed;
 }
 
-fn inferCpuArchAndPlatform(self: *MachO, obj: LinkObject, platforms: anytype) !void {
+fn inferCpuArchAndPlatform(self: *MachO, resolved_objects: []const LinkObject) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    var has_parse_error = false;
+    var platforms = std.ArrayList(struct { std.Target.Cpu.Arch, ?Options.Platform }).init(self.base.allocator);
+    defer platforms.deinit();
+    try platforms.ensureUnusedCapacity(resolved_objects.len);
+
+    for (resolved_objects) |obj| {
+        self.inferCpuArchAndPlatformInObject(obj, &platforms) catch |err| {
+            has_parse_error = true;
+            switch (err) {
+                error.UnhandledCpuArch => {}, // already reported
+                else => |e| {
+                    self.base.fatal("{s}: unexpected error occurred while parsing input file: {s}", .{
+                        obj.path, @errorName(e),
+                    });
+                    return e;
+                },
+            }
+        };
+    }
+    if (has_parse_error) return error.ParseFailed;
+    if (platforms.items.len == 0) {
+        self.base.fatal("could not infer CPU architecture", .{});
+        return error.InferCpuFailed;
+    }
+
+    self.options.cpu_arch = platforms.items[0][0];
+    self.options.platform = for (platforms.items) |platform| {
+        if (platform[1]) |p| break p;
+    } else null;
+}
+
+fn inferCpuArchAndPlatformInObject(self: *MachO, obj: LinkObject, platforms: anytype) !void {
     const gpa = self.base.allocator;
 
     const file = try std.fs.cwd().openFile(obj.path, .{});
