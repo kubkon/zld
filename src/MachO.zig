@@ -305,6 +305,7 @@ pub fn flush(self: *MachO) !void {
     try self.writeSyntheticSections();
     try self.updateLinkeditSizes();
     try self.performAllTheWork();
+    if (self.has_errors.swap(false, .seq_cst)) return error.FlushFailed;
 
     try self.writeSectionsToFile();
     try self.allocateLinkeditSegment();
@@ -1947,6 +1948,7 @@ fn updateLazyBindSizeWorker(self: *MachO) void {
     }.doWork;
     doWork(self) catch |err| {
         self.base.fatal("could not calculate lazy_bind opcodes size: {s}", .{@errorName(err)});
+        _ = self.has_errors.swap(true, .seq_cst);
     };
 }
 
@@ -1969,6 +1971,7 @@ fn updateLinkeditSizeWorker(self: *MachO, tag: enum {
             @tagName(tag),
             @errorName(err),
         });
+        _ = self.has_errors.swap(true, .seq_cst);
     };
 }
 
@@ -2006,7 +2009,11 @@ fn writeAtomsWorker(self: *MachO, index: File.Index) void {
     const tracy = trace(@src());
     defer tracy.end();
     self.getFile(index).?.writeAtoms(self) catch |err| {
-        self.base.fatal("failed to write atoms: {s}", .{@errorName(err)});
+        self.base.fatal("{}: failed to write atoms: {s}", .{
+            self.getFile(index).?.fmtPath(),
+            @errorName(err),
+        });
+        _ = self.has_errors.swap(true, .seq_cst);
     };
 }
 
@@ -2024,6 +2031,7 @@ fn writeThunkWorker(self: *MachO, thunk: Thunk) void {
     const out = self.sections.items(.out)[thunk.out_n_sect].items;
     doWork(thunk, out, self) catch |err| {
         self.base.fatal("failed to write contents of thunk: {s}", .{@errorName(err)});
+        _ = self.has_errors.swap(true, .seq_cst);
     };
 }
 
@@ -2077,6 +2085,7 @@ fn writeSyntheticSectionWorker(self: *MachO, sect_id: u8, out: []u8) void {
             header.sectName(),
             @errorName(err),
         });
+        _ = self.has_errors.swap(true, .seq_cst);
     };
 }
 
@@ -2154,6 +2163,7 @@ fn calcSymtabSize(self: *MachO) void {
     defer tracy.end();
     self.calcSymtabSizeImpl() catch |err| {
         self.base.fatal("failed to calculate symtab size: {s}", .{@errorName(err)});
+        _ = self.has_errors.swap(true, .seq_cst);
     };
 }
 

@@ -42,6 +42,9 @@ fn canFold(macho_file: *MachO, lhs_ref: Record.Ref, rhs_ref: Record.Ref) bool {
 }
 
 pub fn generate(info: *UnwindInfo, macho_file: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = macho_file.base.allocator;
 
     log.debug("generating unwind info", .{});
@@ -261,6 +264,9 @@ pub fn generate(info: *UnwindInfo, macho_file: *MachO) !void {
 }
 
 pub fn calcSize(info: UnwindInfo) usize {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     var total_size: usize = 0;
     total_size += @sizeOf(macho.unwind_info_section_header);
     total_size +=
