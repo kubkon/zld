@@ -259,11 +259,15 @@ pub fn flush(self: *MachO) !void {
 
     if (self.options.relocatable) return relocatable.flush(self);
 
-    try self.convertTentativeDefinitions();
-    if (self.getInternalObject()) |obj| {
-        try obj.resolveBoundarySymbols(self);
-        try obj.resolveObjcMsgSendSymbols(self);
+    for (self.objects.items) |index| {
+        try self.work_queue.writeItem(.{ .convert_tentative_defs = index });
     }
+    if (self.getInternalObject()) |obj| {
+        try self.work_queue.writeItem(.{ .resolve_special_symbols = obj });
+    }
+    try self.performAllTheWork();
+    if (self.has_errors.swap(false, .seq_cst)) return error.FlushFailed;
+
     try self.dedupLiterals();
 
     if (self.options.dead_strip) {
@@ -1011,10 +1015,37 @@ fn deadStripDylibs(self: *MachO) void {
     }
 }
 
-fn convertTentativeDefinitions(self: *MachO) !void {
-    for (self.objects.items) |index| {
-        try self.getFile(index).?.object.convertTentativeDefinitions(self);
-    }
+fn convertTentativeDefinitionsWorker(self: *MachO, index: File.Index) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    const object = self.getFile(index).?.object;
+    object.convertTentativeDefinitions(self) catch |err| {
+        self.base.fatal("{s}: unexpected error occurred while converting tentative symbols into defined symbols: {s}", .{
+            object.fmtPath(),
+            @errorName(err),
+        });
+        _ = self.has_errors.swap(true, .seq_cst);
+    };
+}
+
+fn resolveSpecialSymbolsWorker(self: *MachO, obj: *InternalObject) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    obj.resolveBoundarySymbols(self) catch |err| {
+        self.base.fatal("unexpected error occurred while resolving boundary symbols: {s}", .{
+            @errorName(err),
+        });
+        _ = self.has_errors.swap(true, .seq_cst);
+        return;
+    };
+    obj.resolveObjcMsgSendSymbols(self) catch |err| {
+        self.base.fatal("unexpected error occurred while resolving ObjC msgsend stubs: {s}", .{
+            @errorName(err),
+        });
+        _ = self.has_errors.swap(true, .seq_cst);
+    };
 }
 
 fn markImportsAndExports(self: *MachO) void {
@@ -1901,6 +1932,8 @@ fn performAllTheWork(self: *MachO) !void {
     while (self.work_queue.readItem()) |job| switch (job) {
         .parse_object => |x| self.base.thread_pool.spawnWg(&self.wait_group, parseObjectWorker, .{ self, x }),
         .parse_dylib => |x| self.base.thread_pool.spawnWg(&self.wait_group, parseDylibWorker, .{ self, x }),
+        .convert_tentative_defs => |x| self.base.thread_pool.spawnWg(&self.wait_group, convertTentativeDefinitionsWorker, .{ self, x }),
+        .resolve_special_symbols => |x| self.base.thread_pool.spawnWg(&self.wait_group, resolveSpecialSymbolsWorker, .{ self, x }),
         .section_size => |x| self.base.thread_pool.spawnWg(&self.wait_group, calcSectionSizeWorker, .{ self, x }),
         .create_thunks => |x| self.base.thread_pool.spawnWg(&self.wait_group, createThunksWorker, .{ self, x }),
         .rebase_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLinkeditSizeWorker, .{ self, .rebase }),
@@ -2946,6 +2979,8 @@ pub const null_sym = macho.nlist_64{
 pub const Job = union(enum) {
     parse_object: File.Index,
     parse_dylib: File.Index,
+    convert_tentative_defs: File.Index,
+    resolve_special_symbols: *InternalObject,
     section_size: u8,
     create_thunks: u8,
     rebase_size: void,

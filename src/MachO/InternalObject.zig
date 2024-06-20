@@ -161,6 +161,9 @@ pub fn resolveSymbols(self: *InternalObject, macho_file: *MachO) !void {
 }
 
 pub fn resolveBoundarySymbols(self: *InternalObject, macho_file: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = macho_file.base.allocator;
     var boundary_symbols = std.StringArrayHashMap(MachO.Ref).init(gpa);
     defer boundary_symbols.deinit();
@@ -318,6 +321,9 @@ fn addObjcSelrefsSection(self: *InternalObject, methname_atom_index: Atom.Index,
 }
 
 pub fn resolveObjcMsgSendSymbols(self: *InternalObject, macho_file: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = macho_file.base.allocator;
 
     var objc_msgsend_syms = std.StringArrayHashMap(MachO.Ref).init(gpa);
