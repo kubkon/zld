@@ -34,9 +34,11 @@ pub const File = union(enum) {
         }
     }
 
-    pub fn resetGlobals(file: File, macho_file: *MachO) void {
+    pub fn scanRelocs(file: File, macho_file: *MachO) !void {
         switch (file) {
-            inline else => |x| x.resetGlobals(macho_file),
+            .dylib => unreachable,
+            .object => |x| try x.scanRelocs(macho_file),
+            .internal => |x| x.scanRelocs(macho_file),
         }
     }
 

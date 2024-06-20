@@ -548,6 +548,9 @@ pub fn dedupLiterals(self: *InternalObject, lp: MachO.LiteralPool, macho_file: *
 }
 
 pub fn scanRelocs(self: *InternalObject, macho_file: *MachO) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     if (self.getEntryRef(macho_file)) |ref| {
         if (ref.getFile(macho_file) != null) {
             const sym = ref.getSymbol(macho_file).?;

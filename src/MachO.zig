@@ -1131,12 +1131,14 @@ fn scanRelocs(self: *MachO) !void {
         wg.reset();
         defer wg.wait();
         for (self.objects.items) |index| {
-            self.base.thread_pool.spawnWg(&wg, scanRelocsWorker, .{ self, self.getFile(index).?.object });
+            self.base.thread_pool.spawnWg(&wg, scanRelocsWorker, .{ self, self.getFile(index).? });
+        }
+        if (self.getInternalObject()) |obj| {
+            self.base.thread_pool.spawnWg(&wg, scanRelocsWorker, .{ self, obj.asFile() });
         }
     }
-    if (self.getInternalObject()) |obj| {
-        obj.scanRelocs(self);
-    }
+
+    if (self.has_errors.swap(false, .seq_cst)) return error.FlushFailed;
 
     try self.reportUndefs();
 
@@ -1151,12 +1153,13 @@ fn scanRelocs(self: *MachO) !void {
     }
 }
 
-fn scanRelocsWorker(self: *MachO, object: *Object) void {
-    object.scanRelocs(self) catch |err| {
-        self.base.fatal("failed to scan relocations in {}: {s}", .{
-            object.fmtPath(),
+fn scanRelocsWorker(self: *MachO, file: File) void {
+    file.scanRelocs(self) catch |err| {
+        self.base.fatal("{}: failed to scan relocations: {s}", .{
+            file.fmtPath(),
             @errorName(err),
         });
+        _ = self.has_errors.swap(true, .seq_cst);
     };
 }
 
