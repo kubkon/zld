@@ -113,6 +113,7 @@ pub fn main() !void {
     const zld = try Zld.openPath(gpa, tag, opts, &thread_pool);
     defer zld.deinit();
     zld.flush() catch |err| switch (err) {
+        error.FlushFailed,
         error.InferCpuFailed,
         error.ParseFailed,
         error.MultipleSymbolDefinition,

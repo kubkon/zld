@@ -61,6 +61,7 @@ thunks: std.ArrayListUnmanaged(Thunk) = .{},
 has_tlv: AtomicBool = AtomicBool.init(false),
 binds_to_weak: AtomicBool = AtomicBool.init(false),
 weak_defines: AtomicBool = AtomicBool.init(false),
+has_errors: AtomicBool = AtomicBool.init(false),
 
 work_queue: std.fifo.LinearFifo(Job, .Dynamic),
 wait_group: WaitGroup = .{},
@@ -320,6 +321,7 @@ pub fn flush(self: *MachO) !void {
         try self.work_queue.writeItem(.{ .parse_dylib = index });
     }
     try self.performAllTheWork();
+    if (self.has_errors.swap(false, .seq_cst)) return error.FlushFailed;
 
     try self.parseDependentDylibs(arena, lib_dirs.items, framework_dirs.items);
 
@@ -663,23 +665,16 @@ fn addObject(self: *MachO, obj: LinkObject, handle: File.HandleIndex, offset: u6
 }
 
 fn parseObjectWorker(self: *MachO, index: File.Index) void {
-    const doWork = struct {
-        fn doWork(object: *Object, macho_file: *MachO) !void {
-            const tracy = trace(@src());
-            defer tracy.end();
-            try object.parse(macho_file);
-            // Finally, we do a post-parse check for -ObjC to see if we need to force load this member
-            // anyhow.
-            object.alive = object.alive or (macho_file.options.force_load_objc and object.hasObjc());
-        }
-    }.doWork;
     const object = self.getFile(index).?.object;
-    doWork(object, self) catch |err| switch (err) {
-        error.ParseFailed => {}, // reported
-        else => |e| self.base.fatal("{}: unxexpected error occurred while parsing input file: {s}", .{
-            object.fmtPath(),
-            @errorName(e),
-        }),
+    object.parse(self) catch |err| {
+        switch (err) {
+            error.ParseFailed => {}, // reported
+            else => |e| self.base.fatal("{}: unxexpected error occurred while parsing input file: {s}", .{
+                object.fmtPath(),
+                @errorName(e),
+            }),
+        }
+        _ = self.has_errors.swap(true, .seq_cst);
     };
 }
 
@@ -727,6 +722,7 @@ fn addDylib(self: *MachO, obj: LinkObject, handle: File.HandleIndex, offset: u64
         .weak = obj.weak,
         .reexport = obj.reexport,
         .explicit = explicit,
+        .umbrella = index,
     } });
     try self.dylibs.append(gpa, index);
 
@@ -749,6 +745,7 @@ fn addTbd(self: *MachO, obj: LinkObject, lib_stub: LibStub, explicit: bool) anye
         .weak = obj.weak,
         .reexport = obj.reexport,
         .explicit = explicit,
+        .umbrella = index,
     } });
     try self.dylibs.append(gpa, index);
 
@@ -756,19 +753,16 @@ fn addTbd(self: *MachO, obj: LinkObject, lib_stub: LibStub, explicit: bool) anye
 }
 
 fn parseDylibWorker(self: *MachO, index: File.Index) void {
-    const doWork = struct {
-        fn doWork(dylib: *Dylib, idx: File.Index, macho_file: *MachO) !void {
-            try dylib.parse(macho_file);
-            dylib.umbrella = idx;
-        }
-    }.doWork;
     const dylib = self.getFile(index).?.dylib;
-    doWork(dylib, index, self) catch |err| switch (err) {
-        error.ParseFailed => {}, // reported already
-        else => |e| self.base.fatal("{s}: unexpected error occurred while parsing input file: {s}", .{
-            dylib.path,
-            @errorName(e),
-        }),
+    dylib.parse(self) catch |err| {
+        switch (err) {
+            error.ParseFailed => {}, // reported already
+            else => |e| self.base.fatal("{s}: unexpected error occurred while parsing input file: {s}", .{
+                dylib.path,
+                @errorName(e),
+            }),
+        }
+        _ = self.has_errors.swap(true, .seq_cst);
     };
 }
 
@@ -900,9 +894,7 @@ fn parseDependentDylibs(
                 const dep_dylib = file.dylib;
                 try dep_dylib.parse(self); // TODO in parallel
                 dep_dylib.hoisted = self.isHoisted(id.name);
-                if (self.getFile(dep_dylib.umbrella) == null) {
-                    dep_dylib.umbrella = dylib.umbrella;
-                }
+                dep_dylib.umbrella = dylib.umbrella;
                 if (!dep_dylib.hoisted) {
                     const umbrella = dep_dylib.getUmbrella(self);
                     for (dep_dylib.exports.items(.name), dep_dylib.exports.items(.flags)) |off, flags| {

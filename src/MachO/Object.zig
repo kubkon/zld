@@ -272,6 +272,10 @@ pub fn parse(self: *Object, macho_file: *MachO) !void {
             _ = atom.alive.swap(false, .seq_cst);
         }
     }
+
+    // Finally, we do a post-parse check for -ObjC to see if we need to force load this member
+    // anyhow.
+    self.alive = self.alive or (macho_file.options.force_load_objc and self.hasObjc());
 }
 
 pub fn isCstringLiteral(sect: macho.section_64) bool {
@@ -2032,7 +2036,7 @@ fn hasSymbolStabs(self: Object) bool {
     return self.stab_files.items.len > 0;
 }
 
-pub fn hasObjc(self: Object) bool {
+fn hasObjc(self: Object) bool {
     for (self.symtab.items(.nlist)) |nlist| {
         const name = self.getNStrx(nlist.n_strx);
         if (mem.startsWith(u8, name, "_OBJC_CLASS_$_")) return true;

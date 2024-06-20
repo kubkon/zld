@@ -15,7 +15,7 @@ symbols_extra: std.ArrayListUnmanaged(u32) = .{},
 globals: std.ArrayListUnmanaged(MachO.SymbolResolver.Index) = .{},
 dependents: std.ArrayListUnmanaged(Id) = .{},
 rpaths: std.StringArrayHashMapUnmanaged(void) = .{},
-umbrella: File.Index = 0,
+umbrella: File.Index,
 
 needed: bool,
 weak: bool,
