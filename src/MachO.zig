@@ -1098,22 +1098,17 @@ pub fn dedupLiterals(self: *MachO) !void {
             self.base.thread_pool.spawnWg(&wg, dedupLiteralsWorker, .{ self, object.asFile(), lp });
         }
     }
+
+    if (self.has_errors.swap(false, .seq_cst)) return error.FlushFailed;
 }
 
 fn dedupLiteralsWorker(self: *MachO, file: File, lp: LiteralPool) void {
-    const doWork = struct {
-        fn doWork(file_: File, lp_: LiteralPool, macho_file: *MachO) !void {
-            return switch (file_) {
-                .dylib => unreachable,
-                inline else => |x| x.dedupLiterals(lp_, macho_file),
-            };
-        }
-    }.doWork;
-    doWork(file, lp, self) catch |err| {
-        self.base.fatal("failed to dedup literals in {}: {s}", .{
+    file.dedupLiterals(lp, self) catch |err| {
+        self.base.fatal("{s}: failed to dedup literals: {s}", .{
             file.fmtPath(),
             @errorName(err),
         });
+        _ = self.has_errors.swap(true, .seq_cst);
     };
 }
 
