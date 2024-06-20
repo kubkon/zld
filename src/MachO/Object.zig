@@ -585,6 +585,15 @@ pub fn resolveLiterals(self: *Object, lp: *MachO.LiteralPool, macho_file: *MachO
                 atom.addExtra(.{ .literal_index = res.index }, macho_file);
             }
         } else if (isPtrLiteral(header)) {
+            var sections_data = std.AutoHashMap(u32, []const u8).init(gpa);
+            try sections_data.ensureUnusedCapacity(@intCast(self.sections.items(.header).len));
+            defer {
+                var it = sections_data.iterator();
+                while (it.next()) |entry| {
+                    gpa.free(entry.value_ptr.*);
+                }
+                sections_data.deinit();
+            }
             for (subs.items) |sub| {
                 const atom = self.getAtom(sub.atom).?;
                 const relocs = atom.getRelocs(macho_file);
@@ -597,7 +606,12 @@ pub fn resolveLiterals(self: *Object, lp: *MachO.LiteralPool, macho_file: *MachO
                 const addend = math.cast(u32, rel.addend) orelse return error.Overflow;
                 try buffer.ensureUnusedCapacity(target.size);
                 buffer.resize(target.size) catch unreachable;
-                try target.getCode(macho_file, buffer.items);
+                const gop = try sections_data.getOrPut(target.n_sect);
+                if (!gop.found_existing) {
+                    gop.value_ptr.* = try self.getSectionData(gpa, target.n_sect, file);
+                }
+                const data = gop.value_ptr.*;
+                @memcpy(buffer.items, data[target.off..][0..target.size]);
                 const res = try lp.insert(gpa, header.type(), buffer.items[addend..]);
                 buffer.clearRetainingCapacity();
                 if (!res.found_existing) {

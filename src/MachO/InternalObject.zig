@@ -417,7 +417,7 @@ pub fn resolveLiterals(self: *InternalObject, lp: *MachO.LiteralPool, macho_file
             const addend = std.math.cast(u32, rel.addend) orelse return error.Overflow;
             try buffer.ensureUnusedCapacity(target.size);
             buffer.resize(target.size) catch unreachable;
-            try target.getCode(macho_file, buffer.items);
+            @memcpy(buffer.items, self.getSectionData(target.n_sect));
             const res = try lp.insert(gpa, header.type(), buffer.items[addend..]);
             buffer.clearRetainingCapacity();
             if (!res.found_existing) {
