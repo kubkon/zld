@@ -290,6 +290,8 @@ pub fn flush(self: *MachO) !void {
     try self.addAtomsToSections();
     try self.calcSectionSizes();
     try self.performAllTheWork();
+    if (self.has_errors.swap(false, .seq_cst)) return error.FlushFailed;
+
     try self.generateUnwindInfo();
 
     try self.initSegments();
@@ -1586,6 +1588,7 @@ fn calcSectionSizeWorker(self: *MachO, sect_id: u8) void {
             header.sectName(),
             @errorName(err),
         });
+        _ = self.has_errors.swap(true, .seq_cst);
     };
 }
 
@@ -1599,6 +1602,7 @@ fn createThunksWorker(self: *MachO, sect_id: u8) void {
             header.sectName(),
             @errorName(err),
         });
+        _ = self.has_errors.swap(true, .seq_cst);
     };
 }
 
