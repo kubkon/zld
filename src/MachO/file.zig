@@ -115,7 +115,6 @@ pub const File = union(enum) {
     }
 
     pub fn markImportsAndExports(file: File, macho_file: *MachO) void {
-        assert(file != .dylib);
         const nsyms = switch (file) {
             .dylib => unreachable,
             inline else => |x| x.symbols.items.len,

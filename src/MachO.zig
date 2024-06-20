@@ -282,7 +282,7 @@ pub fn flush(self: *MachO) !void {
         dylib.ordinal = @intCast(ord);
     }
 
-    try self.claimUnresolved();
+    self.claimUnresolved();
     try self.scanRelocs();
     try self.initOutputSections();
     try self.initSyntheticSections();
@@ -1000,6 +1000,9 @@ fn markLive(self: *MachO) void {
 }
 
 fn deadStripDylibs(self: *MachO) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     for (self.dylibs.items) |index| {
         self.getFile(index).?.dylib.markReferenced(self);
     }
@@ -1112,34 +1115,9 @@ fn dedupLiteralsWorker(self: *MachO, file: File, lp: LiteralPool) void {
     };
 }
 
-fn claimUnresolved(self: *MachO) error{OutOfMemory}!void {
+fn claimUnresolved(self: *MachO) void {
     for (self.objects.items) |index| {
-        const object = self.getFile(index).?.object;
-
-        for (object.symbols.items, 0..) |*sym, i| {
-            const nlist = object.symtab.items(.nlist)[i];
-            if (!nlist.ext()) continue;
-            if (!nlist.undf()) continue;
-
-            if (object.getSymbolRef(@intCast(i), self).getFile(self) != null) continue;
-
-            const is_import = switch (self.options.undefined_treatment) {
-                .@"error" => false,
-                .warn, .suppress => nlist.weakRef(),
-                .dynamic_lookup => true,
-            };
-            if (is_import) {
-                sym.value = 0;
-                sym.atom_ref = .{ .index = 0, .file = 0 };
-                sym.flags.weak = false;
-                sym.flags.weak_ref = nlist.weakRef();
-                sym.flags.import = is_import;
-                sym.visibility = .global;
-
-                const idx = object.globals.items[i];
-                self.resolver.values.items[idx - 1] = .{ .index = @intCast(i), .file = object.index };
-            }
-        }
+        self.getFile(index).?.object.claimUnresolved(self);
     }
 }
 

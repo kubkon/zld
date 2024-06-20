@@ -1583,6 +1583,36 @@ pub fn convertTentativeDefinitions(self: *Object, macho_file: *MachO) !void {
     }
 }
 
+pub fn claimUnresolved(self: *Object, macho_file: *MachO) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    for (self.symbols.items, 0..) |*sym, i| {
+        const nlist = self.symtab.items(.nlist)[i];
+        if (!nlist.ext()) continue;
+        if (!nlist.undf()) continue;
+
+        if (self.getSymbolRef(@intCast(i), macho_file).getFile(macho_file) != null) continue;
+
+        const is_import = switch (macho_file.options.undefined_treatment) {
+            .@"error" => false,
+            .warn, .suppress => nlist.weakRef(),
+            .dynamic_lookup => true,
+        };
+        if (is_import) {
+            sym.value = 0;
+            sym.atom_ref = .{ .index = 0, .file = 0 };
+            sym.flags.weak = false;
+            sym.flags.weak_ref = nlist.weakRef();
+            sym.flags.import = is_import;
+            sym.visibility = .global;
+
+            const idx = self.globals.items[i];
+            macho_file.resolver.values.items[idx - 1] = .{ .index = @intCast(i), .file = self.index };
+        }
+    }
+}
+
 fn addSection(self: *Object, allocator: Allocator, segname: []const u8, sectname: []const u8) !u8 {
     const n_sect = @as(u8, @intCast(try self.sections.addOne(allocator)));
     self.sections.set(n_sect, .{
