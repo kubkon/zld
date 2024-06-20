@@ -173,6 +173,13 @@ pub const File = union(enum) {
         }
     }
 
+    pub fn writeAtoms(file: File, macho_file: *MachO) !void {
+        return switch (file) {
+            .dylib => unreachable,
+            inline else => |x| x.writeAtoms(macho_file),
+        };
+    }
+
     pub fn calcSymtabSize(file: File, macho_file: *MachO) void {
         return switch (file) {
             inline else => |x| x.calcSymtabSize(macho_file),

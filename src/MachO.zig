@@ -1981,54 +1981,7 @@ fn writeSectionsToFile(self: *MachO) !void {
 fn writeAtomsWorker(self: *MachO, index: File.Index) void {
     const tracy = trace(@src());
     defer tracy.end();
-    const doWork = struct {
-        fn doWork(file: File, macho_file: *MachO) !void {
-            switch (file) {
-                .dylib => unreachable,
-                .object => |x| {
-                    const gpa = macho_file.base.allocator;
-                    const sections = x.sections.items(.header);
-                    const sections_data = try gpa.alloc(?[]const u8, sections.len);
-                    defer {
-                        for (sections_data) |maybe_data| if (maybe_data) |data| {
-                            gpa.free(data);
-                        };
-                        gpa.free(sections_data);
-                    }
-                    @memset(sections_data, null);
-                    for (sections, 0..) |sect, n_sect| {
-                        if (sect.isZerofill()) continue;
-                        sections_data[n_sect] = try x.getSectionData(gpa, @intCast(n_sect), macho_file.getFileHandle(x.file_handle));
-                    }
-                    for (file.getAtoms()) |atom_index| {
-                        const atom = file.getAtom(atom_index) orelse continue;
-                        if (!atom.alive.load(.seq_cst)) continue;
-                        const sect = atom.getInputSection(macho_file);
-                        if (sect.isZerofill()) continue;
-                        const off = atom.value;
-                        const buffer = macho_file.sections.items(.out)[atom.out_n_sect].items;
-                        const data = sections_data[atom.n_sect].?;
-                        @memcpy(buffer[off..][0..atom.size], data[atom.off..][0..atom.size]);
-                        try atom.resolveRelocs(macho_file, buffer[off..][0..atom.size]);
-                    }
-                },
-                .internal => {
-                    for (file.getAtoms()) |atom_index| {
-                        const atom = file.getAtom(atom_index) orelse continue;
-                        if (!atom.alive.load(.seq_cst)) continue;
-                        const sect = atom.getInputSection(macho_file);
-                        if (sect.isZerofill()) continue;
-                        const off = atom.value;
-                        const buffer = macho_file.sections.items(.out)[atom.out_n_sect].items;
-                        try atom.getCode(macho_file, buffer[off..][0..atom.size]);
-                        try atom.resolveRelocs(macho_file, buffer[off..][0..atom.size]);
-                    }
-                },
-            }
-        }
-    }.doWork;
-    const file = self.getFile(index).?;
-    doWork(file, self) catch |err| {
+    self.getFile(index).?.writeAtoms(self) catch |err| {
         self.base.fatal("failed to write atoms: {s}", .{@errorName(err)});
     };
 }

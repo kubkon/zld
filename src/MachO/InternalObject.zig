@@ -619,6 +619,22 @@ pub fn calcSymtabSize(self: *InternalObject, macho_file: *MachO) void {
     }
 }
 
+pub fn writeAtoms(self: *InternalObject, macho_file: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    for (self.getAtoms()) |atom_index| {
+        const atom = self.getAtom(atom_index) orelse continue;
+        if (!atom.alive.load(.seq_cst)) continue;
+        const sect = atom.getInputSection(macho_file);
+        if (sect.isZerofill()) continue;
+        const off = atom.value;
+        const buffer = macho_file.sections.items(.out)[atom.out_n_sect].items[off..][0..atom.size];
+        @memcpy(buffer, self.getSectionData(atom.n_sect));
+        try atom.resolveRelocs(macho_file, buffer);
+    }
+}
+
 pub fn writeSymtab(self: InternalObject, macho_file: *MachO) void {
     var n_strx = self.output_symtab_ctx.stroff;
     for (self.symbols.items, 0..) |sym, i| {
@@ -700,7 +716,7 @@ pub fn getAtom(self: *InternalObject, atom_index: Atom.Index) ?*Atom {
     return &self.atoms.items[atom_index];
 }
 
-pub fn getAtoms(self: *InternalObject) []const Atom.Index {
+pub fn getAtoms(self: InternalObject) []const Atom.Index {
     return self.atoms_indexes.items;
 }
 
