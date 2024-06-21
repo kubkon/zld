@@ -74,21 +74,7 @@ fn markExports(macho_file: *MachO) void {
 fn claimUnresolved(macho_file: *MachO) void {
     for (macho_file.objects.items) |index| {
         const object = macho_file.getFile(index).?.object;
-
-        for (object.symbols.items, object.symtab.items(.nlist), 0..) |*sym, nlist, i| {
-            if (!nlist.ext()) continue;
-            if (!nlist.undf()) continue;
-            if (object.getSymbolRef(@intCast(i), macho_file).getFile(macho_file) != null) continue;
-
-            sym.value = 0;
-            sym.atom_ref = .{ .index = 0, .file = 0 };
-            sym.flags.weak_ref = nlist.weakRef();
-            sym.flags.import = true;
-            sym.visibility = .global;
-
-            const idx = object.globals.items[i];
-            macho_file.resolver.values.items[idx - 1] = .{ .index = @intCast(i), .file = index };
-        }
+        object.claimUnresolvedRelocatable(macho_file);
     }
 }
 

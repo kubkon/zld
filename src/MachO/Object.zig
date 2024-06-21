@@ -1613,6 +1613,26 @@ pub fn claimUnresolved(self: *Object, macho_file: *MachO) void {
     }
 }
 
+pub fn claimUnresolvedRelocatable(self: *Object, macho_file: *MachO) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    for (self.symbols.items, self.symtab.items(.nlist), 0..) |*sym, nlist, i| {
+        if (!nlist.ext()) continue;
+        if (!nlist.undf()) continue;
+        if (self.getSymbolRef(@intCast(i), macho_file).getFile(macho_file) != null) continue;
+
+        sym.value = 0;
+        sym.atom_ref = .{ .index = 0, .file = 0 };
+        sym.flags.weak_ref = nlist.weakRef();
+        sym.flags.import = true;
+        sym.visibility = .global;
+
+        const idx = self.globals.items[i];
+        macho_file.resolver.values.items[idx - 1] = .{ .index = @intCast(i), .file = self.index };
+    }
+}
+
 fn addSection(self: *Object, allocator: Allocator, segname: []const u8, sectname: []const u8) !u8 {
     const n_sect = @as(u8, @intCast(try self.sections.addOne(allocator)));
     self.sections.set(n_sect, .{
