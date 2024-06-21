@@ -2520,6 +2520,8 @@ pub fn writeCodeSignature(self: *MachO, code_sig: *CodeSignature) !void {
 /// the original file. This is super messy, but there doesn't seem any other
 /// way to please the XNU.
 pub fn invalidateKernelCache(dir: std.fs.Dir, sub_path: []const u8) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
     if (comptime builtin.target.isDarwin() and builtin.target.cpu.arch == .aarch64) {
         try dir.copyFile(sub_path, dir, sub_path, .{});
     }
