@@ -158,6 +158,9 @@ fn calcSymtabSize(macho_file: *MachO) void {
 }
 
 fn calcSectionSizes(macho_file: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const slice = macho_file.sections.slice();
     for (slice.items(.header), slice.items(.atoms)) |*header, atoms| {
         if (atoms.items.len == 0) continue;

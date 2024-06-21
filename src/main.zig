@@ -68,6 +68,8 @@ fn print(comptime format: []const u8, args: anytype) void {
 }
 
 fn fatal(comptime format: []const u8, args: anytype) noreturn {
+    std.debug.lockStdErr();
+    defer std.debug.unlockStdErr();
     print(format, args);
     std.process.exit(1);
 }

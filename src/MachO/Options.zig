@@ -325,6 +325,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     }
 
     if (verbose) {
+        std.debug.lockStdErr();
+        defer std.debug.unlockStdErr();
         ctx.print("{s} ", .{cmd});
         for (args[0 .. args.len - 1]) |arg| {
             ctx.print("{s} ", .{arg});
@@ -332,7 +334,11 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         ctx.print("{s}\n", .{args[args.len - 1]});
     }
 
-    if (print_version) ctx.print("{s}\n", .{version});
+    if (print_version) {
+        std.debug.lockStdErr();
+        defer std.debug.unlockStdErr();
+        ctx.print("{s}\n", .{version});
+    }
 
     if (positionals.items.len == 0) ctx.fatal("Expected at least one positional argument\n", .{});
 
