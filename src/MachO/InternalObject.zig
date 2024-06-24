@@ -462,7 +462,7 @@ pub fn dedupLiterals(self: *InternalObject, lp: MachO.LiteralPool, macho_file: *
         if (!atom.flags.relocs) continue;
 
         const relocs = blk: {
-            const extra = atom.getExtra(macho_file).?;
+            const extra = atom.getExtra(macho_file);
             const relocs = self.sections.items(.relocs)[atom.n_sect].items;
             break :blk relocs[extra.rel_index..][0..extra.rel_count];
         };
@@ -747,8 +747,7 @@ fn addAtomExtraAssumeCapacity(self: *InternalObject, extra: Atom.Extra) u32 {
     return index;
 }
 
-pub fn getAtomExtra(self: InternalObject, index: u32) ?Atom.Extra {
-    if (index == 0) return null;
+pub fn getAtomExtra(self: InternalObject, index: u32) Atom.Extra {
     const fields = @typeInfo(Atom.Extra).Struct.fields;
     var i: usize = index;
     var result: Atom.Extra = undefined;

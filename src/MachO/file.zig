@@ -90,7 +90,7 @@ pub const File = union(enum) {
         };
     }
 
-    pub fn getAtomExtra(file: File, index: u32) ?Atom.Extra {
+    pub fn getAtomExtra(file: File, index: u32) Atom.Extra {
         return switch (file) {
             .dylib => unreachable,
             inline else => |x| x.getAtomExtra(index),

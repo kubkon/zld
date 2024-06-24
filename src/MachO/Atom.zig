@@ -92,13 +92,13 @@ pub fn getRelocs(self: Atom, macho_file: *MachO) []const Relocation {
         .dylib => unreachable,
         inline else => |x| x.sections.items(.relocs)[self.n_sect],
     };
-    const extra = self.getExtra(macho_file).?;
+    const extra = self.getExtra(macho_file);
     return relocs.items[extra.rel_index..][0..extra.rel_count];
 }
 
 pub fn getUnwindRecords(self: Atom, macho_file: *MachO) []const UnwindInfo.Record.Index {
     if (!self.flags.unwind) return &[0]UnwindInfo.Record.Index{};
-    const extra = self.getExtra(macho_file).?;
+    const extra = self.getExtra(macho_file);
     return switch (self.getFile(macho_file)) {
         .dylib, .internal => unreachable,
         .object => |x| x.unwind_records_indexes.items[extra.unwind_index..][0..extra.unwind_count],
@@ -119,19 +119,20 @@ pub fn markUnwindRecordsDead(self: Atom, macho_file: *MachO) void {
 
 pub fn getThunk(self: Atom, macho_file: *MachO) *Thunk {
     assert(self.flags.thunk);
-    const extra = self.getExtra(macho_file).?;
+    const extra = self.getExtra(macho_file);
     return macho_file.getThunk(extra.thunk);
 }
 
 pub fn getLiteralPoolIndex(self: Atom, macho_file: *MachO) ?MachO.LiteralPool.Index {
     if (!self.flags.literal_pool) return null;
-    return self.getExtra(macho_file).?.literal_index;
+    return self.getExtra(macho_file).literal_index;
 }
 
 const AddExtraOpts = struct {
     thunk: ?u32 = null,
     rel_index: ?u32 = null,
     rel_count: ?u32 = null,
+    rel_out_index: ?u32 = null,
     unwind_index: ?u32 = null,
     unwind_count: ?u32 = null,
     literal_index: ?u32 = null,
@@ -139,7 +140,7 @@ const AddExtraOpts = struct {
 
 pub fn addExtra(atom: *Atom, opts: AddExtraOpts, macho_file: *MachO) void {
     const file = atom.getFile(macho_file);
-    var extra = file.getAtomExtra(atom.extra).?;
+    var extra = file.getAtomExtra(atom.extra);
     inline for (@typeInfo(@TypeOf(opts)).Struct.fields) |field| {
         if (@field(opts, field.name)) |x| {
             @field(extra, field.name) = x;
@@ -148,7 +149,7 @@ pub fn addExtra(atom: *Atom, opts: AddExtraOpts, macho_file: *MachO) void {
     file.setAtomExtra(atom.extra, extra);
 }
 
-pub inline fn getExtra(atom: Atom, macho_file: *MachO) ?Extra {
+pub inline fn getExtra(atom: Atom, macho_file: *MachO) Extra {
     return atom.getFile(macho_file).getAtomExtra(atom.extra);
 }
 
@@ -865,11 +866,11 @@ fn format2(
         atom.atom_index, atom.getName(macho_file),      atom.getAddress(macho_file),
         atom.out_n_sect, atom.alignment.load(.seq_cst), atom.size,
     });
-    if (atom.flags.thunk) try writer.print(" : thunk({d})", .{atom.getExtra(macho_file).?.thunk});
+    if (atom.flags.thunk) try writer.print(" : thunk({d})", .{atom.getExtra(macho_file).thunk});
     if (!atom.alive.load(.seq_cst)) try writer.writeAll(" : [*]");
     if (atom.flags.unwind) {
         try writer.writeAll(" : unwind{ ");
-        const extra = atom.getExtra(macho_file).?;
+        const extra = atom.getExtra(macho_file);
         for (atom.getUnwindRecords(macho_file), extra.unwind_index..) |index, i| {
             const rec = file.object.getUnwindRecord(index);
             try writer.print("{d}", .{index});
@@ -905,6 +906,9 @@ pub const Extra = struct {
 
     /// Count of relocations belonging to this atom.
     rel_count: u32 = 0,
+
+    /// Start index of relocations being written out to file for this atom.
+    rel_out_index: u32 = 0,
 
     /// Start index of relocations belonging to this atom.
     unwind_index: u32 = 0,
