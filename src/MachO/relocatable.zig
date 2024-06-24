@@ -47,7 +47,6 @@ pub fn flush(macho_file: *MachO) !void {
 
     try writeSections(macho_file);
     try writeCompactUnwind(macho_file);
-    try writeEhFrame(macho_file);
     sortRelocs(macho_file);
     try writeSectionsToFile(macho_file);
 
@@ -355,6 +354,10 @@ fn writeSections(macho_file: *MachO) !void {
         for (macho_file.objects.items) |index| {
             macho_file.base.thread_pool.spawnWg(&wg, writeAtomsWorker, .{ macho_file, macho_file.getFile(index).?.object });
         }
+
+        if (macho_file.eh_frame_sect_index) |_| {
+            macho_file.base.thread_pool.spawnWg(&wg, writeEhFrameWorker, .{macho_file});
+        }
     }
 
     if (macho_file.has_errors.swap(false, .seq_cst)) return error.FlushFailed;
@@ -467,17 +470,14 @@ fn writeCompactUnwind(macho_file: *MachO) !void {
     assert(relocs.items.len == header.nreloc);
 }
 
-fn writeEhFrame(macho_file: *MachO) !void {
-    const sect_index = macho_file.eh_frame_sect_index orelse return;
-    const header = macho_file.sections.items(.header)[sect_index];
-
-    // TODO temp hack
+fn writeEhFrameWorker(macho_file: *MachO) void {
+    const sect_index = macho_file.eh_frame_sect_index.?;
     const buffer = macho_file.sections.items(.out)[sect_index];
-    var relocs = macho_file.sections.items(.relocs)[sect_index];
-    relocs.clearRetainingCapacity();
-
-    try eh_frame.writeRelocs(macho_file, buffer.items, &relocs);
-    assert(relocs.items.len == header.nreloc);
+    const relocs = macho_file.sections.items(.relocs)[sect_index];
+    eh_frame.writeRelocs(macho_file, buffer.items, relocs.items) catch |err| {
+        macho_file.base.fatal("failed to write '__TEXT,__eh_frame' section: {s}", .{@errorName(err)});
+        _ = macho_file.has_errors.swap(true, .seq_cst);
+    };
 }
 
 /// TODO just a temp

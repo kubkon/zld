@@ -450,7 +450,7 @@ pub fn write(macho_file: *MachO, buffer: []u8) void {
     }
 }
 
-pub fn writeRelocs(macho_file: *MachO, code: []u8, relocs: anytype) error{Overflow}!void {
+pub fn writeRelocs(macho_file: *MachO, code: []u8, relocs: []macho.relocation_info) error{Overflow}!void {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -461,6 +461,7 @@ pub fn writeRelocs(macho_file: *MachO, code: []u8, relocs: anytype) error{Overfl
         else => 0,
     };
 
+    var i: usize = 0;
     for (macho_file.objects.items) |index| {
         const object = macho_file.getFile(index).?.object;
         for (object.cies.items) |cie| {
@@ -471,7 +472,7 @@ pub fn writeRelocs(macho_file: *MachO, code: []u8, relocs: anytype) error{Overfl
             if (cie.getPersonality(macho_file)) |sym| {
                 const r_address = math.cast(i32, cie.out_offset + cie.personality.?.offset) orelse return error.Overflow;
                 const r_symbolnum = math.cast(u24, sym.getOutputSymtabIndex(macho_file).?) orelse return error.Overflow;
-                relocs.appendAssumeCapacity(.{
+                relocs[i] = .{
                     .r_address = r_address,
                     .r_symbolnum = r_symbolnum,
                     .r_length = 2,
@@ -482,7 +483,8 @@ pub fn writeRelocs(macho_file: *MachO, code: []u8, relocs: anytype) error{Overfl
                         .x86_64 => @intFromEnum(macho.reloc_type_x86_64.X86_64_RELOC_GOT),
                         else => unreachable,
                     },
-                });
+                };
+                i += 1;
             }
         }
     }
@@ -533,6 +535,8 @@ pub fn writeRelocs(macho_file: *MachO, code: []u8, relocs: anytype) error{Overfl
             }
         }
     }
+
+    assert(relocs.len == i);
 }
 
 pub const EH_PE = struct {
