@@ -161,35 +161,67 @@ fn calcSectionSizes(macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    const slice = macho_file.sections.slice();
-    for (slice.items(.header), slice.items(.atoms)) |*header, atoms| {
-        if (atoms.items.len == 0) continue;
-        for (atoms.items) |ref| {
-            const atom = ref.getAtom(macho_file).?;
-            const p2align = atom.alignment.load(.seq_cst);
-            const atom_alignment = try math.powi(u32, 2, p2align);
-            const offset = mem.alignForward(u64, header.size, atom_alignment);
-            const padding = offset - header.size;
-            atom.value = offset;
-            header.size += padding + atom.size;
-            header.@"align" = @max(header.@"align", p2align);
-            header.nreloc += atom.calcNumRelocs(macho_file);
+    var wg: WaitGroup = .{};
+
+    {
+        wg.reset();
+        defer wg.wait();
+
+        const slice = macho_file.sections.slice();
+        for (slice.items(.atoms), 0..) |atoms, i| {
+            if (atoms.items.len == 0) continue;
+            macho_file.base.thread_pool.spawnWg(&wg, calcSectionSizeWorker, .{ macho_file, @as(u8, @intCast(i)) });
+        }
+
+        if (macho_file.eh_frame_sect_index) |_| {
+            macho_file.base.thread_pool.spawnWg(&wg, calcEhFrameSizeWorker, .{macho_file});
+        }
+
+        if (macho_file.unwind_info_sect_index) |_| {
+            macho_file.base.thread_pool.spawnWg(&wg, calcCompactUnwindSizeWorker, .{macho_file});
         }
     }
 
-    if (macho_file.unwind_info_sect_index) |index| {
-        calcCompactUnwindSize(macho_file, index);
-    }
-
-    if (macho_file.eh_frame_sect_index) |index| {
-        const sect = &macho_file.sections.items(.header)[index];
-        sect.size = try eh_frame.calcSize(macho_file);
-        sect.@"align" = 3;
-        sect.nreloc = eh_frame.calcNumRelocs(macho_file);
-    }
+    if (macho_file.has_errors.swap(false, .seq_cst)) return error.FlushFailed;
 }
 
-fn calcCompactUnwindSize(macho_file: *MachO, sect_index: u8) void {
+fn calcSectionSizeWorker(macho_file: *MachO, sect_id: u8) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    const doWork = struct {
+        fn doWork(mfile: *MachO, header: *macho.section_64, atoms: []const MachO.Ref) !void {
+            for (atoms) |ref| {
+                const atom = ref.getAtom(mfile).?;
+                const p2align = atom.alignment.load(.seq_cst);
+                const atom_alignment = try math.powi(u32, 2, p2align);
+                const offset = mem.alignForward(u64, header.size, atom_alignment);
+                const padding = offset - header.size;
+                atom.value = offset;
+                header.size += padding + atom.size;
+                header.@"align" = @max(header.@"align", p2align);
+                header.nreloc += atom.calcNumRelocs(mfile);
+            }
+        }
+    }.doWork;
+
+    const slice = macho_file.sections.slice();
+    const header = &slice.items(.header)[sect_id];
+    const atoms = slice.items(.atoms)[sect_id].items;
+    doWork(macho_file, header, atoms) catch |err| {
+        macho_file.base.fatal("failed to calculate size of section '{s},{s}': {s}", .{
+            header.segName(),
+            header.sectName(),
+            @errorName(err),
+        });
+        _ = macho_file.has_errors.swap(true, .seq_cst);
+    };
+}
+
+fn calcCompactUnwindSizeWorker(macho_file: *MachO) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     var size: u32 = 0;
     var nreloc: u32 = 0;
 
@@ -209,10 +241,31 @@ fn calcCompactUnwindSize(macho_file: *MachO, sect_index: u8) void {
         }
     }
 
-    const sect = &macho_file.sections.items(.header)[sect_index];
+    const sect = &macho_file.sections.items(.header)[macho_file.unwind_info_sect_index.?];
     sect.size = size;
     sect.nreloc = nreloc;
     sect.@"align" = 3;
+}
+
+fn calcEhFrameSizeWorker(macho_file: *MachO) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    const doWork = struct {
+        fn doWork(mfile: *MachO, header: *macho.section_64) !void {
+            header.size = try eh_frame.calcSize(mfile);
+            header.@"align" = 3;
+            header.nreloc = eh_frame.calcNumRelocs(mfile);
+        }
+    }.doWork;
+
+    const header = &macho_file.sections.items(.header)[macho_file.eh_frame_sect_index.?];
+    doWork(macho_file, header) catch |err| {
+        macho_file.base.fatal("failed to calculate size of section '__TEXT,__eh_frame': {s}", .{
+            @errorName(err),
+        });
+        _ = macho_file.has_errors.swap(true, .seq_cst);
+    };
 }
 
 fn allocateSections(macho_file: *MachO) !void {
@@ -541,3 +594,4 @@ const Atom = @import("Atom.zig");
 const File = @import("file.zig").File;
 const MachO = @import("../MachO.zig");
 const Symbol = @import("Symbol.zig");
+const WaitGroup = std.Thread.WaitGroup;
