@@ -450,7 +450,7 @@ pub fn write(macho_file: *MachO, buffer: []u8) void {
     }
 }
 
-pub fn writeRelocs(macho_file: *MachO, code: []u8, relocs: *std.ArrayList(macho.relocation_info)) error{Overflow}!void {
+pub fn writeRelocs(macho_file: *MachO, code: []u8, relocs: anytype) error{Overflow}!void {
     const tracy = trace(@src());
     defer tracy.end();
 

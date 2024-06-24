@@ -120,10 +120,16 @@ pub fn deinit(self: *MachO) void {
     self.files.deinit(gpa);
 
     self.segments.deinit(gpa);
-    for (self.sections.items(.atoms), self.sections.items(.thunks), self.sections.items(.out)) |*atoms, *th, *out| {
+    for (
+        self.sections.items(.atoms),
+        self.sections.items(.thunks),
+        self.sections.items(.out),
+        self.sections.items(.relocs),
+    ) |*atoms, *th, *out, *relocs| {
         atoms.deinit(gpa);
         th.deinit(gpa);
         out.deinit(gpa);
+        relocs.deinit(gpa);
     }
     self.sections.deinit(gpa);
     self.thunks.deinit(gpa);
@@ -2945,6 +2951,7 @@ const Section = struct {
     atoms: std.ArrayListUnmanaged(Ref) = .{},
     thunks: std.ArrayListUnmanaged(Thunk.Index) = .{},
     out: std.ArrayListUnmanaged(u8) = .{},
+    relocs: std.ArrayListUnmanaged(macho.relocation_info) = .{},
 };
 
 pub const SymtabCtx = struct {

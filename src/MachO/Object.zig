@@ -1770,6 +1770,41 @@ pub fn writeAtoms(self: *Object, macho_file: *MachO) !void {
     }
 }
 
+pub fn writeAtomsRelocatable(self: *Object, macho_file: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    const gpa = macho_file.base.allocator;
+    const headers = self.sections.items(.header);
+    const sections_data = try gpa.alloc([]const u8, headers.len);
+    defer {
+        for (sections_data) |data| {
+            gpa.free(data);
+        }
+        gpa.free(sections_data);
+    }
+    @memset(sections_data, &[0]u8{});
+    const file = macho_file.getFileHandle(self.file_handle);
+
+    for (headers, 0..) |header, n_sect| {
+        if (header.isZerofill()) continue;
+        sections_data[n_sect] = try self.getSectionData(gpa, @intCast(n_sect), file);
+    }
+    for (self.getAtoms()) |atom_index| {
+        const atom = self.getAtom(atom_index) orelse continue;
+        if (!atom.alive.load(.seq_cst)) continue;
+        const sect = atom.getInputSection(macho_file);
+        if (sect.isZerofill()) continue;
+        const off = atom.value;
+        const buffer = macho_file.sections.items(.out)[atom.out_n_sect].items;
+        const data = sections_data[atom.n_sect];
+        @memcpy(buffer[off..][0..atom.size], data[atom.off..][0..atom.size]);
+        const relocs = macho_file.sections.items(.relocs)[atom.out_n_sect].items;
+        const extra = atom.getExtra(macho_file);
+        try atom.writeRelocs(macho_file, buffer[off..][0..atom.size], relocs[extra.rel_out_index..][0..extra.rel_out_count]);
+    }
+}
+
 pub fn writeSymtab(self: Object, macho_file: *MachO) void {
     const tracy = trace(@src());
     defer tracy.end();

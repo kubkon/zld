@@ -133,6 +133,7 @@ const AddExtraOpts = struct {
     rel_index: ?u32 = null,
     rel_count: ?u32 = null,
     rel_out_index: ?u32 = null,
+    rel_out_count: ?u32 = null,
     unwind_index: ?u32 = null,
     unwind_count: ?u32 = null,
     literal_index: ?u32 = null,
@@ -708,14 +709,16 @@ pub fn calcNumRelocs(self: Atom, macho_file: *MachO) u32 {
     }
 }
 
-pub fn writeRelocs(self: Atom, macho_file: *MachO, code: []u8, buffer: *std.ArrayList(macho.relocation_info)) !void {
+pub fn writeRelocs(self: Atom, macho_file: *MachO, code: []u8, buffer: []macho.relocation_info) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
     const cpu_arch = macho_file.options.cpu_arch.?;
     const relocs = self.getRelocs(macho_file);
 
+    var i: usize = 0;
     for (relocs) |rel| {
+        defer i += 1;
         const rel_offset = rel.offset - self.off;
         const r_address: i32 = math.cast(i32, self.value + rel_offset) orelse return error.Overflow;
         const r_symbolnum = r_symbolnum: {
@@ -739,14 +742,15 @@ pub fn writeRelocs(self: Atom, macho_file: *MachO, code: []u8, buffer: *std.Arra
                     2 => mem.writeInt(i32, code[rel_offset..][0..4], @truncate(addend), .little),
                     3 => mem.writeInt(i64, code[rel_offset..][0..8], addend, .little),
                 } else if (addend > 0) {
-                    buffer.appendAssumeCapacity(.{
+                    buffer[i] = .{
                         .r_address = r_address,
                         .r_symbolnum = @bitCast(math.cast(i24, addend) orelse return error.Overflow),
                         .r_pcrel = 0,
                         .r_length = 2,
                         .r_extern = 0,
                         .r_type = @intFromEnum(macho.reloc_type_arm64.ARM64_RELOC_ADDEND),
-                    });
+                    };
+                    i += 1;
                 }
 
                 const r_type: macho.reloc_type_arm64 = switch (rel.type) {
@@ -769,14 +773,14 @@ pub fn writeRelocs(self: Atom, macho_file: *MachO, code: []u8, buffer: *std.Arra
                     .tlv,
                     => unreachable,
                 };
-                buffer.appendAssumeCapacity(.{
+                buffer[i] = .{
                     .r_address = r_address,
                     .r_symbolnum = r_symbolnum,
                     .r_pcrel = @intFromBool(rel.meta.pcrel),
                     .r_extern = @intFromBool(r_extern),
                     .r_length = rel.meta.length,
                     .r_type = @intFromEnum(r_type),
-                });
+                };
             },
             .x86_64 => {
                 if (rel.meta.pcrel) {
@@ -812,18 +816,20 @@ pub fn writeRelocs(self: Atom, macho_file: *MachO, code: []u8, buffer: *std.Arra
                     .tlvp_pageoff,
                     => unreachable,
                 };
-                buffer.appendAssumeCapacity(.{
+                buffer[i] = .{
                     .r_address = r_address,
                     .r_symbolnum = r_symbolnum,
                     .r_pcrel = @intFromBool(rel.meta.pcrel),
                     .r_extern = @intFromBool(r_extern),
                     .r_length = rel.meta.length,
                     .r_type = @intFromEnum(r_type),
-                });
+                };
             },
             else => unreachable,
         }
     }
+
+    assert(i == buffer.len);
 }
 
 pub fn format(
@@ -909,6 +915,9 @@ pub const Extra = struct {
 
     /// Start index of relocations being written out to file for this atom.
     rel_out_index: u32 = 0,
+
+    /// Count of relocations written out to file for this atom.
+    rel_out_count: u32 = 0,
 
     /// Start index of relocations belonging to this atom.
     unwind_index: u32 = 0,
