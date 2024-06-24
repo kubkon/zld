@@ -2258,7 +2258,7 @@ fn calcSymtabSizeImpl(self: *MachO) !void {
     }
 }
 
-fn calcSymtabSizeFileWorker(self: *MachO, file: File) void {
+pub fn calcSymtabSizeFileWorker(self: *MachO, file: File) void {
     file.calcSymtabSize(self);
 }
 

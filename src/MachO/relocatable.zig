@@ -6,7 +6,6 @@ pub fn flush(macho_file: *MachO) !void {
     try macho_file.sortSections();
     try macho_file.addAtomsToSections();
     try calcSectionSizes(macho_file);
-    calcSymtabSize(macho_file);
     try macho_file.data_in_code.updateSize(macho_file);
 
     {
@@ -106,57 +105,6 @@ fn initOutputSections(macho_file: *MachO) !void {
     }
 }
 
-fn calcSymtabSize(macho_file: *MachO) void {
-    const tracy = trace(@src());
-    defer tracy.end();
-
-    var nlocals: u32 = 0;
-    var nstabs: u32 = 0;
-    var nexports: u32 = 0;
-    var nimports: u32 = 0;
-    var strsize: u32 = 1;
-
-    for (macho_file.objects.items) |index| {
-        const object = macho_file.getFile(index).?.object;
-        const ctx = &object.output_symtab_ctx;
-        ctx.ilocal = nlocals;
-        ctx.istab = nstabs;
-        ctx.iexport = nexports;
-        ctx.iimport = nimports;
-        ctx.stroff = strsize;
-        object.calcSymtabSize(macho_file);
-        nlocals += ctx.nlocals;
-        nstabs += ctx.nstabs;
-        nexports += ctx.nexports;
-        nimports += ctx.nimports;
-        strsize += ctx.strsize;
-    }
-
-    for (macho_file.objects.items) |index| {
-        const object = macho_file.getFile(index).?.object;
-        const ctx = &object.output_symtab_ctx;
-        ctx.istab += nlocals;
-        ctx.iexport += nlocals + nstabs;
-        ctx.iimport += nlocals + nstabs + nexports;
-    }
-
-    {
-        const cmd = &macho_file.symtab_cmd;
-        cmd.nsyms = nlocals + nstabs + nexports + nimports;
-        cmd.strsize = strsize;
-    }
-
-    {
-        const cmd = &macho_file.dysymtab_cmd;
-        cmd.ilocalsym = 0;
-        cmd.nlocalsym = nlocals + nstabs;
-        cmd.iextdefsym = nlocals + nstabs;
-        cmd.nextdefsym = nexports;
-        cmd.iundefsym = nlocals + nstabs + nexports;
-        cmd.nundefsym = nimports;
-    }
-}
-
 fn calcSectionSizes(macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
@@ -180,6 +128,8 @@ fn calcSectionSizes(macho_file: *MachO) !void {
         if (macho_file.unwind_info_sect_index) |_| {
             macho_file.base.thread_pool.spawnWg(&wg, calcCompactUnwindSizeWorker, .{macho_file});
         }
+
+        macho_file.base.thread_pool.spawnWg(&wg, calcSymtabSizeWorker, .{macho_file});
     }
 
     if (macho_file.has_errors.swap(false, .seq_cst)) return error.FlushFailed;
@@ -266,6 +216,66 @@ fn calcEhFrameSizeWorker(macho_file: *MachO) void {
         });
         _ = macho_file.has_errors.swap(true, .seq_cst);
     };
+}
+
+fn calcSymtabSizeWorker(macho_file: *MachO) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    var wg: WaitGroup = .{};
+
+    {
+        wg.reset();
+        defer wg.wait();
+        for (macho_file.objects.items) |index| {
+            macho_file.base.thread_pool.spawnWg(&wg, MachO.calcSymtabSizeFileWorker, .{ macho_file, macho_file.getFile(index).? });
+        }
+    }
+
+    var nlocals: u32 = 0;
+    var nstabs: u32 = 0;
+    var nexports: u32 = 0;
+    var nimports: u32 = 0;
+    var strsize: u32 = 1;
+
+    for (macho_file.objects.items) |index| {
+        const object = macho_file.getFile(index).?.object;
+        const ctx = &object.output_symtab_ctx;
+        ctx.ilocal = nlocals;
+        ctx.istab = nstabs;
+        ctx.iexport = nexports;
+        ctx.iimport = nimports;
+        ctx.stroff = strsize;
+        nlocals += ctx.nlocals;
+        nstabs += ctx.nstabs;
+        nexports += ctx.nexports;
+        nimports += ctx.nimports;
+        strsize += ctx.strsize;
+    }
+
+    for (macho_file.objects.items) |index| {
+        const object = macho_file.getFile(index).?.object;
+        const ctx = &object.output_symtab_ctx;
+        ctx.istab += nlocals;
+        ctx.iexport += nlocals + nstabs;
+        ctx.iimport += nlocals + nstabs + nexports;
+    }
+
+    {
+        const cmd = &macho_file.symtab_cmd;
+        cmd.nsyms = nlocals + nstabs + nexports + nimports;
+        cmd.strsize = strsize;
+    }
+
+    {
+        const cmd = &macho_file.dysymtab_cmd;
+        cmd.ilocalsym = 0;
+        cmd.nlocalsym = nlocals + nstabs;
+        cmd.iextdefsym = nlocals + nstabs;
+        cmd.nextdefsym = nexports;
+        cmd.iundefsym = nlocals + nstabs + nexports;
+        cmd.nundefsym = nimports;
+    }
 }
 
 fn allocateSections(macho_file: *MachO) !void {
