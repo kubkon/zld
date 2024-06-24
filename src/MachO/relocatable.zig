@@ -6,7 +6,6 @@ pub fn flush(macho_file: *MachO) !void {
     try macho_file.sortSections();
     try macho_file.addAtomsToSections();
     try calcSectionSizes(macho_file);
-    try macho_file.data_in_code.updateSize(macho_file);
 
     {
         // For relocatable, we only ever need a single segment so create it now.
@@ -130,6 +129,7 @@ fn calcSectionSizes(macho_file: *MachO) !void {
         }
 
         macho_file.base.thread_pool.spawnWg(&wg, calcSymtabSizeWorker, .{macho_file});
+        macho_file.base.thread_pool.spawnWg(&wg, MachO.updateLinkeditSizeWorker, .{ macho_file, .data_in_code });
     }
 
     if (macho_file.has_errors.swap(false, .seq_cst)) return error.FlushFailed;

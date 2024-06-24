@@ -1952,7 +1952,7 @@ fn updateLazyBindSizeWorker(self: *MachO) void {
     };
 }
 
-fn updateLinkeditSizeWorker(self: *MachO, tag: enum {
+pub fn updateLinkeditSizeWorker(self: *MachO, tag: enum {
     rebase,
     bind,
     weak_bind,
