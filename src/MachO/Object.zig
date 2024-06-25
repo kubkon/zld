@@ -33,6 +33,7 @@ data_in_code: std.ArrayListUnmanaged(macho.data_in_code_entry) = .{},
 alive: bool = true,
 hidden: bool = false,
 
+compact_unwind_ctx: CompactUnwindCtx = .{},
 output_symtab_ctx: MachO.SymtabCtx = .{},
 
 pub fn deinit(self: *Object, allocator: Allocator) void {
@@ -1805,6 +1806,84 @@ pub fn writeAtomsRelocatable(self: *Object, macho_file: *MachO) !void {
     }
 }
 
+pub fn writeCompactUnwindRelocatable(self: *Object, macho_file: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    const addReloc = struct {
+        fn addReloc(offset: u32, cpu_arch: std.Target.Cpu.Arch) !macho.relocation_info {
+            return .{
+                .r_address = math.cast(i32, offset) orelse return error.Overflow,
+                .r_symbolnum = 0,
+                .r_pcrel = 0,
+                .r_length = 3,
+                .r_extern = 0,
+                .r_type = switch (cpu_arch) {
+                    .aarch64 => @intFromEnum(macho.reloc_type_arm64.ARM64_RELOC_UNSIGNED),
+                    .x86_64 => @intFromEnum(macho.reloc_type_x86_64.X86_64_RELOC_UNSIGNED),
+                    else => unreachable,
+                },
+            };
+        }
+    }.addReloc;
+
+    const nsect = macho_file.unwind_info_sect_index.?;
+    const buffer = macho_file.sections.items(.out)[nsect].items;
+    const relocs = macho_file.sections.items(.relocs)[nsect].items;
+
+    var rec_index: u32 = self.compact_unwind_ctx.rec_index;
+    var reloc_index: u32 = self.compact_unwind_ctx.reloc_index;
+
+    for (self.unwind_records_indexes.items) |irec| {
+        const rec = self.getUnwindRecord(irec);
+        if (!rec.alive) continue;
+
+        var out: macho.compact_unwind_entry = .{
+            .rangeStart = 0,
+            .rangeLength = rec.length,
+            .compactUnwindEncoding = rec.enc.enc,
+            .personalityFunction = 0,
+            .lsda = 0,
+        };
+        defer rec_index += 1;
+
+        const offset = rec_index * @sizeOf(macho.compact_unwind_entry);
+
+        {
+            // Function address
+            const atom = rec.getAtom(macho_file);
+            const addr = rec.getAtomAddress(macho_file);
+            out.rangeStart = addr;
+            var reloc = try addReloc(offset, macho_file.options.cpu_arch.?);
+            reloc.r_symbolnum = atom.out_n_sect + 1;
+            relocs[reloc_index] = reloc;
+            reloc_index += 1;
+        }
+
+        // Personality function
+        if (rec.getPersonality(macho_file)) |sym| {
+            const r_symbolnum = math.cast(u24, sym.getOutputSymtabIndex(macho_file).?) orelse return error.Overflow;
+            var reloc = try addReloc(offset + 16, macho_file.options.cpu_arch.?);
+            reloc.r_symbolnum = r_symbolnum;
+            reloc.r_extern = 1;
+            relocs[reloc_index] = reloc;
+            reloc_index += 1;
+        }
+
+        // LSDA address
+        if (rec.getLsdaAtom(macho_file)) |atom| {
+            const addr = rec.getLsdaAddress(macho_file);
+            out.lsda = addr;
+            var reloc = try addReloc(offset + 24, macho_file.options.cpu_arch.?);
+            reloc.r_symbolnum = atom.out_n_sect + 1;
+            relocs[reloc_index] = reloc;
+            reloc_index += 1;
+        }
+
+        @memcpy(buffer[offset..][0..@sizeOf(macho.compact_unwind_entry)], mem.asBytes(&out));
+    }
+}
+
 pub fn writeSymtab(self: Object, macho_file: *MachO) void {
     const tracy = trace(@src());
     defer tracy.end();
@@ -2576,6 +2655,13 @@ const CompileUnit = struct {
     fn getTuName(cu: CompileUnit, object: *const Object) [:0]const u8 {
         return object.getString(cu.tu_name);
     }
+};
+
+const CompactUnwindCtx = struct {
+    rec_index: u32 = 0,
+    rec_count: u32 = 0,
+    reloc_index: u32 = 0,
+    reloc_count: u32 = 0,
 };
 
 const x86_64 = struct {

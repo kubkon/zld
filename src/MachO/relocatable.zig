@@ -46,7 +46,6 @@ pub fn flush(macho_file: *MachO) !void {
     state_log.debug("{}", .{macho_file.dumpState()});
 
     try writeSections(macho_file);
-    try writeCompactUnwind(macho_file);
     sortRelocs(macho_file);
     try writeSectionsToFile(macho_file);
 
@@ -175,15 +174,19 @@ fn calcCompactUnwindSizeWorker(macho_file: *MachO) void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    var size: u32 = 0;
+    var nrec: u32 = 0;
     var nreloc: u32 = 0;
 
     for (macho_file.objects.items) |index| {
         const object = macho_file.getFile(index).?.object;
+        object.compact_unwind_ctx.rec_index = nrec;
+        object.compact_unwind_ctx.reloc_index = nreloc;
+
         for (object.unwind_records_indexes.items) |irec| {
             const rec = object.getUnwindRecord(irec);
             if (!rec.alive) continue;
-            size += @sizeOf(macho.compact_unwind_entry);
+
+            nrec += 1;
             nreloc += 1;
             if (rec.getPersonality(macho_file)) |_| {
                 nreloc += 1;
@@ -192,10 +195,13 @@ fn calcCompactUnwindSizeWorker(macho_file: *MachO) void {
                 nreloc += 1;
             }
         }
+
+        object.compact_unwind_ctx.rec_count = nrec - object.compact_unwind_ctx.rec_index;
+        object.compact_unwind_ctx.reloc_count = nreloc - object.compact_unwind_ctx.reloc_index;
     }
 
     const sect = &macho_file.sections.items(.header)[macho_file.unwind_info_sect_index.?];
-    sect.size = size;
+    sect.size = nrec * @sizeOf(macho.compact_unwind_entry);
     sect.nreloc = nreloc;
     sect.@"align" = 3;
 }
@@ -358,6 +364,15 @@ fn writeSections(macho_file: *MachO) !void {
         if (macho_file.eh_frame_sect_index) |_| {
             macho_file.base.thread_pool.spawnWg(&wg, writeEhFrameWorker, .{macho_file});
         }
+
+        if (macho_file.unwind_info_sect_index) |_| {
+            for (macho_file.objects.items) |index| {
+                macho_file.base.thread_pool.spawnWg(&wg, writeCompactUnwindWorker, .{
+                    macho_file,
+                    macho_file.getFile(index).?.object,
+                });
+            }
+        }
     }
 
     if (macho_file.has_errors.swap(false, .seq_cst)) return error.FlushFailed;
@@ -391,83 +406,13 @@ fn writeSectionsToFile(macho_file: *MachO) !void {
     }
 }
 
-fn writeCompactUnwind(macho_file: *MachO) !void {
-    const sect_index = macho_file.unwind_info_sect_index orelse return;
-    const header = macho_file.sections.items(.header)[sect_index];
-
-    // TODO temp hack
-    var buffer = macho_file.sections.items(.out)[sect_index];
-    buffer.clearRetainingCapacity();
-    var relocs = macho_file.sections.items(.relocs)[sect_index];
-    relocs.clearRetainingCapacity();
-
-    const addReloc = struct {
-        fn addReloc(offset: i32, cpu_arch: std.Target.Cpu.Arch) macho.relocation_info {
-            return .{
-                .r_address = offset,
-                .r_symbolnum = 0,
-                .r_pcrel = 0,
-                .r_length = 3,
-                .r_extern = 0,
-                .r_type = switch (cpu_arch) {
-                    .aarch64 => @intFromEnum(macho.reloc_type_arm64.ARM64_RELOC_UNSIGNED),
-                    .x86_64 => @intFromEnum(macho.reloc_type_x86_64.X86_64_RELOC_UNSIGNED),
-                    else => unreachable,
-                },
-            };
-        }
-    }.addReloc;
-
-    var offset: i32 = 0;
-    for (macho_file.objects.items) |index| {
-        const object = macho_file.getFile(index).?.object;
-        for (object.unwind_records_indexes.items) |irec| {
-            const rec = object.getUnwindRecord(irec);
-            if (!rec.alive) continue;
-
-            var out: macho.compact_unwind_entry = .{
-                .rangeStart = 0,
-                .rangeLength = rec.length,
-                .compactUnwindEncoding = rec.enc.enc,
-                .personalityFunction = 0,
-                .lsda = 0,
-            };
-
-            {
-                // Function address
-                const atom = rec.getAtom(macho_file);
-                const addr = rec.getAtomAddress(macho_file);
-                out.rangeStart = addr;
-                var reloc = addReloc(offset, macho_file.options.cpu_arch.?);
-                reloc.r_symbolnum = atom.out_n_sect + 1;
-                relocs.appendAssumeCapacity(reloc);
-            }
-
-            // Personality function
-            if (rec.getPersonality(macho_file)) |sym| {
-                const r_symbolnum = math.cast(u24, sym.getOutputSymtabIndex(macho_file).?) orelse return error.Overflow;
-                var reloc = addReloc(offset + 16, macho_file.options.cpu_arch.?);
-                reloc.r_symbolnum = r_symbolnum;
-                reloc.r_extern = 1;
-                relocs.appendAssumeCapacity(reloc);
-            }
-
-            // LSDA address
-            if (rec.getLsdaAtom(macho_file)) |atom| {
-                const addr = rec.getLsdaAddress(macho_file);
-                out.lsda = addr;
-                var reloc = addReloc(offset + 24, macho_file.options.cpu_arch.?);
-                reloc.r_symbolnum = atom.out_n_sect + 1;
-                relocs.appendAssumeCapacity(reloc);
-            }
-
-            buffer.appendSliceAssumeCapacity(mem.asBytes(&out));
-            offset += @sizeOf(macho.compact_unwind_entry);
-        }
-    }
-
-    assert(buffer.items.len == header.size);
-    assert(relocs.items.len == header.nreloc);
+fn writeCompactUnwindWorker(macho_file: *MachO, object: *Object) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+    object.writeCompactUnwindRelocatable(macho_file) catch |err| {
+        macho_file.base.fatal("failed to write '__LD,__eh_frame' section: {s}", .{@errorName(err)});
+        _ = macho_file.has_errors.swap(true, .seq_cst);
+    };
 }
 
 fn writeEhFrameWorker(macho_file: *MachO) void {
