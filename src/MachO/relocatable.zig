@@ -48,8 +48,6 @@ pub fn flush(macho_file: *MachO) !void {
     try writeSections(macho_file);
     sortRelocs(macho_file);
     try writeSectionsToFile(macho_file);
-
-    try writeDataInCode(macho_file);
     try writeSymtab(macho_file);
 
     const ncmds, const sizeofcmds = try writeLoadCommands(macho_file);
@@ -397,11 +395,14 @@ fn sortRelocs(macho_file: *MachO) void {
 fn writeSectionsToFile(macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
+
     const slice = macho_file.sections.slice();
     for (slice.items(.header), slice.items(.out), slice.items(.relocs)) |header, out, relocs| {
         try macho_file.base.file.pwriteAll(out.items, header.offset);
         try macho_file.base.file.pwriteAll(mem.sliceAsBytes(relocs.items), header.reloff);
     }
+
+    try macho_file.writeDataInCode();
 }
 
 fn writeCompactUnwindWorker(macho_file: *MachO, object: *Object) void {
@@ -421,15 +422,6 @@ fn writeEhFrameWorker(macho_file: *MachO) void {
         macho_file.base.fatal("failed to write '__TEXT,__eh_frame' section: {s}", .{@errorName(err)});
         _ = macho_file.has_errors.swap(true, .seq_cst);
     };
-}
-
-/// TODO just a temp
-fn writeDataInCode(macho_file: *MachO) !void {
-    const cmd = macho_file.data_in_code_cmd;
-    try macho_file.base.file.pwriteAll(
-        mem.sliceAsBytes(macho_file.data_in_code.entries.items),
-        cmd.dataoff,
-    );
 }
 
 /// TODO just a temp
