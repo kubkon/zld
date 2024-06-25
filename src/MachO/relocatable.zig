@@ -174,30 +174,28 @@ fn calcCompactUnwindSizeWorker(macho_file: *MachO) void {
     const tracy = trace(@src());
     defer tracy.end();
 
+    var wg: WaitGroup = .{};
+    {
+        wg.reset();
+        defer wg.wait();
+
+        for (macho_file.objects.items) |index| {
+            macho_file.base.thread_pool.spawnWg(&wg, Object.calcCompactUnwindSizeRelocatable, .{
+                macho_file.getFile(index).?.object,
+                macho_file,
+            });
+        }
+    }
+
     var nrec: u32 = 0;
     var nreloc: u32 = 0;
 
     for (macho_file.objects.items) |index| {
-        const object = macho_file.getFile(index).?.object;
-        object.compact_unwind_ctx.rec_index = nrec;
-        object.compact_unwind_ctx.reloc_index = nreloc;
-
-        for (object.unwind_records_indexes.items) |irec| {
-            const rec = object.getUnwindRecord(irec);
-            if (!rec.alive) continue;
-
-            nrec += 1;
-            nreloc += 1;
-            if (rec.getPersonality(macho_file)) |_| {
-                nreloc += 1;
-            }
-            if (rec.getLsdaAtom(macho_file)) |_| {
-                nreloc += 1;
-            }
-        }
-
-        object.compact_unwind_ctx.rec_count = nrec - object.compact_unwind_ctx.rec_index;
-        object.compact_unwind_ctx.reloc_count = nreloc - object.compact_unwind_ctx.reloc_index;
+        const ctx = &macho_file.getFile(index).?.object.compact_unwind_ctx;
+        ctx.rec_index = nrec;
+        ctx.reloc_index = nreloc;
+        nrec += ctx.rec_count;
+        nreloc += ctx.reloc_count;
     }
 
     const sect = &macho_file.sections.items(.header)[macho_file.unwind_info_sect_index.?];

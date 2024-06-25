@@ -1806,6 +1806,27 @@ pub fn writeAtomsRelocatable(self: *Object, macho_file: *MachO) !void {
     }
 }
 
+pub fn calcCompactUnwindSizeRelocatable(self: *Object, macho_file: *MachO) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    const ctx = &self.compact_unwind_ctx;
+
+    for (self.unwind_records_indexes.items) |irec| {
+        const rec = self.getUnwindRecord(irec);
+        if (!rec.alive) continue;
+
+        ctx.rec_count += 1;
+        ctx.reloc_count += 1;
+        if (rec.getPersonality(macho_file)) |_| {
+            ctx.reloc_count += 1;
+        }
+        if (rec.getLsdaAtom(macho_file)) |_| {
+            ctx.reloc_count += 1;
+        }
+    }
+}
+
 pub fn writeCompactUnwindRelocatable(self: *Object, macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
