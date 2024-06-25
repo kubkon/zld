@@ -383,12 +383,26 @@ fn writeAtomsWorker(macho_file: *MachO, object: *Object) void {
     };
 }
 
-// TODO in parallel
 fn sortRelocs(macho_file: *MachO) void {
     const tracy = trace(@src());
     defer tracy.end();
-    for (macho_file.sections.items(.relocs)) |*relocs| {
-        mem.sort(macho.relocation_info, relocs.items, {}, sortReloc);
+
+    const worker = struct {
+        fn worker(relocs: []macho.relocation_info) void {
+            const tr = trace(@src());
+            defer tr.end();
+            mem.sort(macho.relocation_info, relocs, {}, sortReloc);
+        }
+    }.worker;
+
+    var wg: WaitGroup = .{};
+    {
+        wg.reset();
+        defer wg.wait();
+
+        for (macho_file.sections.items(.relocs)) |*relocs| {
+            macho_file.base.thread_pool.spawnWg(&wg, worker, .{relocs.items});
+        }
     }
 }
 
