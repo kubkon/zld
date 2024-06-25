@@ -48,7 +48,6 @@ pub fn flush(macho_file: *MachO) !void {
     try writeSections(macho_file);
     sortRelocs(macho_file);
     try writeSectionsToFile(macho_file);
-    try writeSymtab(macho_file);
 
     const ncmds, const sizeofcmds = try writeLoadCommands(macho_file);
     try writeHeader(macho_file, ncmds, sizeofcmds);
@@ -233,7 +232,7 @@ fn calcSymtabSizeWorker(macho_file: *MachO) void {
         wg.reset();
         defer wg.wait();
         for (macho_file.objects.items) |index| {
-            macho_file.base.thread_pool.spawnWg(&wg, MachO.calcSymtabSizeFileWorker, .{ macho_file, macho_file.getFile(index).? });
+            macho_file.base.thread_pool.spawnWg(&wg, File.calcSymtabSize, .{ macho_file.getFile(index).?, macho_file });
         }
     }
 
@@ -369,6 +368,8 @@ fn writeSections(macho_file: *MachO) !void {
                 });
             }
         }
+
+        macho_file.base.thread_pool.spawnWg(&wg, writeSymtabWorker, .{macho_file});
     }
 
     if (macho_file.has_errors.swap(false, .seq_cst)) return error.FlushFailed;
@@ -417,6 +418,8 @@ fn writeSectionsToFile(macho_file: *MachO) !void {
     }
 
     try macho_file.writeDataInCode();
+    try macho_file.base.file.pwriteAll(mem.sliceAsBytes(macho_file.symtab.items), macho_file.symtab_cmd.symoff);
+    try macho_file.base.file.pwriteAll(macho_file.strtab.items, macho_file.symtab_cmd.stroff);
 }
 
 fn writeCompactUnwindWorker(macho_file: *MachO, object: *Object) void {
@@ -438,29 +441,36 @@ fn writeEhFrameWorker(macho_file: *MachO) void {
     };
 }
 
-/// TODO just a temp
-fn writeSymtab(macho_file: *MachO) !void {
+fn writeSymtabWorker(macho_file: *MachO) void {
     const tracy = trace(@src());
     defer tracy.end();
-    const gpa = macho_file.base.allocator;
-    const cmd = macho_file.symtab_cmd;
 
-    try macho_file.symtab.resize(gpa, cmd.nsyms);
-    try macho_file.strtab.resize(gpa, cmd.strsize);
-    macho_file.strtab.items[0] = 0;
+    const doWork = struct {
+        fn doWork(mfile: *MachO) !void {
+            const tr = trace(@src());
+            defer tr.end();
 
-    for (macho_file.objects.items) |index| {
-        macho_file.getFile(index).?.writeSymtab(macho_file);
-    }
-    for (macho_file.dylibs.items) |index| {
-        macho_file.getFile(index).?.writeSymtab(macho_file);
-    }
-    if (macho_file.getInternalObject()) |internal| {
-        internal.writeSymtab(macho_file);
-    }
+            const gpa = mfile.base.allocator;
+            const cmd = mfile.symtab_cmd;
+            try mfile.symtab.resize(gpa, cmd.nsyms);
+            try mfile.strtab.resize(gpa, cmd.strsize);
+            mfile.strtab.items[0] = 0;
 
-    try macho_file.base.file.pwriteAll(mem.sliceAsBytes(macho_file.symtab.items), cmd.symoff);
-    try macho_file.base.file.pwriteAll(macho_file.strtab.items, cmd.stroff);
+            var wg: WaitGroup = .{};
+            {
+                wg.reset();
+                defer wg.wait();
+                for (mfile.objects.items) |index| {
+                    mfile.base.thread_pool.spawnWg(&wg, Object.writeSymtab, .{ mfile.getFile(index).?.object.*, mfile });
+                }
+            }
+        }
+    }.doWork;
+
+    doWork(macho_file) catch |err| {
+        macho_file.base.fatal("failed to write symtab: {s}", .{@errorName(err)});
+        _ = macho_file.has_errors.swap(true, .seq_cst);
+    };
 }
 
 fn writeLoadCommands(macho_file: *MachO) !struct { usize, usize } {

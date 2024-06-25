@@ -2189,7 +2189,7 @@ fn calcSymtabSizeImpl(self: *MachO) !void {
         wg.reset();
         defer wg.wait();
         for (files.items) |index| {
-            self.base.thread_pool.spawnWg(&wg, calcSymtabSizeFileWorker, .{ self, self.getFile(index).? });
+            self.base.thread_pool.spawnWg(&wg, File.calcSymtabSize, .{ self.getFile(index).?, self });
         }
     }
 
@@ -2252,26 +2252,11 @@ fn calcSymtabSizeImpl(self: *MachO) !void {
         try self.symtab.resize(gpa, cmd.nsyms);
         try self.strtab.resize(gpa, cmd.strsize);
         self.strtab.items[0] = 0;
-        for (self.objects.items) |index| {
-            self.base.thread_pool.spawnWg(&wg, writeSymtabWorker, .{ self, self.getFile(index).? });
-        }
-        for (self.dylibs.items) |index| {
-            self.base.thread_pool.spawnWg(&wg, writeSymtabWorker, .{ self, self.getFile(index).? });
-        }
-        if (self.getInternalObject()) |internal| {
-            self.base.thread_pool.spawnWg(&wg, writeSymtabWorker, .{ self, internal.asFile() });
+
+        for (files.items) |index| {
+            self.base.thread_pool.spawnWg(&wg, File.writeSymtab, .{ self.getFile(index).?, self });
         }
     }
-}
-
-pub fn calcSymtabSizeFileWorker(self: *MachO, file: File) void {
-    file.calcSymtabSize(self);
-}
-
-fn writeSymtabWorker(self: *MachO, file: File) void {
-    const tracy = trace(@src());
-    defer tracy.end();
-    file.writeSymtab(self);
 }
 
 fn writeIndsymtab(self: *MachO) !void {
