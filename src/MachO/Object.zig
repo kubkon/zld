@@ -566,10 +566,11 @@ pub fn resolveLiterals(self: *Object, lp: *MachO.LiteralPool, macho_file: *MachO
                 const atom_data = data[atom.off..][0..atom.size];
                 const res = try lp.insert(gpa, header.type(), atom_data);
                 if (!res.found_existing) {
+                    const name = try self.addString(gpa, "ltmp0");
                     const nlist_index: u32 = @intCast(try self.symtab.addOne(gpa));
                     self.symtab.set(nlist_index, .{
                         .nlist = .{
-                            .n_strx = 0,
+                            .n_strx = name.pos,
                             .n_type = macho.N_SECT,
                             .n_sect = @intCast(atom.n_sect + 1),
                             .n_desc = 0,
@@ -580,6 +581,7 @@ pub fn resolveLiterals(self: *Object, lp: *MachO.LiteralPool, macho_file: *MachO
                     });
                     const sym_index = try self.addSymbol(gpa);
                     const sym = &self.symbols.items[sym_index];
+                    sym.name = name;
                     sym.atom_ref = .{ .index = sub.atom, .file = self.index };
                     sym.nlist_idx = nlist_index;
                     sym.extra = try self.addSymbolExtra(gpa, .{});
@@ -620,10 +622,11 @@ pub fn resolveLiterals(self: *Object, lp: *MachO.LiteralPool, macho_file: *MachO
                 const res = try lp.insert(gpa, header.type(), buffer.items[addend..]);
                 buffer.clearRetainingCapacity();
                 if (!res.found_existing) {
+                    const name = try self.addString(gpa, "ltmp0");
                     const nlist_index: u32 = @intCast(try self.symtab.addOne(gpa));
                     self.symtab.set(nlist_index, .{
                         .nlist = .{
-                            .n_strx = 0,
+                            .n_strx = name.pos,
                             .n_type = macho.N_SECT,
                             .n_sect = @intCast(atom.n_sect + 1),
                             .n_desc = 0,
@@ -634,6 +637,7 @@ pub fn resolveLiterals(self: *Object, lp: *MachO.LiteralPool, macho_file: *MachO
                     });
                     const sym_index = try self.addSymbol(gpa);
                     const sym = &self.symbols.items[sym_index];
+                    sym.name = name;
                     sym.atom_ref = .{ .index = sub.atom, .file = self.index };
                     sym.nlist_idx = nlist_index;
                     sym.extra = try self.addSymbolExtra(gpa, .{});
@@ -674,10 +678,11 @@ pub fn dedupLiterals(self: *Object, lp: MachO.LiteralPool, macho_file: *MachO) !
                         _ = lp_atom.alignment.fetchMax(target.alignment.load(.seq_cst), .seq_cst);
                         _ = target.alive.swap(false, .seq_cst);
 
+                        const name = try self.addString(gpa, "ltmp0");
                         const nlist_index: u32 = @intCast(try self.symtab.addOne(gpa));
                         self.symtab.set(nlist_index, .{
                             .nlist = .{
-                                .n_strx = 0,
+                                .n_strx = name.pos,
                                 .n_type = macho.N_SECT,
                                 .n_sect = 0, // TODO do we need this?
                                 .n_desc = 0,
@@ -688,6 +693,7 @@ pub fn dedupLiterals(self: *Object, lp: MachO.LiteralPool, macho_file: *MachO) !
                         });
                         const sym_index = try self.addSymbol(gpa);
                         const sym = &self.symbols.items[sym_index];
+                        sym.name = name;
                         sym.atom_ref = lp_atom_ref;
                         sym.nlist_idx = nlist_index;
                         sym.extra = try self.addSymbolExtra(gpa, .{});
