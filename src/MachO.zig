@@ -252,7 +252,7 @@ pub fn flush(self: *MachO) !void {
 
     try self.parseDependentDylibs(arena, lib_dirs.items, framework_dirs.items);
 
-    {
+    if (!self.options.relocatable) {
         const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
         self.files.set(index, .{ .internal = .{ .index = index } });
         self.internal_object_index = index;
