@@ -699,8 +699,6 @@ pub fn dedupLiterals(self: *Object, lp: MachO.LiteralPool, macho_file: *MachO) !
                         sym.extra = try self.addSymbolExtra(gpa, .{});
                         try self.globals.append(gpa, 0);
 
-                        rel.mutex.lock();
-                        defer rel.mutex.unlock();
                         rel.target = sym_index;
                         rel.tag = .@"extern";
                     }

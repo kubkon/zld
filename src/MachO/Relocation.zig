@@ -9,7 +9,6 @@ meta: packed struct {
     length: u2,
     symbolnum: u24,
 },
-mutex: std.Thread.Mutex = .{},
 
 pub fn getTargetSymbolRef(rel: Relocation, atom: Atom, macho_file: *MachO) MachO.Ref {
     assert(rel.tag == .@"extern");
