@@ -433,8 +433,10 @@ fn initCstringLiterals(self: *Object, allocator: Allocator, file: File.Handle, m
         const data = try self.getSectionData(allocator, @intCast(n_sect), file);
         defer allocator.free(data);
 
+        var count: u32 = 0;
         var start: u32 = 0;
         while (start < data.len) {
+            defer count += 1;
             var end = start;
             while (end < data.len - 1 and data[end] != 0) : (end += 1) {}
             if (data[end] != 0) {
@@ -447,8 +449,12 @@ fn initCstringLiterals(self: *Object, allocator: Allocator, file: File.Handle, m
             }
             end += 1;
 
+            const name = try std.fmt.allocPrintZ(allocator, "l._str{d}", .{count});
+            defer allocator.free(name);
+            const name_str = try self.addString(allocator, name);
+
             const atom_index = try self.addAtom(allocator, .{
-                .name = .{},
+                .name = name_str,
                 .n_sect = @intCast(n_sect),
                 .off = start,
                 .size = end - start,
@@ -458,6 +464,20 @@ fn initCstringLiterals(self: *Object, allocator: Allocator, file: File.Handle, m
             try slice.items(.subsections)[n_sect].append(allocator, .{
                 .atom = atom_index,
                 .off = start,
+            });
+
+            const atom = self.getAtom(atom_index).?;
+            const nlist_index: u32 = @intCast(try self.symtab.addOne(allocator));
+            self.symtab.set(nlist_index, .{
+                .nlist = .{
+                    .n_strx = name_str.pos,
+                    .n_type = macho.N_SECT,
+                    .n_sect = @intCast(atom.n_sect + 1),
+                    .n_desc = 0,
+                    .n_value = atom.getInputAddress(macho_file),
+                },
+                .size = atom.size,
+                .atom = atom_index,
             });
 
             start = end;
@@ -490,9 +510,17 @@ fn initFixedSizeLiterals(self: *Object, allocator: Allocator, macho_file: *MachO
         }
 
         var pos: u32 = 0;
-        while (pos < sect.size) : (pos += rec_size) {
+        var count: u32 = 0;
+        while (pos < sect.size) : ({
+            pos += rec_size;
+            count += 1;
+        }) {
+            const name = try std.fmt.allocPrintZ(allocator, "ltmp{d}", .{count});
+            defer allocator.free(name);
+            const name_str = try self.addString(allocator, name);
+
             const atom_index = try self.addAtom(allocator, .{
-                .name = .{},
+                .name = name_str,
                 .n_sect = @intCast(n_sect),
                 .off = pos,
                 .size = rec_size,
@@ -502,6 +530,20 @@ fn initFixedSizeLiterals(self: *Object, allocator: Allocator, macho_file: *MachO
             try slice.items(.subsections)[n_sect].append(allocator, .{
                 .atom = atom_index,
                 .off = pos,
+            });
+
+            const atom = self.getAtom(atom_index).?;
+            const nlist_index: u32 = @intCast(try self.symtab.addOne(allocator));
+            self.symtab.set(nlist_index, .{
+                .nlist = .{
+                    .n_strx = name_str.pos,
+                    .n_type = macho.N_SECT,
+                    .n_sect = @intCast(atom.n_sect + 1),
+                    .n_desc = 0,
+                    .n_value = atom.getInputAddress(macho_file),
+                },
+                .size = atom.size,
+                .atom = atom_index,
             });
         }
     }
@@ -529,8 +571,13 @@ fn initPointerLiterals(self: *Object, allocator: Allocator, macho_file: *MachO) 
 
         for (0..num_ptrs) |i| {
             const pos: u32 = @as(u32, @intCast(i)) * rec_size;
+
+            const name = try std.fmt.allocPrintZ(allocator, "lptr{d}", .{i});
+            defer allocator.free(name);
+            const name_str = try self.addString(allocator, name);
+
             const atom_index = try self.addAtom(allocator, .{
-                .name = .{},
+                .name = name_str,
                 .n_sect = @intCast(n_sect),
                 .off = pos,
                 .size = rec_size,
@@ -540,6 +587,20 @@ fn initPointerLiterals(self: *Object, allocator: Allocator, macho_file: *MachO) 
             try slice.items(.subsections)[n_sect].append(allocator, .{
                 .atom = atom_index,
                 .off = pos,
+            });
+
+            const atom = self.getAtom(atom_index).?;
+            const nlist_index: u32 = @intCast(try self.symtab.addOne(allocator));
+            self.symtab.set(nlist_index, .{
+                .nlist = .{
+                    .n_strx = name_str.pos,
+                    .n_type = macho.N_SECT,
+                    .n_sect = @intCast(atom.n_sect + 1),
+                    .n_desc = 0,
+                    .n_value = atom.getInputAddress(macho_file),
+                },
+                .size = atom.size,
+                .atom = atom_index,
             });
         }
     }
@@ -2731,8 +2792,9 @@ const x86_64 = struct {
                 .X86_64_RELOC_SIGNED_4 => 4,
                 else => 0,
             };
+            var is_extern = rel.r_extern == 1;
 
-            const target: u32 = if (rel.r_extern == 0) blk: {
+            const target: u32 = if (!is_extern) blk: {
                 const nsect = rel.r_symbolnum - 1;
                 const taddr: i64 = if (rel.r_pcrel == 1)
                     @as(i64, @intCast(sect.addr)) + rel.r_address + addend + 4
@@ -2744,7 +2806,17 @@ const x86_64 = struct {
                     });
                     return error.ParseFailed;
                 };
-                addend = taddr - @as(i64, @intCast(self.getAtom(target).?.getInputAddress(macho_file)));
+                const target_atom = self.getAtom(target).?;
+                addend = taddr - @as(i64, @intCast(target_atom.getInputAddress(macho_file)));
+                const isec = target_atom.getInputSection(macho_file);
+                if (isCstringLiteral(isec) or isFixedSizeLiteral(isec) or isPtrLiteral(isec)) {
+                    // TODO might be too naive
+                    const target_nlist_idx: u32 = for (self.symtab.items(.atom), 0..) |atom_index, nlist_idx| {
+                        if (atom_index == target) break @intCast(nlist_idx);
+                    } else 0;
+                    is_extern = true;
+                    break :blk target_nlist_idx;
+                }
                 break :blk target;
             } else rel.r_symbolnum;
 
@@ -2760,7 +2832,7 @@ const x86_64 = struct {
                 break :blk true;
             } else false;
 
-            const @"type": Relocation.Type = validateRelocType(rel, rel_type) catch |err| {
+            const @"type": Relocation.Type = validateRelocType(rel, rel_type, is_extern) catch |err| {
                 switch (err) {
                     error.Pcrel => macho_file.base.fatal(
                         "{}: {s},{s}: 0x{x}: PC-relative {s} relocation",
@@ -2783,7 +2855,7 @@ const x86_64 = struct {
             };
 
             out.appendAssumeCapacity(.{
-                .tag = if (rel.r_extern == 1) .@"extern" else .local,
+                .tag = if (is_extern) .@"extern" else .local,
                 .offset = @as(u32, @intCast(rel.r_address)),
                 .target = target,
                 .addend = addend,
@@ -2798,7 +2870,7 @@ const x86_64 = struct {
         }
     }
 
-    fn validateRelocType(rel: macho.relocation_info, rel_type: macho.reloc_type_x86_64) !Relocation.Type {
+    fn validateRelocType(rel: macho.relocation_info, rel_type: macho.reloc_type_x86_64, is_extern: bool) !Relocation.Type {
         switch (rel_type) {
             .X86_64_RELOC_UNSIGNED => {
                 if (rel.r_pcrel == 1) return error.Pcrel;
@@ -2818,7 +2890,7 @@ const x86_64 = struct {
             => {
                 if (rel.r_pcrel == 0) return error.NonPcrel;
                 if (rel.r_length != 2) return error.InvalidLength;
-                if (rel.r_extern == 0) return error.NonExtern;
+                if (!is_extern) return error.NonExtern;
                 return switch (rel_type) {
                     .X86_64_RELOC_BRANCH => .branch,
                     .X86_64_RELOC_GOT_LOAD => .got_load,
