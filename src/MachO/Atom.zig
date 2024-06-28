@@ -87,7 +87,6 @@ pub fn getCode(self: Atom, macho_file: *MachO, buffer: []u8) !void {
 }
 
 pub fn getRelocs(self: Atom, macho_file: *MachO) []const Relocation {
-    if (!self.flags.relocs) return &[0]Relocation{};
     const relocs = switch (self.getFile(macho_file)) {
         .dylib => unreachable,
         inline else => |x| x.sections.items(.relocs)[self.n_sect],
@@ -893,10 +892,6 @@ pub const Index = u32;
 pub const Flags = packed struct {
     /// Whether this atom has a range extension thunk.
     thunk: bool = false,
-
-    /// Whether this atom has any relocations.
-    /// TODO I think this is obsolete
-    relocs: bool = false,
 
     /// Whether this atom has any unwind records.
     /// TODO I think this is obsolete

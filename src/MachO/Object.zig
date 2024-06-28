@@ -682,7 +682,6 @@ pub fn dedupLiterals(self: *Object, lp: MachO.LiteralPool, macho_file: *MachO) v
     for (self.getAtoms()) |atom_index| {
         const atom = self.getAtom(atom_index) orelse continue;
         if (!atom.alive.load(.seq_cst)) continue;
-        if (!atom.flags.relocs) continue;
 
         const relocs = blk: {
             const extra = atom.getExtra(macho_file);
@@ -977,7 +976,6 @@ fn initRelocs(self: *Object, file: File.Handle, cpu_arch: std.Target.Cpu.Arch, m
 
             const rel_count = next_reloc - rel_index;
             atom.addExtra(.{ .rel_index = @intCast(rel_index), .rel_count = @intCast(rel_count) }, macho_file);
-            atom.flags.relocs = true;
         }
     }
 }

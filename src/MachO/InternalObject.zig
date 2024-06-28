@@ -318,7 +318,6 @@ fn addObjcSelrefsSection(self: *InternalObject, methname_sym_index: Symbol.Index
         },
     });
     atom.addExtra(.{ .rel_index = 0, .rel_count = 1 }, macho_file);
-    atom.flags.relocs = true;
 
     const sym_index = try self.addSymbol(gpa);
     const sym = &self.symbols.items[sym_index];
@@ -436,7 +435,6 @@ pub fn dedupLiterals(self: *InternalObject, lp: MachO.LiteralPool, macho_file: *
     for (self.getAtoms()) |atom_index| {
         const atom = self.getAtom(atom_index) orelse continue;
         if (!atom.alive.load(.seq_cst)) continue;
-        if (!atom.flags.relocs) continue;
 
         const relocs = blk: {
             const extra = atom.getExtra(macho_file);
