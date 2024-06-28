@@ -2734,12 +2734,8 @@ const x86_64 = struct {
                 addend = taddr - @as(i64, @intCast(target_atom.getInputAddress(macho_file)));
                 const isec = target_atom.getInputSection(macho_file);
                 if (isCstringLiteral(isec) or isFixedSizeLiteral(isec) or isPtrLiteral(isec)) {
-                    // TODO might be too naive
-                    const target_nlist_idx: u32 = for (self.symtab.items(.atom), 0..) |atom_index, nlist_idx| {
-                        if (atom_index == target) break @intCast(nlist_idx);
-                    } else 0;
                     is_extern = true;
-                    break :blk target_nlist_idx;
+                    break :blk target_atom.getExtra(macho_file).literal_symbol;
                 }
                 break :blk target;
             } else rel.r_symbolnum;
@@ -2926,12 +2922,8 @@ const aarch64 = struct {
                 addend = taddr - @as(i64, @intCast(target_atom.getInputAddress(macho_file)));
                 const isec = target_atom.getInputSection(macho_file);
                 if (isCstringLiteral(isec) or isFixedSizeLiteral(isec) or isPtrLiteral(isec)) {
-                    // TODO might be too naive
-                    const target_nlist_idx: u32 = for (self.symtab.items(.atom), 0..) |atom_index, nlist_idx| {
-                        if (atom_index == target) break @intCast(nlist_idx);
-                    } else 0;
                     is_extern = true;
-                    break :blk target_nlist_idx;
+                    break :blk target_atom.getExtra(macho_file).literal_symbol;
                 }
                 break :blk target;
             } else rel.r_symbolnum;
