@@ -96,10 +96,10 @@ pub fn getRelocs(self: Atom, macho_file: *MachO) []const Relocation {
 }
 
 pub fn getUnwindRecords(self: Atom, macho_file: *MachO) []const UnwindInfo.Record.Index {
-    if (!self.flags.unwind) return &[0]UnwindInfo.Record.Index{};
     const extra = self.getExtra(macho_file);
     return switch (self.getFile(macho_file)) {
-        .dylib, .internal => unreachable,
+        .dylib => unreachable,
+        .internal => &[0]UnwindInfo.Record.Index{},
         .object => |x| x.unwind_records_indexes.items[extra.unwind_index..][0..extra.unwind_count],
     };
 }
@@ -874,7 +874,7 @@ fn format2(
     });
     if (atom.flags.thunk) try writer.print(" : thunk({d})", .{atom.getExtra(macho_file).thunk});
     if (!atom.alive.load(.seq_cst)) try writer.writeAll(" : [*]");
-    if (atom.flags.unwind) {
+    if (atom.getUnwindRecords(macho_file).len > 0) {
         try writer.writeAll(" : unwind{ ");
         const extra = atom.getExtra(macho_file);
         for (atom.getUnwindRecords(macho_file), extra.unwind_index..) |index, i| {
@@ -892,10 +892,6 @@ pub const Index = u32;
 pub const Flags = packed struct {
     /// Whether this atom has a range extension thunk.
     thunk: bool = false,
-
-    /// Whether this atom has any unwind records.
-    /// TODO I think this is obsolete
-    unwind: bool = false,
 
     /// Whether this atom has LiteralPool entry.
     /// TODO I think this is obsolete

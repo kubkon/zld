@@ -1288,7 +1288,6 @@ fn parseUnwindRecords(self: *Object, allocator: Allocator, cpu_arch: std.Target.
 
         const atom = rec.getAtom(macho_file);
         atom.addExtra(.{ .unwind_index = start, .unwind_count = next_cu - start }, macho_file);
-        atom.flags.unwind = true;
     }
 }
 
