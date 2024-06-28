@@ -632,7 +632,6 @@ pub fn resolveLiterals(self: *Object, lp: *MachO.LiteralPool, macho_file: *MachO
                 if (!res.found_existing) {
                     res.ref.* = .{ .index = atom.getExtra(macho_file).literal_symbol, .file = self.index };
                 }
-                atom.flags.literal_pool = true;
                 atom.addExtra(.{ .literal_index = res.index }, macho_file);
             }
         } else if (isPtrLiteral(header)) {
@@ -668,7 +667,6 @@ pub fn resolveLiterals(self: *Object, lp: *MachO.LiteralPool, macho_file: *MachO
                 if (!res.found_existing) {
                     res.ref.* = .{ .index = atom.getExtra(macho_file).literal_symbol, .file = self.index };
                 }
-                atom.flags.literal_pool = true;
                 atom.addExtra(.{ .literal_index = res.index }, macho_file);
             }
         }
@@ -694,7 +692,9 @@ pub fn dedupLiterals(self: *Object, lp: MachO.LiteralPool, macho_file: *MachO) v
             if (target_sym_ref.getFile(macho_file) != null) {
                 const target_sym = target_sym_ref.getSymbol(macho_file).?;
                 if (target_sym.getAtom(macho_file)) |target_atom| {
-                    if (target_atom.getLiteralPoolIndex(macho_file)) |lp_index| {
+                    const isec = target_atom.getInputSection(macho_file);
+                    if (Object.isCstringLiteral(isec) or Object.isFixedSizeLiteral(isec) or Object.isPtrLiteral(isec)) {
+                        const lp_index = target_atom.getExtra(macho_file).literal_index;
                         const lp_sym = lp.getSymbol(lp_index, macho_file);
                         const lp_atom_ref = lp_sym.atom_ref;
                         if (target_atom.atom_index != lp_atom_ref.index or target_atom.file != lp_atom_ref.file) {

@@ -122,11 +122,6 @@ pub fn getThunk(self: Atom, macho_file: *MachO) *Thunk {
     return macho_file.getThunk(extra.thunk);
 }
 
-pub fn getLiteralPoolIndex(self: Atom, macho_file: *MachO) ?MachO.LiteralPool.Index {
-    if (!self.flags.literal_pool) return null;
-    return self.getExtra(macho_file).literal_index;
-}
-
 const AddExtraOpts = struct {
     thunk: ?u32 = null,
     rel_index: ?u32 = null,
@@ -892,10 +887,6 @@ pub const Index = u32;
 pub const Flags = packed struct {
     /// Whether this atom has a range extension thunk.
     thunk: bool = false,
-
-    /// Whether this atom has LiteralPool entry.
-    /// TODO I think this is obsolete
-    literal_pool: bool = false,
 };
 
 pub const Extra = struct {

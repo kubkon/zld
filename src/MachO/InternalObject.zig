@@ -423,7 +423,6 @@ pub fn resolveLiterals(self: *InternalObject, lp: *MachO.LiteralPool, macho_file
         if (!res.found_existing) {
             res.ref.* = .{ .index = atom.getExtra(macho_file).literal_symbol, .file = self.index };
         }
-        atom.flags.literal_pool = true;
         atom.addExtra(.{ .literal_index = res.index }, macho_file);
     }
 }
@@ -447,17 +446,17 @@ pub fn dedupLiterals(self: *InternalObject, lp: MachO.LiteralPool, macho_file: *
             if (target_sym_ref.getFile(macho_file) != null) {
                 const target_sym = target_sym_ref.getSymbol(macho_file).?;
                 if (target_sym.getAtom(macho_file)) |target_atom| {
-                    if (target_atom.getLiteralPoolIndex(macho_file)) |lp_index| {
-                        const lp_sym = lp.getSymbol(lp_index, macho_file);
-                        const lp_atom_ref = lp_sym.atom_ref;
-                        if (target_atom.atom_index != lp_atom_ref.index or target_atom.file != lp_atom_ref.file) {
-                            const lp_atom = lp_sym.getAtom(macho_file).?;
-                            _ = lp_atom.alignment.fetchMax(target_atom.alignment.load(.seq_cst), .seq_cst);
-                            _ = target_atom.alive.swap(false, .seq_cst);
-                            target_sym.mutex.lock();
-                            defer target_sym.mutex.unlock();
-                            target_sym.atom_ref = lp_atom_ref;
-                        }
+                    if (!Object.isPtrLiteral(target_atom.getInputSection(macho_file))) continue;
+                    const lp_index = target_atom.getExtra(macho_file).literal_index;
+                    const lp_sym = lp.getSymbol(lp_index, macho_file);
+                    const lp_atom_ref = lp_sym.atom_ref;
+                    if (target_atom.atom_index != lp_atom_ref.index or target_atom.file != lp_atom_ref.file) {
+                        const lp_atom = lp_sym.getAtom(macho_file).?;
+                        _ = lp_atom.alignment.fetchMax(target_atom.alignment.load(.seq_cst), .seq_cst);
+                        _ = target_atom.alive.swap(false, .seq_cst);
+                        target_sym.mutex.lock();
+                        defer target_sym.mutex.unlock();
+                        target_sym.atom_ref = lp_atom_ref;
                     }
                 }
             }
@@ -473,17 +472,17 @@ pub fn dedupLiterals(self: *InternalObject, lp: MachO.LiteralPool, macho_file: *
             inline else => |x| &x.symbols.items[extra.objc_selrefs],
         };
         if (tsym.getAtom(macho_file)) |atom| {
-            if (atom.getLiteralPoolIndex(macho_file)) |lp_index| {
-                const lp_sym = lp.getSymbol(lp_index, macho_file);
-                const lp_atom_ref = lp_sym.atom_ref;
-                if (atom.atom_index != lp_atom_ref.index or atom.file != lp_atom_ref.file) {
-                    const lp_atom = lp_sym.getAtom(macho_file).?;
-                    _ = lp_atom.alignment.fetchMax(atom.alignment.load(.seq_cst), .seq_cst);
-                    _ = atom.alive.swap(false, .seq_cst);
-                    tsym.mutex.lock();
-                    defer tsym.mutex.unlock();
-                    tsym.atom_ref = lp_atom_ref;
-                }
+            if (!Object.isPtrLiteral(atom.getInputSection(macho_file))) continue;
+            const lp_index = atom.getExtra(macho_file).literal_index;
+            const lp_sym = lp.getSymbol(lp_index, macho_file);
+            const lp_atom_ref = lp_sym.atom_ref;
+            if (atom.atom_index != lp_atom_ref.index or atom.file != lp_atom_ref.file) {
+                const lp_atom = lp_sym.getAtom(macho_file).?;
+                _ = lp_atom.alignment.fetchMax(atom.alignment.load(.seq_cst), .seq_cst);
+                _ = atom.alive.swap(false, .seq_cst);
+                tsym.mutex.lock();
+                defer tsym.mutex.unlock();
+                tsym.atom_ref = lp_atom_ref;
             }
         }
     }
