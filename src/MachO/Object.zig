@@ -2908,8 +2908,9 @@ const aarch64 = struct {
             }
 
             const rel_type: macho.reloc_type_arm64 = @enumFromInt(rel.r_type);
+            var is_extern = rel.r_extern == 1;
 
-            const target: u32 = if (rel.r_extern == 0) blk: {
+            const target: u32 = if (!is_extern) blk: {
                 const nsect = rel.r_symbolnum - 1;
                 const taddr: i64 = if (rel.r_pcrel == 1)
                     @as(i64, @intCast(sect.addr)) + rel.r_address + addend
@@ -2921,7 +2922,17 @@ const aarch64 = struct {
                     });
                     return error.ParseFailed;
                 };
-                addend = taddr - @as(i64, @intCast(self.getAtom(target).?.getInputAddress(macho_file)));
+                const target_atom = self.getAtom(target).?;
+                addend = taddr - @as(i64, @intCast(target_atom.getInputAddress(macho_file)));
+                const isec = target_atom.getInputSection(macho_file);
+                if (isCstringLiteral(isec) or isFixedSizeLiteral(isec) or isPtrLiteral(isec)) {
+                    // TODO might be too naive
+                    const target_nlist_idx: u32 = for (self.symtab.items(.atom), 0..) |atom_index, nlist_idx| {
+                        if (atom_index == target) break @intCast(nlist_idx);
+                    } else 0;
+                    is_extern = true;
+                    break :blk target_nlist_idx;
+                }
                 break :blk target;
             } else rel.r_symbolnum;
 
@@ -2937,7 +2948,7 @@ const aarch64 = struct {
                 break :blk true;
             } else false;
 
-            const @"type": Relocation.Type = validateRelocType(rel, rel_type) catch |err| {
+            const @"type": Relocation.Type = validateRelocType(rel, rel_type, is_extern) catch |err| {
                 switch (err) {
                     error.Pcrel => macho_file.base.fatal(
                         "{}: {s},{s}: 0x{x}: PC-relative {s} relocation",
@@ -2960,7 +2971,7 @@ const aarch64 = struct {
             };
 
             out.appendAssumeCapacity(.{
-                .tag = if (rel.r_extern == 1) .@"extern" else .local,
+                .tag = if (is_extern) .@"extern" else .local,
                 .offset = @as(u32, @intCast(rel.r_address)),
                 .target = target,
                 .addend = addend,
@@ -2975,7 +2986,7 @@ const aarch64 = struct {
         }
     }
 
-    fn validateRelocType(rel: macho.relocation_info, rel_type: macho.reloc_type_arm64) !Relocation.Type {
+    fn validateRelocType(rel: macho.relocation_info, rel_type: macho.reloc_type_arm64, is_extern: bool) !Relocation.Type {
         switch (rel_type) {
             .ARM64_RELOC_UNSIGNED => {
                 if (rel.r_pcrel == 1) return error.Pcrel;
@@ -2996,7 +3007,7 @@ const aarch64 = struct {
             => {
                 if (rel.r_pcrel == 0) return error.NonPcrel;
                 if (rel.r_length != 2) return error.InvalidLength;
-                if (rel.r_extern == 0) return error.NonExtern;
+                if (!is_extern) return error.NonExtern;
                 return switch (rel_type) {
                     .ARM64_RELOC_BRANCH26 => .branch,
                     .ARM64_RELOC_PAGE21 => .page,
@@ -3013,7 +3024,7 @@ const aarch64 = struct {
             => {
                 if (rel.r_pcrel == 1) return error.Pcrel;
                 if (rel.r_length != 2) return error.InvalidLength;
-                if (rel.r_extern == 0) return error.NonExtern;
+                if (!is_extern) return error.NonExtern;
                 return switch (rel_type) {
                     .ARM64_RELOC_PAGEOFF12 => .pageoff,
                     .ARM64_RELOC_GOT_LOAD_PAGEOFF12 => .got_load_pageoff,
