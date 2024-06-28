@@ -32,8 +32,6 @@ alive: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
 /// Specifies if the atom has been visited during garbage collection.
 visited: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
-flags: Flags = .{},
-
 extra: u32 = 0,
 
 pub fn getName(self: Atom, macho_file: *MachO) [:0]const u8 {
@@ -117,7 +115,6 @@ pub fn markUnwindRecordsDead(self: Atom, macho_file: *MachO) void {
 }
 
 pub fn getThunk(self: Atom, macho_file: *MachO) *Thunk {
-    assert(self.flags.thunk);
     const extra = self.getExtra(macho_file);
     return macho_file.getThunk(extra.thunk);
 }
@@ -863,11 +860,11 @@ fn format2(
     const atom = ctx.atom;
     const macho_file = ctx.macho_file;
     const file = atom.getFile(macho_file);
-    try writer.print("atom({d}) : {s} : @{x} : sect({d}) : align({x}) : size({x})", .{
-        atom.atom_index, atom.getName(macho_file),      atom.getAddress(macho_file),
-        atom.out_n_sect, atom.alignment.load(.seq_cst), atom.size,
+    try writer.print("atom({d}) : {s} : @{x} : sect({d}) : align({x}) : size({x}) : thunk({d})", .{
+        atom.atom_index,                 atom.getName(macho_file),      atom.getAddress(macho_file),
+        atom.out_n_sect,                 atom.alignment.load(.seq_cst), atom.size,
+        atom.getExtra(macho_file).thunk,
     });
-    if (atom.flags.thunk) try writer.print(" : thunk({d})", .{atom.getExtra(macho_file).thunk});
     if (!atom.alive.load(.seq_cst)) try writer.writeAll(" : [*]");
     if (atom.getUnwindRecords(macho_file).len > 0) {
         try writer.writeAll(" : unwind{ ");
@@ -883,11 +880,6 @@ fn format2(
 }
 
 pub const Index = u32;
-
-pub const Flags = packed struct {
-    /// Whether this atom has a range extension thunk.
-    thunk: bool = false,
-};
 
 pub const Extra = struct {
     /// Index of the range extension thunk of this atom.

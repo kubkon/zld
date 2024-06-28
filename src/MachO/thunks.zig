@@ -67,7 +67,6 @@ fn scanRelocs(thunk_index: Thunk.Index, gpa: Allocator, atoms: []const MachO.Ref
             try thunk.symbols.put(gpa, rel.getTargetSymbolRef(atom.*, macho_file), {});
         }
         atom.addExtra(.{ .thunk = thunk_index }, macho_file);
-        atom.flags.thunk = true;
     }
 }
 
