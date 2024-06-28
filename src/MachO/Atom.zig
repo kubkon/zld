@@ -137,6 +137,7 @@ const AddExtraOpts = struct {
     unwind_index: ?u32 = null,
     unwind_count: ?u32 = null,
     literal_index: ?u32 = null,
+    literal_symbol: ?u32 = null,
 };
 
 pub fn addExtra(atom: *Atom, opts: AddExtraOpts, macho_file: *MachO) void {
@@ -894,12 +895,15 @@ pub const Flags = packed struct {
     thunk: bool = false,
 
     /// Whether this atom has any relocations.
+    /// TODO I think this is obsolete
     relocs: bool = false,
 
     /// Whether this atom has any unwind records.
+    /// TODO I think this is obsolete
     unwind: bool = false,
 
     /// Whether this atom has LiteralPool entry.
+    /// TODO I think this is obsolete
     literal_pool: bool = false,
 };
 
@@ -927,6 +931,8 @@ pub const Extra = struct {
 
     /// Index into LiteralPool entry for this atom.
     literal_index: u32 = 0,
+
+    literal_symbol: u32 = 0,
 };
 
 const aarch64 = @import("../aarch64.zig");
