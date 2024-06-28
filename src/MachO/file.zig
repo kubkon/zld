@@ -174,7 +174,7 @@ pub const File = union(enum) {
         }
     }
 
-    pub fn dedupLiterals(file: File, lp: MachO.LiteralPool, macho_file: *MachO) !void {
+    pub fn dedupLiterals(file: File, lp: MachO.LiteralPool, macho_file: *MachO) void {
         return switch (file) {
             .dylib => unreachable,
             inline else => |x| x.dedupLiterals(lp, macho_file),

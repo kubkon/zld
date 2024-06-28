@@ -1104,24 +1104,14 @@ pub fn dedupLiterals(self: *MachO) !void {
         wg.reset();
         defer wg.wait();
         for (self.objects.items) |index| {
-            self.base.thread_pool.spawnWg(&wg, dedupLiteralsWorker, .{ self, self.getFile(index).?, lp });
+            self.base.thread_pool.spawnWg(&wg, File.dedupLiterals, .{ self.getFile(index).?, lp, self });
         }
         if (self.getInternalObject()) |object| {
-            self.base.thread_pool.spawnWg(&wg, dedupLiteralsWorker, .{ self, object.asFile(), lp });
+            self.base.thread_pool.spawnWg(&wg, File.dedupLiterals, .{ object.asFile(), lp, self });
         }
     }
 
     if (self.has_errors.swap(false, .seq_cst)) return error.FlushFailed;
-}
-
-fn dedupLiteralsWorker(self: *MachO, file: File, lp: LiteralPool) void {
-    file.dedupLiterals(lp, self) catch |err| {
-        self.base.fatal("{s}: failed to dedup literals: {s}", .{
-            file.fmtPath(),
-            @errorName(err),
-        });
-        _ = self.has_errors.swap(true, .seq_cst);
-    };
 }
 
 fn claimUnresolved(self: *MachO) void {

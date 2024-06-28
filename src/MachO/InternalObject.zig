@@ -240,11 +240,11 @@ pub fn markLive(self: *InternalObject, macho_file: *MachO) void {
 
 /// Creates a fake input sections __TEXT,__objc_methname and __DATA,__objc_selrefs.
 pub fn addObjcMsgsendSections(self: *InternalObject, sym_name: []const u8, macho_file: *MachO) !Symbol.Index {
-    const methname_atom_index = try self.addObjcMethnameSection(sym_name, macho_file);
-    return try self.addObjcSelrefsSection(methname_atom_index, macho_file);
+    const methname_sym_index = try self.addObjcMethnameSection(sym_name, macho_file);
+    return try self.addObjcSelrefsSection(methname_sym_index, macho_file);
 }
 
-fn addObjcMethnameSection(self: *InternalObject, methname: []const u8, macho_file: *MachO) !Atom.Index {
+fn addObjcMethnameSection(self: *InternalObject, methname: []const u8, macho_file: *MachO) !Symbol.Index {
     const gpa = macho_file.base.allocator;
     const atom_index = try self.addAtom(gpa);
     try self.atoms_indexes.append(gpa, atom_index);
@@ -264,10 +264,28 @@ fn addObjcMethnameSection(self: *InternalObject, methname: []const u8, macho_fil
     try self.objc_methnames.ensureUnusedCapacity(gpa, methname.len + 1);
     self.objc_methnames.writer(gpa).print("{s}\x00", .{methname}) catch unreachable;
 
-    return atom_index;
+    const name_str = try self.addString(gpa, "ltmp");
+    const sym_index = try self.addSymbol(gpa);
+    const sym = &self.symbols.items[sym_index];
+    sym.name = name_str;
+    sym.atom_ref = .{ .index = atom_index, .file = self.index };
+    sym.extra = try self.addSymbolExtra(gpa, .{});
+    const nlist_idx: u32 = @intCast(self.symtab.items.len);
+    const nlist = try self.symtab.addOne(gpa);
+    nlist.* = .{
+        .n_strx = name_str.pos,
+        .n_type = macho.N_SECT,
+        .n_sect = @intCast(n_sect + 1),
+        .n_desc = 0,
+        .n_value = 0,
+    };
+    sym.nlist_idx = nlist_idx;
+    try self.globals.append(gpa, 0);
+
+    return sym_index;
 }
 
-fn addObjcSelrefsSection(self: *InternalObject, methname_atom_index: Atom.Index, macho_file: *MachO) !Symbol.Index {
+fn addObjcSelrefsSection(self: *InternalObject, methname_sym_index: Symbol.Index, macho_file: *MachO) !Symbol.Index {
     const gpa = macho_file.base.allocator;
     const atom_index = try self.addAtom(gpa);
     try self.atoms_indexes.append(gpa, atom_index);
@@ -287,9 +305,9 @@ fn addObjcSelrefsSection(self: *InternalObject, methname_atom_index: Atom.Index,
     const relocs = &self.sections.items(.relocs)[n_sect];
     try relocs.ensureUnusedCapacity(gpa, 1);
     relocs.appendAssumeCapacity(.{
-        .tag = .local,
+        .tag = .@"extern",
         .offset = 0,
-        .target = methname_atom_index,
+        .target = methname_sym_index,
         .addend = 0,
         .type = .unsigned,
         .meta = .{
@@ -311,12 +329,14 @@ fn addObjcSelrefsSection(self: *InternalObject, methname_atom_index: Atom.Index,
     nlist.* = .{
         .n_strx = 0,
         .n_type = macho.N_SECT,
-        .n_sect = @intCast(n_sect),
+        .n_sect = @intCast(n_sect + 1),
         .n_desc = 0,
         .n_value = 0,
     };
     sym.nlist_idx = nlist_idx;
     try self.globals.append(gpa, 0);
+    atom.addExtra(.{ .literal_symbol = sym_index }, macho_file);
+
     return sym_index;
 }
 
@@ -388,73 +408,30 @@ pub fn resolveLiterals(self: *InternalObject, lp: *MachO.LiteralPool, macho_file
     defer buffer.deinit();
 
     const slice = self.sections.slice();
-    for (slice.items(.header), self.getAtoms(), 0..) |header, atom_index, n_sect| {
-        if (Object.isCstringLiteral(header) or Object.isFixedSizeLiteral(header)) {
-            const atom = self.getAtom(atom_index).?;
-            const data = self.getSectionData(@intCast(n_sect));
-            const res = try lp.insert(gpa, header.type(), data);
-            if (!res.found_existing) {
-                const sym_index = try self.addSymbol(gpa);
-                const sym = &self.symbols.items[sym_index];
-                sym.atom_ref = .{ .index = atom_index, .file = self.index };
-                sym.extra = try self.addSymbolExtra(gpa, .{});
-                const nlist_idx: u32 = @intCast(self.symtab.items.len);
-                const nlist = try self.symtab.addOne(gpa);
-                nlist.* = .{
-                    .n_strx = 0,
-                    .n_type = macho.N_SECT,
-                    .n_sect = @intCast(n_sect),
-                    .n_desc = 0,
-                    .n_value = 0,
-                };
-                sym.nlist_idx = nlist_idx;
-                try self.globals.append(gpa, 0);
-                res.ref.* = .{ .index = sym_index, .file = self.index };
-            }
-            atom.flags.literal_pool = true;
-            atom.addExtra(.{ .literal_index = res.index }, macho_file);
-        } else if (Object.isPtrLiteral(header)) {
-            const atom = self.getAtom(atom_index).?;
-            const relocs = atom.getRelocs(macho_file);
-            assert(relocs.len == 1);
-            const rel = relocs[0];
-            assert(rel.tag == .local);
-            const target = rel.getTargetAtom(atom.*, macho_file);
-            const addend = std.math.cast(u32, rel.addend) orelse return error.Overflow;
-            try buffer.ensureUnusedCapacity(target.size);
-            buffer.resize(target.size) catch unreachable;
-            @memcpy(buffer.items, self.getSectionData(target.n_sect));
-            const res = try lp.insert(gpa, header.type(), buffer.items[addend..]);
-            buffer.clearRetainingCapacity();
-            if (!res.found_existing) {
-                const sym_index = try self.addSymbol(gpa);
-                const sym = &self.symbols.items[sym_index];
-                sym.atom_ref = .{ .index = atom_index, .file = self.index };
-                sym.extra = try self.addSymbolExtra(gpa, .{});
-                const nlist_idx: u32 = @intCast(self.symtab.items.len);
-                const nlist = try self.symtab.addOne(gpa);
-                nlist.* = .{
-                    .n_strx = 0,
-                    .n_type = macho.N_SECT,
-                    .n_sect = @intCast(n_sect),
-                    .n_desc = 0,
-                    .n_value = 0,
-                };
-                sym.nlist_idx = nlist_idx;
-                try self.globals.append(gpa, 0);
-                res.ref.* = .{ .index = sym_index, .file = self.index };
-            }
-            atom.flags.literal_pool = true;
-            atom.addExtra(.{ .literal_index = res.index }, macho_file);
+    for (slice.items(.header), self.getAtoms()) |header, atom_index| {
+        if (!Object.isPtrLiteral(header)) continue;
+        const atom = self.getAtom(atom_index).?;
+        const relocs = atom.getRelocs(macho_file);
+        assert(relocs.len == 1);
+        const rel = relocs[0];
+        assert(rel.tag == .@"extern");
+        const target = rel.getTargetSymbol(atom.*, macho_file).getAtom(macho_file).?;
+        try buffer.ensureUnusedCapacity(target.size);
+        buffer.resize(target.size) catch unreachable;
+        @memcpy(buffer.items, self.getSectionData(target.n_sect));
+        const res = try lp.insert(gpa, header.type(), buffer.items);
+        buffer.clearRetainingCapacity();
+        if (!res.found_existing) {
+            res.ref.* = .{ .index = atom.getExtra(macho_file).literal_symbol, .file = self.index };
         }
+        atom.flags.literal_pool = true;
+        atom.addExtra(.{ .literal_index = res.index }, macho_file);
     }
 }
 
-pub fn dedupLiterals(self: *InternalObject, lp: MachO.LiteralPool, macho_file: *MachO) !void {
+pub fn dedupLiterals(self: *InternalObject, lp: MachO.LiteralPool, macho_file: *MachO) void {
     const tracy = trace(@src());
     defer tracy.end();
-
-    const gpa = macho_file.base.allocator;
 
     for (self.getAtoms()) |atom_index| {
         const atom = self.getAtom(atom_index) orelse continue;
@@ -466,58 +443,27 @@ pub fn dedupLiterals(self: *InternalObject, lp: MachO.LiteralPool, macho_file: *
             const relocs = self.sections.items(.relocs)[atom.n_sect].items;
             break :blk relocs[extra.rel_index..][0..extra.rel_count];
         };
-        for (relocs) |*rel| switch (rel.tag) {
-            .local => {
-                const target = rel.getTargetAtom(atom.*, macho_file);
-                if (target.getLiteralPoolIndex(macho_file)) |lp_index| {
-                    const lp_sym = lp.getSymbol(lp_index, macho_file);
-                    const lp_atom_ref = lp_sym.atom_ref;
-                    if (target.atom_index != lp_atom_ref.index or self.index != lp_atom_ref.file) {
-                        const lp_atom = lp_sym.getAtom(macho_file).?;
-                        _ = lp_atom.alignment.fetchMax(target.alignment.load(.seq_cst), .seq_cst);
-                        _ = target.alive.swap(false, .seq_cst);
-
-                        const nlist_index: u32 = @intCast(self.symtab.items.len);
-                        try self.symtab.append(gpa, .{
-                            .n_strx = 0,
-                            .n_type = macho.N_SECT,
-                            .n_sect = 0, // TODO do we need this?
-                            .n_desc = 0,
-                            .n_value = 0,
-                        });
-                        const sym_index = try self.addSymbol(gpa);
-                        const sym = &self.symbols.items[sym_index];
-                        sym.atom_ref = lp_atom_ref;
-                        sym.nlist_idx = nlist_index;
-                        sym.extra = try self.addSymbolExtra(gpa, .{});
-                        try self.globals.append(gpa, 0);
-
-                        rel.target = sym_index;
-                        rel.tag = .@"extern";
-                    }
-                }
-            },
-            .@"extern" => {
-                const target_sym_ref = rel.getTargetSymbolRef(atom.*, macho_file);
-                if (target_sym_ref.getFile(macho_file) != null) {
-                    const target_sym = target_sym_ref.getSymbol(macho_file).?;
-                    if (target_sym.getAtom(macho_file)) |target_atom| {
-                        if (target_atom.getLiteralPoolIndex(macho_file)) |lp_index| {
-                            const lp_sym = lp.getSymbol(lp_index, macho_file);
-                            const lp_atom_ref = lp_sym.atom_ref;
-                            if (target_atom.atom_index != lp_atom_ref.index or target_atom.file != lp_atom_ref.file) {
-                                const lp_atom = lp_sym.getAtom(macho_file).?;
-                                _ = lp_atom.alignment.fetchMax(target_atom.alignment.load(.seq_cst), .seq_cst);
-                                _ = target_atom.alive.swap(false, .seq_cst);
-                                target_sym.mutex.lock();
-                                defer target_sym.mutex.unlock();
-                                target_sym.atom_ref = lp_atom_ref;
-                            }
+        for (relocs) |*rel| {
+            if (rel.tag != .@"extern") continue;
+            const target_sym_ref = rel.getTargetSymbolRef(atom.*, macho_file);
+            if (target_sym_ref.getFile(macho_file) != null) {
+                const target_sym = target_sym_ref.getSymbol(macho_file).?;
+                if (target_sym.getAtom(macho_file)) |target_atom| {
+                    if (target_atom.getLiteralPoolIndex(macho_file)) |lp_index| {
+                        const lp_sym = lp.getSymbol(lp_index, macho_file);
+                        const lp_atom_ref = lp_sym.atom_ref;
+                        if (target_atom.atom_index != lp_atom_ref.index or target_atom.file != lp_atom_ref.file) {
+                            const lp_atom = lp_sym.getAtom(macho_file).?;
+                            _ = lp_atom.alignment.fetchMax(target_atom.alignment.load(.seq_cst), .seq_cst);
+                            _ = target_atom.alive.swap(false, .seq_cst);
+                            target_sym.mutex.lock();
+                            defer target_sym.mutex.unlock();
+                            target_sym.atom_ref = lp_atom_ref;
                         }
                     }
                 }
-            },
-        };
+            }
+        }
     }
 
     for (self.symbols.items) |*sym| {
