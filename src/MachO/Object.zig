@@ -479,7 +479,7 @@ fn initCstringLiterals(self: *Object, allocator: Allocator, file: File.Handle, m
                 .size = atom.size,
                 .atom = atom_index,
             });
-            atom.addExtra(.{ .literal_symbol = nlist_index }, macho_file);
+            atom.addExtra(.{ .literal_symbol_index = nlist_index }, macho_file);
 
             start = end;
         }
@@ -546,7 +546,7 @@ fn initFixedSizeLiterals(self: *Object, allocator: Allocator, macho_file: *MachO
                 .size = atom.size,
                 .atom = atom_index,
             });
-            atom.addExtra(.{ .literal_symbol = nlist_index }, macho_file);
+            atom.addExtra(.{ .literal_symbol_index = nlist_index }, macho_file);
         }
     }
 }
@@ -604,7 +604,7 @@ fn initPointerLiterals(self: *Object, allocator: Allocator, macho_file: *MachO) 
                 .size = atom.size,
                 .atom = atom_index,
             });
-            atom.addExtra(.{ .literal_symbol = nlist_index }, macho_file);
+            atom.addExtra(.{ .literal_symbol_index = nlist_index }, macho_file);
         }
     }
 }
@@ -630,9 +630,9 @@ pub fn resolveLiterals(self: *Object, lp: *MachO.LiteralPool, macho_file: *MachO
                 const atom_data = data[atom.off..][0..atom.size];
                 const res = try lp.insert(gpa, header.type(), atom_data);
                 if (!res.found_existing) {
-                    res.ref.* = .{ .index = atom.getExtra(macho_file).literal_symbol, .file = self.index };
+                    res.ref.* = .{ .index = atom.getExtra(macho_file).literal_symbol_index, .file = self.index };
                 }
-                atom.addExtra(.{ .literal_index = res.index }, macho_file);
+                atom.addExtra(.{ .literal_pool_index = res.index }, macho_file);
             }
         } else if (isPtrLiteral(header)) {
             var sections_data = std.AutoHashMap(u32, []const u8).init(gpa);
@@ -665,9 +665,9 @@ pub fn resolveLiterals(self: *Object, lp: *MachO.LiteralPool, macho_file: *MachO
                 const res = try lp.insert(gpa, header.type(), buffer.items[addend..]);
                 buffer.clearRetainingCapacity();
                 if (!res.found_existing) {
-                    res.ref.* = .{ .index = atom.getExtra(macho_file).literal_symbol, .file = self.index };
+                    res.ref.* = .{ .index = atom.getExtra(macho_file).literal_symbol_index, .file = self.index };
                 }
-                atom.addExtra(.{ .literal_index = res.index }, macho_file);
+                atom.addExtra(.{ .literal_pool_index = res.index }, macho_file);
             }
         }
     }
@@ -694,7 +694,7 @@ pub fn dedupLiterals(self: *Object, lp: MachO.LiteralPool, macho_file: *MachO) v
                 if (target_sym.getAtom(macho_file)) |target_atom| {
                     const isec = target_atom.getInputSection(macho_file);
                     if (Object.isCstringLiteral(isec) or Object.isFixedSizeLiteral(isec) or Object.isPtrLiteral(isec)) {
-                        const lp_index = target_atom.getExtra(macho_file).literal_index;
+                        const lp_index = target_atom.getExtra(macho_file).literal_pool_index;
                         const lp_sym = lp.getSymbol(lp_index, macho_file);
                         const lp_atom_ref = lp_sym.atom_ref;
                         if (target_atom.atom_index != lp_atom_ref.index or target_atom.file != lp_atom_ref.file) {
@@ -2732,7 +2732,7 @@ const x86_64 = struct {
                 const isec = target_atom.getInputSection(macho_file);
                 if (isCstringLiteral(isec) or isFixedSizeLiteral(isec) or isPtrLiteral(isec)) {
                     is_extern = true;
-                    break :blk target_atom.getExtra(macho_file).literal_symbol;
+                    break :blk target_atom.getExtra(macho_file).literal_symbol_index;
                 }
                 break :blk target;
             } else rel.r_symbolnum;
@@ -2920,7 +2920,7 @@ const aarch64 = struct {
                 const isec = target_atom.getInputSection(macho_file);
                 if (isCstringLiteral(isec) or isFixedSizeLiteral(isec) or isPtrLiteral(isec)) {
                     is_extern = true;
-                    break :blk target_atom.getExtra(macho_file).literal_symbol;
+                    break :blk target_atom.getExtra(macho_file).literal_symbol_index;
                 }
                 break :blk target;
             } else rel.r_symbolnum;

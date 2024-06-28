@@ -334,7 +334,7 @@ fn addObjcSelrefsSection(self: *InternalObject, methname_sym_index: Symbol.Index
     };
     sym.nlist_idx = nlist_idx;
     try self.globals.append(gpa, 0);
-    atom.addExtra(.{ .literal_symbol = sym_index }, macho_file);
+    atom.addExtra(.{ .literal_symbol_index = sym_index }, macho_file);
 
     return sym_index;
 }
@@ -421,9 +421,9 @@ pub fn resolveLiterals(self: *InternalObject, lp: *MachO.LiteralPool, macho_file
         const res = try lp.insert(gpa, header.type(), buffer.items);
         buffer.clearRetainingCapacity();
         if (!res.found_existing) {
-            res.ref.* = .{ .index = atom.getExtra(macho_file).literal_symbol, .file = self.index };
+            res.ref.* = .{ .index = atom.getExtra(macho_file).literal_symbol_index, .file = self.index };
         }
-        atom.addExtra(.{ .literal_index = res.index }, macho_file);
+        atom.addExtra(.{ .literal_pool_index = res.index }, macho_file);
     }
 }
 
@@ -447,7 +447,7 @@ pub fn dedupLiterals(self: *InternalObject, lp: MachO.LiteralPool, macho_file: *
                 const target_sym = target_sym_ref.getSymbol(macho_file).?;
                 if (target_sym.getAtom(macho_file)) |target_atom| {
                     if (!Object.isPtrLiteral(target_atom.getInputSection(macho_file))) continue;
-                    const lp_index = target_atom.getExtra(macho_file).literal_index;
+                    const lp_index = target_atom.getExtra(macho_file).literal_pool_index;
                     const lp_sym = lp.getSymbol(lp_index, macho_file);
                     const lp_atom_ref = lp_sym.atom_ref;
                     if (target_atom.atom_index != lp_atom_ref.index or target_atom.file != lp_atom_ref.file) {
@@ -473,7 +473,7 @@ pub fn dedupLiterals(self: *InternalObject, lp: MachO.LiteralPool, macho_file: *
         };
         if (tsym.getAtom(macho_file)) |atom| {
             if (!Object.isPtrLiteral(atom.getInputSection(macho_file))) continue;
-            const lp_index = atom.getExtra(macho_file).literal_index;
+            const lp_index = atom.getExtra(macho_file).literal_pool_index;
             const lp_sym = lp.getSymbol(lp_index, macho_file);
             const lp_atom_ref = lp_sym.atom_ref;
             if (atom.atom_index != lp_atom_ref.index or atom.file != lp_atom_ref.file) {

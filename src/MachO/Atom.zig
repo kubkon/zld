@@ -127,8 +127,8 @@ const AddExtraOpts = struct {
     rel_out_count: ?u32 = null,
     unwind_index: ?u32 = null,
     unwind_count: ?u32 = null,
-    literal_index: ?u32 = null,
-    literal_symbol: ?u32 = null,
+    literal_pool_index: ?u32 = null,
+    literal_symbol_index: ?u32 = null,
 };
 
 pub fn addExtra(atom: *Atom, opts: AddExtraOpts, macho_file: *MachO) void {
@@ -904,9 +904,10 @@ pub const Extra = struct {
     unwind_count: u32 = 0,
 
     /// Index into LiteralPool entry for this atom.
-    literal_index: u32 = 0,
+    literal_pool_index: u32 = 0,
 
-    literal_symbol: u32 = 0,
+    /// Index into the File's symbol table for local symbol representing this literal atom.
+    literal_symbol_index: u32 = 0,
 };
 
 const aarch64 = @import("../aarch64.zig");
