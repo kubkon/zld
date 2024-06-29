@@ -307,6 +307,7 @@ pub fn flush(self: *MachO) !void {
 
     state_log.debug("{}", .{self.dumpState()});
 
+    try self.resizeSections();
     try self.writeSections();
     try self.writeSyntheticSections();
     try self.updateLinkeditSizes();
@@ -1897,10 +1898,13 @@ fn updateLinkeditSizes(self: *MachO) !void {
     try self.work_queue.writeItem(.{ .rebase_size = {} });
     try self.work_queue.writeItem(.{ .bind_size = {} });
     try self.work_queue.writeItem(.{ .weak_bind_size = {} });
-    try self.work_queue.writeItem(.{ .lazy_bind_size = {} });
     try self.work_queue.writeItem(.{ .export_trie_size = {} });
     try self.work_queue.writeItem(.{ .data_in_code_size = {} });
     try self.work_queue.writeItem(.{ .calc_symtab_size = {} });
+
+    if (self.la_symbol_ptr_sect_index) |_| {
+        try self.work_queue.writeItem(.{ .lazy_bind_size = {} });
+    }
 }
 
 fn performAllTheWork(self: *MachO) !void {
@@ -1933,11 +1937,9 @@ fn updateLazyBindSizeWorker(self: *MachO) void {
             defer tracy.end();
             try macho_file.lazy_bind.updateSize(macho_file);
             const sect_id = macho_file.stubs_helper_sect_index.?;
-            const slice = macho_file.sections.slice();
-            const header = slice.items(.header)[sect_id];
-            const out = &slice.items(.out)[sect_id];
-            try out.resize(macho_file.base.allocator, header.size);
-            try macho_file.stubs_helper.write(macho_file, out.writer(macho_file.base.allocator));
+            const out = &macho_file.sections.items(.out)[sect_id];
+            var stream = std.io.fixedBufferStream(out.items);
+            try macho_file.stubs_helper.write(macho_file, stream.writer());
         }
     }.doWork;
     doWork(self) catch |err| {
@@ -1969,7 +1971,7 @@ pub fn updateLinkeditSizeWorker(self: *MachO, tag: enum {
     };
 }
 
-fn writeSections(self: *MachO) !void {
+fn resizeSections(self: *MachO) !void {
     const slice = self.sections.slice();
     for (slice.items(.header), slice.items(.out)) |header, *out| {
         if (header.isZerofill()) continue;
@@ -1978,6 +1980,9 @@ fn writeSections(self: *MachO) !void {
         const padding_byte: u8 = if (header.isCode() and cpu_arch == .x86_64) 0xcc else 0;
         @memset(out.items, padding_byte);
     }
+}
+
+fn writeSections(self: *MachO) !void {
     for (self.objects.items) |index| {
         try self.work_queue.writeItem(.{ .write_atoms = index });
     }
@@ -2095,9 +2100,7 @@ fn writeSyntheticSections(self: *MachO) !void {
         self.objc_stubs_sect_index,
     }) |maybe_sect_id| {
         if (maybe_sect_id) |sect_id| {
-            const header = slice.items(.header)[sect_id];
             const out = &slice.items(.out)[sect_id];
-            try out.resize(self.base.allocator, header.size);
             try self.work_queue.writeItem(.{ .write_synthetic_section = .{ sect_id, out.items } });
         }
     }

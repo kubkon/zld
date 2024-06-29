@@ -540,23 +540,22 @@ pub const LazyBind = struct {
 
         const gpa = macho_file.base.allocator;
 
-        if (macho_file.la_symbol_ptr_sect_index) |sid| {
-            const sect = macho_file.sections.items(.header)[sid];
-            const seg_id = macho_file.sections.items(.segment_id)[sid];
-            const seg = macho_file.segments.items[seg_id];
+        const sid = macho_file.la_symbol_ptr_sect_index.?;
+        const sect = macho_file.sections.items(.header)[sid];
+        const seg_id = macho_file.sections.items(.segment_id)[sid];
+        const seg = macho_file.segments.items[seg_id];
 
-            for (macho_file.stubs.symbols.items, 0..) |ref, idx| {
-                const sym = ref.getSymbol(macho_file).?;
-                const addr = sect.addr + idx * @sizeOf(u64);
-                const bind_entry = Entry{
-                    .target = ref,
-                    .offset = addr - seg.vmaddr,
-                    .segment_id = seg_id,
-                    .addend = 0,
-                };
-                if ((sym.flags.import and !sym.flags.weak) or (sym.flags.interposable and !sym.flags.weak)) {
-                    try self.entries.append(gpa, bind_entry);
-                }
+        for (macho_file.stubs.symbols.items, 0..) |ref, idx| {
+            const sym = ref.getSymbol(macho_file).?;
+            const addr = sect.addr + idx * @sizeOf(u64);
+            const bind_entry = Entry{
+                .target = ref,
+                .offset = addr - seg.vmaddr,
+                .segment_id = seg_id,
+                .addend = 0,
+            };
+            if ((sym.flags.import and !sym.flags.weak) or (sym.flags.interposable and !sym.flags.weak)) {
+                try self.entries.append(gpa, bind_entry);
             }
         }
 
