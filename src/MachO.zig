@@ -1932,14 +1932,12 @@ fn updateLazyBindSizeWorker(self: *MachO) void {
             const tracy = trace(@src());
             defer tracy.end();
             try macho_file.lazy_bind.updateSize(macho_file);
-            // TODO wasteful check
-            if (macho_file.stubs_helper_sect_index) |sect_id| {
-                const slice = macho_file.sections.slice();
-                const header = slice.items(.header)[sect_id];
-                const out = &slice.items(.out)[sect_id];
-                try out.resize(macho_file.base.allocator, header.size);
-                try macho_file.stubs_helper.write(macho_file, out.writer(macho_file.base.allocator));
-            }
+            const sect_id = macho_file.stubs_helper_sect_index.?;
+            const slice = macho_file.sections.slice();
+            const header = slice.items(.header)[sect_id];
+            const out = &slice.items(.out)[sect_id];
+            try out.resize(macho_file.base.allocator, header.size);
+            try macho_file.stubs_helper.write(macho_file, out.writer(macho_file.base.allocator));
         }
     }.doWork;
     doWork(self) catch |err| {
