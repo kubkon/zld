@@ -198,12 +198,12 @@ fn finalizeNode(self: *Trie, node_index: Node.Index, offset_in_trie: u64) !Final
 
     for (self.nodes.items(.edges)[node_index].items) |edge_index| {
         const edge = &self.edges.items[edge_index];
-        const next_node_offset = self.nodes.items(.trie_offset)[edge.to] orelse 0;
+        const next_node_offset = self.nodes.items(.trie_offset)[edge.to];
         node_size += edge.label.len + 1;
         try leb.writeULEB128(writer, next_node_offset);
     }
 
-    const trie_offset = self.nodes.items(.trie_offset)[node_index] orelse 0;
+    const trie_offset = self.nodes.items(.trie_offset)[node_index];
     const updated = offset_in_trie != trie_offset;
     self.nodes.items(.trie_offset)[node_index] = offset_in_trie;
     node_size += stream.bytes_written;
@@ -270,7 +270,7 @@ fn writeNode(self: *Trie, node_index: Node.Index, writer: anytype) !void {
         // Write edge label and offset to next node in trie.
         try writer.writeAll(edge.label);
         try writer.writeByte(0);
-        try leb.writeULEB128(writer, self.nodes.items(.trie_offset)[edge.to].?);
+        try leb.writeULEB128(writer, self.nodes.items(.trie_offset)[edge.to]);
     }
 }
 
@@ -311,7 +311,7 @@ const Node = struct {
     } = null,
 
     /// Offset of this node in the trie output byte stream.
-    trie_offset: ?u64 = null,
+    trie_offset: u64 = 0,
 
     /// List of all edges originating from this node.
     edges: std.ArrayListUnmanaged(Edge.Index) = .{},
