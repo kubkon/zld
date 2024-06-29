@@ -43,10 +43,10 @@ fn put(self: *Trie, allocator: Allocator, symbol: ExportSymbol) !void {
     // defer tracy.end();
 
     const node_index = try self.putNode(self.root.?, allocator, symbol.name);
-    self.nodes.items(.terminal_info)[node_index] = .{
-        .vmaddr_offset = symbol.vmaddr_offset,
-        .export_flags = symbol.export_flags,
-    };
+    const slice = self.nodes.slice();
+    slice.items(.is_terminal)[node_index] = true;
+    slice.items(.vmaddr_offset)[node_index] = symbol.vmaddr_offset;
+    slice.items(.export_flags)[node_index] = symbol.export_flags;
 }
 
 /// Inserts a new node starting at `node_index`.
@@ -54,23 +54,22 @@ fn putNode(self: *Trie, node_index: Node.Index, allocator: Allocator, label: []c
     // Check for match with edges from this node.
     for (self.nodes.items(.edges)[node_index].items) |edge_index| {
         const edge = &self.edges.items[edge_index];
-        const match = mem.indexOfDiff(u8, edge.label, label) orelse return edge.to;
+        const match = mem.indexOfDiff(u8, edge.label, label) orelse return edge.node;
         if (match == 0) continue;
-        if (match == edge.label.len) return self.putNode(edge.to, allocator, label[match..]);
+        if (match == edge.label.len) return self.putNode(edge.node, allocator, label[match..]);
 
         // Found a match, need to splice up nodes.
         // From: A -> B
         // To: A -> C -> B
         const mid_index = try self.addNode(allocator);
         const to_label = edge.label[match..];
-        const to_node = edge.to;
-        edge.to = mid_index;
+        const to_node = edge.node;
+        edge.node = mid_index;
         edge.label = label[0..match];
 
         const new_edge_index = try self.addEdge(allocator);
         const new_edge = &self.edges.items[new_edge_index];
-        new_edge.from = mid_index;
-        new_edge.to = to_node;
+        new_edge.node = to_node;
         new_edge.label = to_label;
         try self.nodes.items(.edges)[mid_index].append(allocator, new_edge_index);
 
@@ -81,8 +80,7 @@ fn putNode(self: *Trie, node_index: Node.Index, allocator: Allocator, label: []c
     const new_node_index = try self.addNode(allocator);
     const new_edge_index = try self.addEdge(allocator);
     const new_edge = &self.edges.items[new_edge_index];
-    new_edge.from = node_index;
-    new_edge.to = new_node_index;
+    new_edge.node = new_node_index;
     new_edge.label = label;
     try self.nodes.items(.edges)[node_index].append(allocator, new_edge_index);
 
@@ -138,7 +136,7 @@ fn finalize(self: *Trie, allocator: Allocator) !void {
 
     var ordered_nodes = std.ArrayList(Node.Index).init(allocator);
     defer ordered_nodes.deinit();
-    try ordered_nodes.ensureTotalCapacityPrecise(self.nodes.items(.terminal_info).len);
+    try ordered_nodes.ensureTotalCapacityPrecise(self.nodes.items(.is_terminal).len);
 
     var fifo = std.fifo.LinearFifo(Node.Index, .Dynamic).init(allocator);
     defer fifo.deinit();
@@ -149,13 +147,13 @@ fn finalize(self: *Trie, allocator: Allocator) !void {
         const edges = &self.nodes.items(.edges)[next_index];
         for (edges.items) |edge_index| {
             const edge = self.edges.items[edge_index];
-            try fifo.writeItem(edge.to);
+            try fifo.writeItem(edge.node);
         }
         ordered_nodes.appendAssumeCapacity(next_index);
     }
 
     var more: bool = true;
-    var size: usize = 0;
+    var size: u32 = 0;
     while (more) {
         size = 0;
         more = false;
@@ -174,7 +172,7 @@ fn finalize(self: *Trie, allocator: Allocator) !void {
 
 const FinalizeNodeResult = struct {
     /// Current size of this node in bytes.
-    node_size: u64,
+    node_size: u32,
 
     /// True if the trie offset of this node in the output byte stream
     /// would need updating; false otherwise.
@@ -182,31 +180,34 @@ const FinalizeNodeResult = struct {
 };
 
 /// Updates offset of this node in the output byte stream.
-fn finalizeNode(self: *Trie, node_index: Node.Index, offset_in_trie: u64) !FinalizeNodeResult {
+fn finalizeNode(self: *Trie, node_index: Node.Index, offset_in_trie: u32) !FinalizeNodeResult {
     var stream = std.io.countingWriter(std.io.null_writer);
     const writer = stream.writer();
+    const slice = self.nodes.slice();
 
-    var node_size: u64 = 0;
-    if (self.nodes.items(.terminal_info)[node_index]) |info| {
-        try leb.writeULEB128(writer, info.export_flags);
-        try leb.writeULEB128(writer, info.vmaddr_offset);
+    var node_size: u32 = 0;
+    if (slice.items(.is_terminal)[node_index]) {
+        const export_flags = slice.items(.export_flags)[node_index];
+        const vmaddr_offset = slice.items(.vmaddr_offset)[node_index];
+        try leb.writeULEB128(writer, export_flags);
+        try leb.writeULEB128(writer, vmaddr_offset);
         try leb.writeULEB128(writer, stream.bytes_written);
     } else {
         node_size += 1; // 0x0 for non-terminal nodes
     }
     node_size += 1; // 1 byte for edge count
 
-    for (self.nodes.items(.edges)[node_index].items) |edge_index| {
+    for (slice.items(.edges)[node_index].items) |edge_index| {
         const edge = &self.edges.items[edge_index];
-        const next_node_offset = self.nodes.items(.trie_offset)[edge.to];
-        node_size += edge.label.len + 1;
+        const next_node_offset = slice.items(.trie_offset)[edge.node];
+        node_size += @intCast(edge.label.len + 1);
         try leb.writeULEB128(writer, next_node_offset);
     }
 
-    const trie_offset = self.nodes.items(.trie_offset)[node_index];
+    const trie_offset = slice.items(.trie_offset)[node_index];
     const updated = offset_in_trie != trie_offset;
-    self.nodes.items(.trie_offset)[node_index] = offset_in_trie;
-    node_size += stream.bytes_written;
+    slice.items(.trie_offset)[node_index] = offset_in_trie;
+    node_size += @intCast(stream.bytes_written);
 
     return .{ .node_size = node_size, .updated = updated };
 }
@@ -237,18 +238,21 @@ pub fn write(self: Trie, writer: anytype) !void {
 /// This is one of the requirements of the MachO.
 /// Panics if `finalize` was not called before calling this method.
 fn writeNode(self: *Trie, node_index: Node.Index, writer: anytype) !void {
-    const edges = self.nodes.items(.edges)[node_index];
-    const terminal_info = self.nodes.items(.terminal_info)[node_index];
+    const slice = self.nodes.slice();
+    const edges = slice.items(.edges)[node_index];
+    const is_terminal = slice.items(.is_terminal)[node_index];
+    const export_flags = slice.items(.export_flags)[node_index];
+    const vmaddr_offset = slice.items(.vmaddr_offset)[node_index];
 
-    if (terminal_info) |info| {
+    if (is_terminal) {
         // Terminal node info: encode export flags and vmaddr offset of this symbol.
         var info_buf: [@sizeOf(u64) * 2]u8 = undefined;
         var info_stream = std.io.fixedBufferStream(&info_buf);
         // TODO Implement for special flags.
-        assert(info.export_flags & macho.EXPORT_SYMBOL_FLAGS_REEXPORT == 0 and
-            info.export_flags & macho.EXPORT_SYMBOL_FLAGS_STUB_AND_RESOLVER == 0);
-        try leb.writeULEB128(info_stream.writer(), info.export_flags);
-        try leb.writeULEB128(info_stream.writer(), info.vmaddr_offset);
+        assert(export_flags & macho.EXPORT_SYMBOL_FLAGS_REEXPORT == 0 and
+            export_flags & macho.EXPORT_SYMBOL_FLAGS_STUB_AND_RESOLVER == 0);
+        try leb.writeULEB128(info_stream.writer(), export_flags);
+        try leb.writeULEB128(info_stream.writer(), vmaddr_offset);
 
         // Encode the size of the terminal node info.
         var size_buf: [@sizeOf(u64)]u8 = undefined;
@@ -270,7 +274,7 @@ fn writeNode(self: *Trie, node_index: Node.Index, writer: anytype) !void {
         // Write edge label and offset to next node in trie.
         try writer.writeAll(edge.label);
         try writer.writeByte(0);
-        try leb.writeULEB128(writer, self.nodes.items(.trie_offset)[edge.to]);
+        try leb.writeULEB128(writer, slice.items(.trie_offset)[edge.node]);
     }
 }
 
@@ -301,17 +305,16 @@ pub const ExportSymbol = struct {
 };
 
 const Node = struct {
-    /// Terminal info associated with this node.
-    /// If this node is not a terminal node, info is null.
-    terminal_info: ?struct {
-        /// Export flags associated with this exported symbol.
-        export_flags: u64,
-        /// VM address offset wrt to the section this symbol is defined against.
-        vmaddr_offset: u64,
-    } = null,
+    is_terminal: bool = false,
+
+    /// Export flags associated with this exported symbol.
+    export_flags: u64 = 0,
+
+    /// VM address offset wrt to the section this symbol is defined against.
+    vmaddr_offset: u64 = 0,
 
     /// Offset of this node in the trie output byte stream.
-    trie_offset: u64 = 0,
+    trie_offset: u32 = 0,
 
     /// List of all edges originating from this node.
     edges: std.ArrayListUnmanaged(Edge.Index) = .{},
@@ -319,10 +322,12 @@ const Node = struct {
     const Index = u32;
 };
 
-/// Edge connecting to nodes in the trie.
+/// Edge connecting nodes in the trie.
 const Edge = struct {
-    from: Node.Index = 0,
-    to: Node.Index = 0,
+    /// Target node in the trie.
+    node: Node.Index = 0,
+
+    /// Matching prefix.
     label: []const u8 = "",
 
     const Index = u32;
