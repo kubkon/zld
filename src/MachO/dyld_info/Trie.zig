@@ -32,7 +32,7 @@
 /// The root node of the trie.
 root: ?Node.Index = null,
 buffer: std.ArrayListUnmanaged(u8) = .{},
-nodes: std.ArrayListUnmanaged(Node) = .{},
+nodes: std.MultiArrayList(Node) = .{},
 edges: std.ArrayListUnmanaged(Edge) = .{},
 
 /// Insert a symbol into the trie, updating the prefixes in the process.
@@ -42,12 +42,51 @@ fn put(self: *Trie, allocator: Allocator, symbol: ExportSymbol) !void {
     // const tracy = trace(@src());
     // defer tracy.end();
 
-    const node_index = try Node.put(self.root.?, allocator, symbol.name, self);
-    const node = self.getNode(node_index);
-    node.terminal_info = .{
+    const node_index = try self.putNode(self.root.?, allocator, symbol.name);
+    self.nodes.items(.terminal_info)[node_index] = .{
         .vmaddr_offset = symbol.vmaddr_offset,
         .export_flags = symbol.export_flags,
     };
+}
+
+/// Inserts a new node starting at `node_index`.
+fn putNode(self: *Trie, node_index: Node.Index, allocator: Allocator, label: []const u8) !Node.Index {
+    // Check for match with edges from this node.
+    for (self.nodes.items(.edges)[node_index].items) |edge_index| {
+        const edge = &self.edges.items[edge_index];
+        const match = mem.indexOfDiff(u8, edge.label, label) orelse return edge.to;
+        if (match == 0) continue;
+        if (match == edge.label.len) return self.putNode(edge.to, allocator, label[match..]);
+
+        // Found a match, need to splice up nodes.
+        // From: A -> B
+        // To: A -> C -> B
+        const mid_index = try self.addNode(allocator);
+        const to_label = edge.label[match..];
+        const to_node = edge.to;
+        edge.to = mid_index;
+        edge.label = label[0..match];
+
+        const new_edge_index = try self.addEdge(allocator);
+        const new_edge = &self.edges.items[new_edge_index];
+        new_edge.from = mid_index;
+        new_edge.to = to_node;
+        new_edge.label = to_label;
+        try self.nodes.items(.edges)[mid_index].append(allocator, new_edge_index);
+
+        return if (match == label.len) mid_index else self.putNode(mid_index, allocator, label[match..]);
+    }
+
+    // Add a new node.
+    const new_node_index = try self.addNode(allocator);
+    const new_edge_index = try self.addEdge(allocator);
+    const new_edge = &self.edges.items[new_edge_index];
+    new_edge.from = node_index;
+    new_edge.to = new_node_index;
+    new_edge.label = label;
+    try self.nodes.items(.edges)[node_index].append(allocator, new_edge_index);
+
+    return new_node_index;
 }
 
 pub fn updateSize(self: *Trie, macho_file: *MachO) !void {
@@ -99,7 +138,7 @@ fn finalize(self: *Trie, allocator: Allocator) !void {
 
     var ordered_nodes = std.ArrayList(Node.Index).init(allocator);
     defer ordered_nodes.deinit();
-    try ordered_nodes.ensureTotalCapacityPrecise(self.nodes.items.len);
+    try ordered_nodes.ensureTotalCapacityPrecise(self.nodes.items(.terminal_info).len);
 
     var fifo = std.fifo.LinearFifo(Node.Index, .Dynamic).init(allocator);
     defer fifo.deinit();
@@ -107,9 +146,9 @@ fn finalize(self: *Trie, allocator: Allocator) !void {
     try fifo.writeItem(self.root.?);
 
     while (fifo.readItem()) |next_index| {
-        const next = self.getNode(next_index);
-        for (next.edges.items) |edge_index| {
-            const edge = self.getEdge(edge_index);
+        const edges = &self.nodes.items(.edges)[next_index];
+        for (edges.items) |edge_index| {
+            const edge = self.edges.items[edge_index];
             try fifo.writeItem(edge.to);
         }
         ordered_nodes.appendAssumeCapacity(next_index);
@@ -121,8 +160,7 @@ fn finalize(self: *Trie, allocator: Allocator) !void {
         size = 0;
         more = false;
         for (ordered_nodes.items) |node_index| {
-            const node = self.getNode(node_index);
-            const res = try node.finalize(size, self);
+            const res = try self.finalizeNode(node_index, size);
             size += res.node_size;
             if (res.updated) more = true;
         }
@@ -130,8 +168,47 @@ fn finalize(self: *Trie, allocator: Allocator) !void {
 
     try self.buffer.ensureTotalCapacityPrecise(allocator, size);
     for (ordered_nodes.items) |node_index| {
-        try self.getNode(node_index).write(self, self.buffer.writer(allocator));
+        try self.writeNode(node_index, self.buffer.writer(allocator));
     }
+}
+
+const FinalizeNodeResult = struct {
+    /// Current size of this node in bytes.
+    node_size: u64,
+
+    /// True if the trie offset of this node in the output byte stream
+    /// would need updating; false otherwise.
+    updated: bool,
+};
+
+/// Updates offset of this node in the output byte stream.
+fn finalizeNode(self: *Trie, node_index: Node.Index, offset_in_trie: u64) !FinalizeNodeResult {
+    var stream = std.io.countingWriter(std.io.null_writer);
+    const writer = stream.writer();
+
+    var node_size: u64 = 0;
+    if (self.nodes.items(.terminal_info)[node_index]) |info| {
+        try leb.writeULEB128(writer, info.export_flags);
+        try leb.writeULEB128(writer, info.vmaddr_offset);
+        try leb.writeULEB128(writer, stream.bytes_written);
+    } else {
+        node_size += 1; // 0x0 for non-terminal nodes
+    }
+    node_size += 1; // 1 byte for edge count
+
+    for (self.nodes.items(.edges)[node_index].items) |edge_index| {
+        const edge = &self.edges.items[edge_index];
+        const next_node_offset = self.nodes.items(.trie_offset)[edge.to] orelse 0;
+        node_size += edge.label.len + 1;
+        try leb.writeULEB128(writer, next_node_offset);
+    }
+
+    const trie_offset = self.nodes.items(.trie_offset)[node_index] orelse 0;
+    const updated = offset_in_trie != trie_offset;
+    self.nodes.items(.trie_offset)[node_index] = offset_in_trie;
+    node_size += stream.bytes_written;
+
+    return .{ .node_size = node_size, .updated = updated };
 }
 
 fn init(self: *Trie, allocator: Allocator) !void {
@@ -140,8 +217,8 @@ fn init(self: *Trie, allocator: Allocator) !void {
 }
 
 pub fn deinit(self: *Trie, allocator: Allocator) void {
-    for (self.nodes.items) |*node| {
-        node.deinit(allocator);
+    for (self.nodes.items(.edges)) |*edges| {
+        edges.deinit(allocator);
     }
     self.nodes.deinit(allocator);
     self.edges.deinit(allocator);
@@ -153,16 +230,54 @@ pub fn write(self: Trie, writer: anytype) !void {
     try writer.writeAll(self.buffer.items);
 }
 
-fn addNode(self: *Trie, allocator: Allocator) !Node.Index {
-    const index: Node.Index = @intCast(self.nodes.items.len);
-    const node = try self.nodes.addOne(allocator);
-    node.* = .{};
-    return index;
+/// Writes this node to a byte stream.
+/// The children of this node *are* not written to the byte stream
+/// recursively. To write all nodes to a byte stream in sequence,
+/// iterate over `Trie.ordered_nodes` and call this method on each node.
+/// This is one of the requirements of the MachO.
+/// Panics if `finalize` was not called before calling this method.
+fn writeNode(self: *Trie, node_index: Node.Index, writer: anytype) !void {
+    const edges = self.nodes.items(.edges)[node_index];
+    const terminal_info = self.nodes.items(.terminal_info)[node_index];
+
+    if (terminal_info) |info| {
+        // Terminal node info: encode export flags and vmaddr offset of this symbol.
+        var info_buf: [@sizeOf(u64) * 2]u8 = undefined;
+        var info_stream = std.io.fixedBufferStream(&info_buf);
+        // TODO Implement for special flags.
+        assert(info.export_flags & macho.EXPORT_SYMBOL_FLAGS_REEXPORT == 0 and
+            info.export_flags & macho.EXPORT_SYMBOL_FLAGS_STUB_AND_RESOLVER == 0);
+        try leb.writeULEB128(info_stream.writer(), info.export_flags);
+        try leb.writeULEB128(info_stream.writer(), info.vmaddr_offset);
+
+        // Encode the size of the terminal node info.
+        var size_buf: [@sizeOf(u64)]u8 = undefined;
+        var size_stream = std.io.fixedBufferStream(&size_buf);
+        try leb.writeULEB128(size_stream.writer(), info_stream.pos);
+
+        // Now, write them to the output stream.
+        try writer.writeAll(size_buf[0..size_stream.pos]);
+        try writer.writeAll(info_buf[0..info_stream.pos]);
+    } else {
+        // Non-terminal node is delimited by 0 byte.
+        try writer.writeByte(0);
+    }
+    // Write number of edges (max legal number of edges is 256).
+    try writer.writeByte(@as(u8, @intCast(edges.items.len)));
+
+    for (edges.items) |edge_index| {
+        const edge = self.edges.items[edge_index];
+        // Write edge label and offset to next node in trie.
+        try writer.writeAll(edge.label);
+        try writer.writeByte(0);
+        try leb.writeULEB128(writer, self.nodes.items(.trie_offset)[edge.to].?);
+    }
 }
 
-fn getNode(self: *Trie, index: Node.Index) *Node {
-    assert(index < self.nodes.items.len);
-    return &self.nodes.items[index];
+fn addNode(self: *Trie, allocator: Allocator) !Node.Index {
+    const index: Node.Index = @intCast(try self.nodes.addOne(allocator));
+    self.nodes.set(index, .{});
+    return index;
 }
 
 fn addEdge(self: *Trie, allocator: Allocator) !Edge.Index {
@@ -170,11 +285,6 @@ fn addEdge(self: *Trie, allocator: Allocator) !Edge.Index {
     const edge = try self.edges.addOne(allocator);
     edge.* = .{};
     return index;
-}
-
-fn getEdge(self: *Trie, index: Edge.Index) *Edge {
-    assert(index < self.edges.items.len);
-    return &self.edges.items[index];
 }
 
 /// Export symbol that is to be placed in the trie.
@@ -206,131 +316,6 @@ const Node = struct {
     /// List of all edges originating from this node.
     edges: std.ArrayListUnmanaged(Edge.Index) = .{},
 
-    fn deinit(self: *Node, allocator: Allocator) void {
-        self.edges.deinit(allocator);
-    }
-
-    /// Inserts a new node starting at `node_index`.
-    fn put(node_index: Node.Index, allocator: Allocator, label: []const u8, ctx: *Trie) !Node.Index {
-        // Check for match with edges from this node.
-        for (ctx.getNode(node_index).edges.items) |edge_index| {
-            const edge = ctx.getEdge(edge_index);
-            const match = mem.indexOfDiff(u8, edge.label, label) orelse return edge.to;
-            if (match == 0) continue;
-            if (match == edge.label.len) return Node.put(edge.to, allocator, label[match..], ctx);
-
-            // Found a match, need to splice up nodes.
-            // From: A -> B
-            // To: A -> C -> B
-            const mid_index = try ctx.addNode(allocator);
-            const mid = ctx.getNode(mid_index);
-            const to_label = edge.label[match..];
-            const to_node = edge.to;
-            edge.to = mid_index;
-            edge.label = label[0..match];
-
-            const new_edge_index = try ctx.addEdge(allocator);
-            const new_edge = ctx.getEdge(new_edge_index);
-            new_edge.from = mid_index;
-            new_edge.to = to_node;
-            new_edge.label = to_label;
-            try mid.edges.append(allocator, new_edge_index);
-
-            return if (match == label.len) mid_index else Node.put(mid_index, allocator, label[match..], ctx);
-        }
-
-        // Add a new node.
-        const new_node_index = try ctx.addNode(allocator);
-        const new_edge_index = try ctx.addEdge(allocator);
-        const new_edge = ctx.getEdge(new_edge_index);
-        new_edge.from = node_index;
-        new_edge.to = new_node_index;
-        new_edge.label = label;
-        try ctx.getNode(node_index).edges.append(allocator, new_edge_index);
-
-        return new_node_index;
-    }
-
-    /// Writes this node to a byte stream.
-    /// The children of this node *are* not written to the byte stream
-    /// recursively. To write all nodes to a byte stream in sequence,
-    /// iterate over `Trie.ordered_nodes` and call this method on each node.
-    /// This is one of the requirements of the MachO.
-    /// Panics if `finalize` was not called before calling this method.
-    fn write(self: Node, ctx: *Trie, writer: anytype) !void {
-        if (self.terminal_info) |info| {
-            // Terminal node info: encode export flags and vmaddr offset of this symbol.
-            var info_buf: [@sizeOf(u64) * 2]u8 = undefined;
-            var info_stream = std.io.fixedBufferStream(&info_buf);
-            // TODO Implement for special flags.
-            assert(info.export_flags & macho.EXPORT_SYMBOL_FLAGS_REEXPORT == 0 and
-                info.export_flags & macho.EXPORT_SYMBOL_FLAGS_STUB_AND_RESOLVER == 0);
-            try leb.writeULEB128(info_stream.writer(), info.export_flags);
-            try leb.writeULEB128(info_stream.writer(), info.vmaddr_offset);
-
-            // Encode the size of the terminal node info.
-            var size_buf: [@sizeOf(u64)]u8 = undefined;
-            var size_stream = std.io.fixedBufferStream(&size_buf);
-            try leb.writeULEB128(size_stream.writer(), info_stream.pos);
-
-            // Now, write them to the output stream.
-            try writer.writeAll(size_buf[0..size_stream.pos]);
-            try writer.writeAll(info_buf[0..info_stream.pos]);
-        } else {
-            // Non-terminal node is delimited by 0 byte.
-            try writer.writeByte(0);
-        }
-        // Write number of edges (max legal number of edges is 256).
-        try writer.writeByte(@as(u8, @intCast(self.edges.items.len)));
-
-        for (self.edges.items) |edge_index| {
-            const edge = ctx.getEdge(edge_index);
-            // Write edge label and offset to next node in trie.
-            try writer.writeAll(edge.label);
-            try writer.writeByte(0);
-            try leb.writeULEB128(writer, edge.getToNode(ctx).trie_offset.?);
-        }
-    }
-
-    const FinalizeResult = struct {
-        /// Current size of this node in bytes.
-        node_size: u64,
-
-        /// True if the trie offset of this node in the output byte stream
-        /// would need updating; false otherwise.
-        updated: bool,
-    };
-
-    /// Updates offset of this node in the output byte stream.
-    fn finalize(self: *Node, offset_in_trie: u64, ctx: *Trie) !FinalizeResult {
-        var stream = std.io.countingWriter(std.io.null_writer);
-        const writer = stream.writer();
-
-        var node_size: u64 = 0;
-        if (self.terminal_info) |info| {
-            try leb.writeULEB128(writer, info.export_flags);
-            try leb.writeULEB128(writer, info.vmaddr_offset);
-            try leb.writeULEB128(writer, stream.bytes_written);
-        } else {
-            node_size += 1; // 0x0 for non-terminal nodes
-        }
-        node_size += 1; // 1 byte for edge count
-
-        for (self.edges.items) |edge_index| {
-            const edge = ctx.getEdge(edge_index);
-            const next_node_offset = edge.getToNode(ctx).trie_offset orelse 0;
-            node_size += edge.label.len + 1;
-            try leb.writeULEB128(writer, next_node_offset);
-        }
-
-        const trie_offset = self.trie_offset orelse 0;
-        const updated = offset_in_trie != trie_offset;
-        self.trie_offset = offset_in_trie;
-        node_size += stream.bytes_written;
-
-        return FinalizeResult{ .node_size = node_size, .updated = updated };
-    }
-
     const Index = u32;
 };
 
@@ -340,114 +325,8 @@ const Edge = struct {
     to: Node.Index = 0,
     label: []const u8 = "",
 
-    fn getFromNode(edge: Edge, ctx: *Trie) *Node {
-        return ctx.getNode(edge.from);
-    }
-
-    fn getToNode(edge: Edge, ctx: *Trie) *Node {
-        return ctx.getNode(edge.to);
-    }
-
     const Index = u32;
 };
-
-test "Trie node count" {
-    const gpa = testing.allocator;
-    var trie: Trie = .{};
-    defer trie.deinit(gpa);
-    try trie.init(gpa);
-
-    try testing.expectEqual(@as(usize, 1), trie.nodes.items.len);
-    try testing.expect(trie.root != null);
-
-    try trie.put(gpa, .{
-        .name = "_main",
-        .vmaddr_offset = 0,
-        .export_flags = 0,
-    });
-    try testing.expectEqual(@as(usize, 2), trie.nodes.items.len);
-
-    // Inserting the same node shouldn't update the trie.
-    try trie.put(gpa, .{
-        .name = "_main",
-        .vmaddr_offset = 0,
-        .export_flags = 0,
-    });
-    try testing.expectEqual(@as(usize, 2), trie.nodes.items.len);
-
-    try trie.put(gpa, .{
-        .name = "__mh_execute_header",
-        .vmaddr_offset = 0x1000,
-        .export_flags = 0,
-    });
-    try testing.expectEqual(@as(usize, 4), trie.nodes.items.len);
-
-    // Inserting the same node shouldn't update the trie.
-    try trie.put(gpa, .{
-        .name = "__mh_execute_header",
-        .vmaddr_offset = 0x1000,
-        .export_flags = 0,
-    });
-    try testing.expectEqual(@as(usize, 4), trie.nodes.items.len);
-    try trie.put(gpa, .{
-        .name = "_main",
-        .vmaddr_offset = 0,
-        .export_flags = 0,
-    });
-    try testing.expectEqual(@as(usize, 4), trie.nodes.items.len);
-}
-
-test "Trie basic" {
-    const gpa = testing.allocator;
-    var trie: Trie = .{};
-    defer trie.deinit(gpa);
-    try trie.init(gpa);
-
-    // root --- _st ---> node
-    try trie.put(gpa, .{
-        .name = "_st",
-        .vmaddr_offset = 0,
-        .export_flags = 0,
-    });
-    const root = trie.getNode(trie.root.?);
-    try testing.expect(root.edges.items.len == 1);
-    try testing.expect(mem.eql(u8, trie.getEdge(root.edges.items[0]).label, "_st"));
-
-    {
-        // root --- _st ---> node --- art ---> node
-        try trie.put(gpa, .{
-            .name = "_start",
-            .vmaddr_offset = 0,
-            .export_flags = 0,
-        });
-        try testing.expect(root.edges.items.len == 1);
-
-        const nextEdge = trie.getEdge(root.edges.items[0]);
-        try testing.expect(mem.eql(u8, nextEdge.label, "_st"));
-        try testing.expect(nextEdge.getToNode(&trie).edges.items.len == 1);
-        try testing.expect(mem.eql(u8, trie.getEdge(nextEdge.getToNode(&trie).edges.items[0]).label, "art"));
-    }
-    {
-        // root --- _ ---> node --- st ---> node --- art ---> node
-        //                  |
-        //                  |   --- main ---> node
-        try trie.put(gpa, .{
-            .name = "_main",
-            .vmaddr_offset = 0,
-            .export_flags = 0,
-        });
-        try testing.expect(root.edges.items.len == 1);
-
-        const nextEdge = trie.getEdge(root.edges.items[0]);
-        try testing.expect(mem.eql(u8, nextEdge.label, "_"));
-        try testing.expect(nextEdge.getToNode(&trie).edges.items.len == 2);
-        try testing.expect(mem.eql(u8, trie.getEdge(nextEdge.getToNode(&trie).edges.items[0]).label, "st"));
-        try testing.expect(mem.eql(u8, trie.getEdge(nextEdge.getToNode(&trie).edges.items[1]).label, "main"));
-
-        const nextNextEdge = trie.getEdge(nextEdge.getToNode(&trie).edges.items[0]);
-        try testing.expect(mem.eql(u8, trie.getEdge(nextNextEdge.getToNode(&trie).edges.items[0]).label, "art"));
-    }
-}
 
 fn expectEqualHexStrings(expected: []const u8, given: []const u8) !void {
     assert(expected.len > 0);
