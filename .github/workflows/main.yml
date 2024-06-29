@@ -34,17 +34,6 @@ jobs:
     - run: zig fmt --check src 
     - run: zig build test -Dhas-zig
 
-  macos_11:
-    name: Test macos 11.0
-    runs-on: macos-11
-    steps:
-    - uses: actions/checkout@v3
-    - uses: goto-bus-stop/setup-zig@v2
-      with:
-        version: master
-    - run: zig version
-    - run: zig build test -Dhas-static -Dhas-zig
-
   gcc_musl:
     name: Test gcc with musl
     runs-on: ubuntu-latest
