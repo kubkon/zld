@@ -202,12 +202,12 @@ pub fn resolveBoundarySymbols(self: *InternalObject, macho_file: *MachO) !void {
         self.boundary_symbols.appendAssumeCapacity(sym_index);
         const sym = &self.symbols.items[sym_index];
         sym.name = name_off;
-        sym.visibility = .global;
+        sym.visibility = .local;
         const nlist_idx: u32 = @intCast(self.symtab.items.len);
         const nlist = self.symtab.addOneAssumeCapacity();
         nlist.* = .{
             .n_strx = name_off.pos,
-            .n_type = macho.N_SECT | macho.N_EXT,
+            .n_type = macho.N_SECT,
             .n_sect = 0,
             .n_desc = 0,
             .n_value = 0,

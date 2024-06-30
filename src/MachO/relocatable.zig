@@ -121,13 +121,22 @@ fn calcSectionSizes(macho_file: *MachO) !void {
             macho_file.base.thread_pool.spawnWg(&wg, calcEhFrameSizeWorker, .{macho_file});
         }
 
-        if (macho_file.unwind_info_sect_index) |_| {
-            macho_file.base.thread_pool.spawnWg(&wg, calcCompactUnwindSizeWorker, .{macho_file});
+        for (macho_file.objects.items) |index| {
+            if (macho_file.unwind_info_sect_index) |_| {
+                macho_file.base.thread_pool.spawnWg(&wg, Object.calcCompactUnwindSizeRelocatable, .{
+                    macho_file.getFile(index).?.object,
+                    macho_file,
+                });
+            }
+
+            macho_file.base.thread_pool.spawnWg(&wg, File.calcSymtabSize, .{ macho_file.getFile(index).?, macho_file });
         }
 
-        macho_file.base.thread_pool.spawnWg(&wg, calcSymtabSizeWorker, .{macho_file});
         macho_file.base.thread_pool.spawnWg(&wg, MachO.updateLinkeditSizeWorker, .{ macho_file, .data_in_code });
     }
+
+    calcCompactUnwindSize(macho_file);
+    calcSymtabSize(macho_file);
 
     if (macho_file.has_errors.swap(false, .seq_cst)) return error.FlushFailed;
 }
@@ -167,22 +176,9 @@ fn calcSectionSizeWorker(macho_file: *MachO, sect_id: u8) void {
     };
 }
 
-fn calcCompactUnwindSizeWorker(macho_file: *MachO) void {
+fn calcCompactUnwindSize(macho_file: *MachO) void {
     const tracy = trace(@src());
     defer tracy.end();
-
-    var wg: WaitGroup = .{};
-    {
-        wg.reset();
-        defer wg.wait();
-
-        for (macho_file.objects.items) |index| {
-            macho_file.base.thread_pool.spawnWg(&wg, Object.calcCompactUnwindSizeRelocatable, .{
-                macho_file.getFile(index).?.object,
-                macho_file,
-            });
-        }
-    }
 
     var nrec: u32 = 0;
     var nreloc: u32 = 0;
@@ -222,19 +218,9 @@ fn calcEhFrameSizeWorker(macho_file: *MachO) void {
     };
 }
 
-fn calcSymtabSizeWorker(macho_file: *MachO) void {
+fn calcSymtabSize(macho_file: *MachO) void {
     const tracy = trace(@src());
     defer tracy.end();
-
-    var wg: WaitGroup = .{};
-
-    {
-        wg.reset();
-        defer wg.wait();
-        for (macho_file.objects.items) |index| {
-            macho_file.base.thread_pool.spawnWg(&wg, File.calcSymtabSize, .{ macho_file.getFile(index).?, macho_file });
-        }
-    }
 
     var nlocals: u32 = 0;
     var nstabs: u32 = 0;
@@ -337,6 +323,7 @@ fn writeSections(macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
+    const gpa = macho_file.base.allocator;
     const slice = macho_file.sections.slice();
     for (slice.items(.header), slice.items(.out), slice.items(.relocs)) |header, *out, *relocs| {
         if (header.isZerofill()) continue;
@@ -347,6 +334,11 @@ fn writeSections(macho_file: *MachO) !void {
         try relocs.resize(macho_file.base.allocator, header.nreloc);
     }
 
+    const cmd = macho_file.symtab_cmd;
+    try macho_file.symtab.resize(gpa, cmd.nsyms);
+    try macho_file.strtab.resize(gpa, cmd.strsize);
+    macho_file.strtab.items[0] = 0;
+
     var wg: WaitGroup = .{};
     {
         wg.reset();
@@ -354,6 +346,7 @@ fn writeSections(macho_file: *MachO) !void {
 
         for (macho_file.objects.items) |index| {
             macho_file.base.thread_pool.spawnWg(&wg, writeAtomsWorker, .{ macho_file, macho_file.getFile(index).?.object });
+            macho_file.base.thread_pool.spawnWg(&wg, Object.writeSymtab, .{ macho_file.getFile(index).?.object.*, macho_file });
         }
 
         if (macho_file.eh_frame_sect_index) |_| {
@@ -368,8 +361,6 @@ fn writeSections(macho_file: *MachO) !void {
                 });
             }
         }
-
-        macho_file.base.thread_pool.spawnWg(&wg, writeSymtabWorker, .{macho_file});
     }
 
     if (macho_file.has_errors.swap(false, .seq_cst)) return error.FlushFailed;
@@ -437,38 +428,6 @@ fn writeEhFrameWorker(macho_file: *MachO) void {
     const relocs = macho_file.sections.items(.relocs)[sect_index];
     eh_frame.writeRelocs(macho_file, buffer.items, relocs.items) catch |err| {
         macho_file.base.fatal("failed to write '__TEXT,__eh_frame' section: {s}", .{@errorName(err)});
-        _ = macho_file.has_errors.swap(true, .seq_cst);
-    };
-}
-
-fn writeSymtabWorker(macho_file: *MachO) void {
-    const tracy = trace(@src());
-    defer tracy.end();
-
-    const doWork = struct {
-        fn doWork(mfile: *MachO) !void {
-            const tr = trace(@src());
-            defer tr.end();
-
-            const gpa = mfile.base.allocator;
-            const cmd = mfile.symtab_cmd;
-            try mfile.symtab.resize(gpa, cmd.nsyms);
-            try mfile.strtab.resize(gpa, cmd.strsize);
-            mfile.strtab.items[0] = 0;
-
-            var wg: WaitGroup = .{};
-            {
-                wg.reset();
-                defer wg.wait();
-                for (mfile.objects.items) |index| {
-                    mfile.base.thread_pool.spawnWg(&wg, Object.writeSymtab, .{ mfile.getFile(index).?.object.*, mfile });
-                }
-            }
-        }
-    }.doWork;
-
-    doWork(macho_file) catch |err| {
-        macho_file.base.fatal("failed to write symtab: {s}", .{@errorName(err)});
         _ = macho_file.has_errors.swap(true, .seq_cst);
     };
 }

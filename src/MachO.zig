@@ -63,9 +63,6 @@ binds_to_weak: AtomicBool = AtomicBool.init(false),
 weak_defines: AtomicBool = AtomicBool.init(false),
 has_errors: AtomicBool = AtomicBool.init(false),
 
-work_queue: std.fifo.LinearFifo(Job, .Dynamic),
-wait_group: WaitGroup = .{},
-
 pub fn openPath(allocator: Allocator, options: Options, thread_pool: *ThreadPool) !*MachO {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
         .truncate = true,
@@ -92,7 +89,6 @@ fn createEmpty(gpa: Allocator, options: Options, thread_pool: *ThreadPool) !*Mac
             .thread_pool = thread_pool,
         },
         .options = options,
-        .work_queue = std.fifo.LinearFifo(Job, .Dynamic).init(gpa),
     };
     return self;
 }
@@ -147,7 +143,6 @@ pub fn deinit(self: *MachO) void {
     self.export_trie.deinit(gpa);
     self.unwind_info.deinit(gpa);
     self.data_in_code.deinit(gpa);
-    self.work_queue.deinit();
 }
 
 pub fn flush(self: *MachO) !void {
@@ -241,15 +236,7 @@ pub fn flush(self: *MachO) !void {
         };
     }
 
-    for (self.objects.items) |index| {
-        try self.work_queue.writeItem(.{ .parse_object = index });
-    }
-    for (self.dylibs.items) |index| {
-        try self.work_queue.writeItem(.{ .parse_dylib = index });
-    }
-    try self.performAllTheWork();
-    if (self.has_errors.swap(false, .seq_cst)) return error.FlushFailed;
-
+    try self.parseObjects();
     try self.parseDependentDylibs(arena, lib_dirs.items, framework_dirs.items);
 
     if (!self.options.relocatable) {
@@ -265,15 +252,7 @@ pub fn flush(self: *MachO) !void {
 
     if (self.options.relocatable) return relocatable.flush(self);
 
-    for (self.objects.items) |index| {
-        try self.work_queue.writeItem(.{ .convert_tentative_defs = index });
-    }
-    if (self.getInternalObject()) |obj| {
-        try self.work_queue.writeItem(.{ .resolve_special_symbols = obj });
-    }
-    try self.performAllTheWork();
-    if (self.has_errors.swap(false, .seq_cst)) return error.FlushFailed;
-
+    try self.convertTentativeDefsAndResolveSpecialSymbols();
     try self.dedupLiterals();
 
     if (self.options.dead_strip) {
@@ -295,8 +274,6 @@ pub fn flush(self: *MachO) !void {
     try self.sortSections();
     try self.addAtomsToSections();
     try self.calcSectionSizes();
-    try self.performAllTheWork();
-    if (self.has_errors.swap(false, .seq_cst)) return error.FlushFailed;
 
     try self.generateUnwindInfo();
 
@@ -308,11 +285,7 @@ pub fn flush(self: *MachO) !void {
     state_log.debug("{}", .{self.dumpState()});
 
     try self.resizeSections();
-    try self.writeSections();
-    try self.writeSyntheticSections();
-    try self.updateLinkeditSizes();
-    try self.performAllTheWork();
-    if (self.has_errors.swap(false, .seq_cst)) return error.FlushFailed;
+    try self.writeSectionsAndUpdateLinkeditSizes();
 
     try self.writeSectionsToFile();
     try self.allocateLinkeditSegment();
@@ -697,6 +670,24 @@ fn addObject(self: *MachO, obj: LinkObject, handle: File.HandleIndex, offset: u6
     try self.objects.append(gpa, index);
 }
 
+fn parseObjects(self: *MachO) !void {
+    var wg: WaitGroup = .{};
+
+    {
+        wg.reset();
+        defer wg.wait();
+
+        for (self.objects.items) |index| {
+            self.base.thread_pool.spawnWg(&wg, parseObjectWorker, .{ self, index });
+        }
+        for (self.dylibs.items) |index| {
+            self.base.thread_pool.spawnWg(&wg, parseDylibWorker, .{ self, index });
+        }
+    }
+
+    if (self.has_errors.swap(false, .seq_cst)) return error.FlushFailed;
+}
+
 fn parseObjectWorker(self: *MachO, index: File.Index) void {
     const object = self.getFile(index).?.object;
     object.parse(self) catch |err| {
@@ -1026,6 +1017,23 @@ fn deadStripDylibs(self: *MachO) void {
             self.files.set(index, .null);
         } else i += 1;
     }
+}
+
+fn convertTentativeDefsAndResolveSpecialSymbols(self: *MachO) !void {
+    var wg: WaitGroup = .{};
+
+    {
+        wg.reset();
+        defer wg.wait();
+        for (self.objects.items) |index| {
+            self.base.thread_pool.spawnWg(&wg, convertTentativeDefinitionsWorker, .{ self, index });
+        }
+        if (self.getInternalObject()) |obj| {
+            self.base.thread_pool.spawnWg(&wg, resolveSpecialSymbolsWorker, .{ self, obj });
+        }
+    }
+
+    if (self.has_errors.swap(false, .seq_cst)) return error.FlushFailed;
 }
 
 fn convertTentativeDefinitionsWorker(self: *MachO, index: File.Index) void {
@@ -1496,20 +1504,40 @@ fn calcSectionSizes(self: *MachO) !void {
         header.@"align" = 3;
     }
 
-    const slice = self.sections.slice();
-    for (slice.items(.header), slice.items(.atoms), 0..) |header, atoms, i| {
-        if (atoms.items.len == 0) continue;
-        if (self.requiresThunks() and header.isCode()) continue;
-        try self.work_queue.writeItem(.{ .section_size = @intCast(i) });
-    }
-
-    if (self.requiresThunks()) {
+    var wg: WaitGroup = .{};
+    {
+        wg.reset();
+        defer wg.wait();
+        const slice = self.sections.slice();
         for (slice.items(.header), slice.items(.atoms), 0..) |header, atoms, i| {
-            if (!header.isCode()) continue;
             if (atoms.items.len == 0) continue;
-            try self.work_queue.writeItem(.{ .create_thunks = @intCast(i) });
+            if (self.requiresThunks() and header.isCode()) continue;
+            self.base.thread_pool.spawnWg(&wg, calcSectionSizeWorker, .{ self, @as(u8, @intCast(i)) });
+        }
+
+        if (self.requiresThunks()) {
+            for (slice.items(.header), slice.items(.atoms), 0..) |header, atoms, i| {
+                if (!header.isCode()) continue;
+                if (atoms.items.len == 0) continue;
+                self.base.thread_pool.spawnWg(&wg, createThunksWorker, .{ self, @as(u8, @intCast(i)) });
+            }
+        }
+
+        // At this point, we can also calculate symtab and data-in-code linkedit section sizes
+        for (self.objects.items) |index| {
+            self.base.thread_pool.spawnWg(&wg, File.calcSymtabSize, .{ self.getFile(index).?, self });
+        }
+        for (self.dylibs.items) |index| {
+            self.base.thread_pool.spawnWg(&wg, File.calcSymtabSize, .{ self.getFile(index).?, self });
+        }
+        if (self.getInternalObject()) |obj| {
+            self.base.thread_pool.spawnWg(&wg, File.calcSymtabSize, .{ obj.asFile(), self });
         }
     }
+
+    if (self.has_errors.swap(false, .seq_cst)) return error.FlushFailed;
+
+    try self.calcSymtabSize();
 
     if (self.got_sect_index) |idx| {
         const header = &self.sections.items(.header)[idx];
@@ -1783,7 +1811,6 @@ fn allocateSyntheticSymbols(self: *MachO) void {
             const sym = ref.getSymbol(self).?;
             const name = sym.getName(self);
 
-            sym.flags.@"export" = false;
             sym.value = text_seg.vmaddr;
 
             if (mem.startsWith(u8, name, "segment$start$")) {
@@ -1894,42 +1921,6 @@ fn allocateLinkeditSegment(self: *MachO) error{Overflow}!void {
     seg.filesize = off - seg.fileoff;
 }
 
-fn updateLinkeditSizes(self: *MachO) !void {
-    try self.work_queue.writeItem(.{ .rebase_size = {} });
-    try self.work_queue.writeItem(.{ .bind_size = {} });
-    try self.work_queue.writeItem(.{ .weak_bind_size = {} });
-    try self.work_queue.writeItem(.{ .export_trie_size = {} });
-    try self.work_queue.writeItem(.{ .data_in_code_size = {} });
-    try self.work_queue.writeItem(.{ .calc_symtab_size = {} });
-
-    if (self.la_symbol_ptr_sect_index) |_| {
-        try self.work_queue.writeItem(.{ .lazy_bind_size = {} });
-    }
-}
-
-fn performAllTheWork(self: *MachO) !void {
-    self.wait_group.reset();
-    defer self.wait_group.wait();
-    while (self.work_queue.readItem()) |job| switch (job) {
-        .parse_object => |x| self.base.thread_pool.spawnWg(&self.wait_group, parseObjectWorker, .{ self, x }),
-        .parse_dylib => |x| self.base.thread_pool.spawnWg(&self.wait_group, parseDylibWorker, .{ self, x }),
-        .convert_tentative_defs => |x| self.base.thread_pool.spawnWg(&self.wait_group, convertTentativeDefinitionsWorker, .{ self, x }),
-        .resolve_special_symbols => |x| self.base.thread_pool.spawnWg(&self.wait_group, resolveSpecialSymbolsWorker, .{ self, x }),
-        .section_size => |x| self.base.thread_pool.spawnWg(&self.wait_group, calcSectionSizeWorker, .{ self, x }),
-        .create_thunks => |x| self.base.thread_pool.spawnWg(&self.wait_group, createThunksWorker, .{ self, x }),
-        .rebase_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLinkeditSizeWorker, .{ self, .rebase }),
-        .bind_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLinkeditSizeWorker, .{ self, .bind }),
-        .weak_bind_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLinkeditSizeWorker, .{ self, .weak_bind }),
-        .lazy_bind_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLazyBindSizeWorker, .{self}),
-        .export_trie_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLinkeditSizeWorker, .{ self, .export_trie }),
-        .data_in_code_size => self.base.thread_pool.spawnWg(&self.wait_group, updateLinkeditSizeWorker, .{ self, .data_in_code }),
-        .calc_symtab_size => self.base.thread_pool.spawnWg(&self.wait_group, calcSymtabSize, .{self}),
-        .write_atoms => |x| self.base.thread_pool.spawnWg(&self.wait_group, writeAtomsWorker, .{ self, x }),
-        .write_thunk => |x| self.base.thread_pool.spawnWg(&self.wait_group, writeThunkWorker, .{ self, x }),
-        .write_synthetic_section => |x| self.base.thread_pool.spawnWg(&self.wait_group, writeSyntheticSectionWorker, .{ self, x[0], x[1] }),
-    };
-}
-
 fn updateLazyBindSizeWorker(self: *MachO) void {
     const doWork = struct {
         fn doWork(macho_file: *MachO) !void {
@@ -1982,16 +1973,66 @@ fn resizeSections(self: *MachO) !void {
     }
 }
 
-fn writeSections(self: *MachO) !void {
-    for (self.objects.items) |index| {
-        try self.work_queue.writeItem(.{ .write_atoms = index });
+fn writeSectionsAndUpdateLinkeditSizes(self: *MachO) !void {
+    const gpa = self.base.allocator;
+
+    const cmd = self.symtab_cmd;
+    try self.symtab.resize(gpa, cmd.nsyms);
+    try self.strtab.resize(gpa, cmd.strsize);
+    self.strtab.items[0] = 0;
+
+    var wg: WaitGroup = .{};
+    {
+        wg.reset();
+        defer wg.wait();
+        for (self.objects.items) |index| {
+            self.base.thread_pool.spawnWg(&wg, writeAtomsWorker, .{ self, index });
+        }
+        if (self.getInternalObject()) |obj| {
+            self.base.thread_pool.spawnWg(&wg, writeAtomsWorker, .{ self, obj.index });
+        }
+        for (self.thunks.items) |thunk| {
+            self.base.thread_pool.spawnWg(&wg, writeThunkWorker, .{ self, thunk });
+        }
+
+        const slice = self.sections.slice();
+        for (&[_]?u8{
+            self.eh_frame_sect_index,
+            self.unwind_info_sect_index,
+            self.got_sect_index,
+            self.stubs_sect_index,
+            self.la_symbol_ptr_sect_index,
+            self.tlv_ptr_sect_index,
+            self.objc_stubs_sect_index,
+        }) |maybe_sect_id| {
+            if (maybe_sect_id) |sect_id| {
+                const out = &slice.items(.out)[sect_id];
+                self.base.thread_pool.spawnWg(&wg, writeSyntheticSectionWorker, .{ self, sect_id, out.items });
+            }
+        }
+
+        if (self.la_symbol_ptr_sect_index) |_| {
+            self.base.thread_pool.spawnWg(&wg, updateLazyBindSizeWorker, .{self});
+        }
+
+        self.base.thread_pool.spawnWg(&wg, updateLinkeditSizeWorker, .{ self, .rebase });
+        self.base.thread_pool.spawnWg(&wg, updateLinkeditSizeWorker, .{ self, .bind });
+        self.base.thread_pool.spawnWg(&wg, updateLinkeditSizeWorker, .{ self, .weak_bind });
+        self.base.thread_pool.spawnWg(&wg, updateLinkeditSizeWorker, .{ self, .export_trie });
+        self.base.thread_pool.spawnWg(&wg, updateLinkeditSizeWorker, .{ self, .data_in_code });
+
+        for (self.objects.items) |index| {
+            self.base.thread_pool.spawnWg(&wg, File.writeSymtab, .{ self.getFile(index).?, self });
+        }
+        for (self.dylibs.items) |index| {
+            self.base.thread_pool.spawnWg(&wg, File.writeSymtab, .{ self.getFile(index).?, self });
+        }
+        if (self.getInternalObject()) |obj| {
+            self.base.thread_pool.spawnWg(&wg, File.writeSymtab, .{ obj.asFile(), self });
+        }
     }
-    if (self.getInternalObject()) |obj| {
-        try self.work_queue.writeItem(.{ .write_atoms = obj.index });
-    }
-    for (self.thunks.items) |thunk| {
-        try self.work_queue.writeItem(.{ .write_thunk = thunk });
-    }
+
+    if (self.has_errors.swap(false, .seq_cst)) return error.FlushFailed;
 }
 
 fn writeSectionsToFile(self: *MachO) !void {
@@ -2088,24 +2129,6 @@ fn writeSyntheticSectionWorker(self: *MachO, sect_id: u8, out: []u8) void {
     };
 }
 
-fn writeSyntheticSections(self: *MachO) !void {
-    const slice = self.sections.slice();
-    for (&[_]?u8{
-        self.eh_frame_sect_index,
-        self.unwind_info_sect_index,
-        self.got_sect_index,
-        self.stubs_sect_index,
-        self.la_symbol_ptr_sect_index,
-        self.tlv_ptr_sect_index,
-        self.objc_stubs_sect_index,
-    }) |maybe_sect_id| {
-        if (maybe_sect_id) |sect_id| {
-            const out = &slice.items(.out)[sect_id];
-            try self.work_queue.writeItem(.{ .write_synthetic_section = .{ sect_id, out.items } });
-        }
-    }
-}
-
 fn writeLinkeditSectionsToFile(self: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
@@ -2155,16 +2178,10 @@ pub fn writeDataInCode(self: *MachO) !void {
     try self.base.file.pwriteAll(mem.sliceAsBytes(self.data_in_code.entries.items), cmd.dataoff);
 }
 
-fn calcSymtabSize(self: *MachO) void {
+fn calcSymtabSize(self: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
-    self.calcSymtabSizeImpl() catch |err| {
-        self.base.fatal("failed to calculate symtab size: {s}", .{@errorName(err)});
-        _ = self.has_errors.swap(true, .seq_cst);
-    };
-}
 
-fn calcSymtabSizeImpl(self: *MachO) !void {
     const gpa = self.base.allocator;
 
     var files = std.ArrayList(File.Index).init(gpa);
@@ -2173,16 +2190,6 @@ fn calcSymtabSizeImpl(self: *MachO) !void {
     for (self.objects.items) |index| files.appendAssumeCapacity(index);
     for (self.dylibs.items) |index| files.appendAssumeCapacity(index);
     if (self.internal_object_index) |index| files.appendAssumeCapacity(index);
-
-    var wg: WaitGroup = .{};
-
-    {
-        wg.reset();
-        defer wg.wait();
-        for (files.items) |index| {
-            self.base.thread_pool.spawnWg(&wg, File.calcSymtabSize, .{ self.getFile(index).?, self });
-        }
-    }
 
     var nlocals: u32 = 0;
     var nstabs: u32 = 0;
@@ -2233,20 +2240,6 @@ fn calcSymtabSizeImpl(self: *MachO) !void {
         cmd.nextdefsym = nexports;
         cmd.iundefsym = nlocals + nstabs + nexports;
         cmd.nundefsym = nimports;
-    }
-
-    {
-        wg.reset();
-        defer wg.wait();
-
-        const cmd = self.symtab_cmd;
-        try self.symtab.resize(gpa, cmd.nsyms);
-        try self.strtab.resize(gpa, cmd.strsize);
-        self.strtab.items[0] = 0;
-
-        for (files.items) |index| {
-            self.base.thread_pool.spawnWg(&wg, File.writeSymtab, .{ self.getFile(index).?, self });
-        }
     }
 }
 
@@ -2949,25 +2942,6 @@ pub const null_sym = macho.nlist_64{
     .n_sect = 0,
     .n_desc = 0,
     .n_value = 0,
-};
-
-pub const Job = union(enum) {
-    parse_object: File.Index,
-    parse_dylib: File.Index,
-    convert_tentative_defs: File.Index,
-    resolve_special_symbols: *InternalObject,
-    section_size: u8,
-    create_thunks: u8,
-    rebase_size: void,
-    bind_size: void,
-    weak_bind_size: void,
-    lazy_bind_size: void,
-    export_trie_size: void,
-    data_in_code_size: void,
-    calc_symtab_size: void,
-    write_atoms: File.Index,
-    write_thunk: Thunk,
-    write_synthetic_section: struct { u8, []u8 },
 };
 
 /// A reference to atom or symbol in an input file.
