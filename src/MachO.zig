@@ -1595,7 +1595,7 @@ fn calcSectionSizeWorker(self: *MachO, sect_id: u8) void {
         ) !void {
             for (atoms) |ref| {
                 const atom = ref.getAtom(macho_file).?;
-                const p2align = atom.alignment.load(.seq_cst);
+                const p2align = atom.alignment;
                 const atom_alignment = try math.powi(u32, 2, p2align);
                 const offset = mem.alignForward(u64, header.size, atom_alignment);
                 const padding = offset - header.size;

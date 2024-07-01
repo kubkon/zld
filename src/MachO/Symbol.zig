@@ -29,8 +29,6 @@ visibility: Visibility = .local,
 
 extra: u32 = 0,
 
-mutex: std.Thread.Mutex = .{},
-
 pub fn isLocal(symbol: Symbol) bool {
     return !(symbol.flags.import or symbol.flags.@"export");
 }

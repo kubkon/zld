@@ -11,7 +11,7 @@ file: File.Index = 0,
 size: u64 = 0,
 
 /// Alignment of this atom as a power of two.
-alignment: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+alignment: u32 = 0,
 
 /// Index of the input section.
 n_sect: u32 = 0,
@@ -861,8 +861,8 @@ fn format2(
     const macho_file = ctx.macho_file;
     const file = atom.getFile(macho_file);
     try writer.print("atom({d}) : {s} : @{x} : sect({d}) : align({x}) : size({x}) : thunk({d})", .{
-        atom.atom_index,                 atom.getName(macho_file),      atom.getAddress(macho_file),
-        atom.out_n_sect,                 atom.alignment.load(.seq_cst), atom.size,
+        atom.atom_index,                 atom.getName(macho_file), atom.getAddress(macho_file),
+        atom.out_n_sect,                 atom.alignment,           atom.size,
         atom.getExtra(macho_file).thunk,
     });
     if (!atom.alive.load(.seq_cst)) try writer.writeAll(" : [*]");

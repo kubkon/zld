@@ -631,6 +631,11 @@ pub fn resolveLiterals(self: *Object, lp: *MachO.LiteralPool, macho_file: *MachO
                 const res = try lp.insert(gpa, header.type(), atom_data);
                 if (!res.found_existing) {
                     res.ref.* = .{ .index = atom.getExtra(macho_file).literal_symbol_index, .file = self.index };
+                } else {
+                    const lp_sym = lp.getSymbol(res.index, macho_file);
+                    const lp_atom = lp_sym.getAtom(macho_file).?;
+                    lp_atom.alignment = @max(lp_atom.alignment, atom.alignment);
+                    _ = atom.alive.swap(false, .seq_cst);
                 }
                 atom.addExtra(.{ .literal_pool_index = res.index }, macho_file);
             }
@@ -666,6 +671,11 @@ pub fn resolveLiterals(self: *Object, lp: *MachO.LiteralPool, macho_file: *MachO
                 buffer.clearRetainingCapacity();
                 if (!res.found_existing) {
                     res.ref.* = .{ .index = atom.getExtra(macho_file).literal_symbol_index, .file = self.index };
+                } else {
+                    const lp_sym = lp.getSymbol(res.index, macho_file);
+                    const lp_atom = lp_sym.getAtom(macho_file).?;
+                    lp_atom.alignment = @max(lp_atom.alignment, atom.alignment);
+                    _ = atom.alive.swap(false, .seq_cst);
                 }
                 atom.addExtra(.{ .literal_pool_index = res.index }, macho_file);
             }
@@ -689,25 +699,30 @@ pub fn dedupLiterals(self: *Object, lp: MachO.LiteralPool, macho_file: *MachO) v
         for (relocs) |*rel| {
             if (rel.tag != .@"extern") continue;
             const target_sym_ref = rel.getTargetSymbolRef(atom.*, macho_file);
-            if (target_sym_ref.getFile(macho_file) != null) {
-                const target_sym = target_sym_ref.getSymbol(macho_file).?;
-                if (target_sym.getAtom(macho_file)) |target_atom| {
-                    const isec = target_atom.getInputSection(macho_file);
-                    if (Object.isCstringLiteral(isec) or Object.isFixedSizeLiteral(isec) or Object.isPtrLiteral(isec)) {
-                        const lp_index = target_atom.getExtra(macho_file).literal_pool_index;
-                        const lp_sym = lp.getSymbol(lp_index, macho_file);
-                        const lp_atom_ref = lp_sym.atom_ref;
-                        if (target_atom.atom_index != lp_atom_ref.index or target_atom.file != lp_atom_ref.file) {
-                            const lp_atom = lp_sym.getAtom(macho_file).?;
-                            _ = lp_atom.alignment.fetchMax(target_atom.alignment.load(.seq_cst), .seq_cst);
-                            _ = target_atom.alive.swap(false, .seq_cst);
-                            target_sym.mutex.lock();
-                            defer target_sym.mutex.unlock();
-                            target_sym.atom_ref = lp_atom_ref;
-                        }
-                    }
-                }
+            const file = target_sym_ref.getFile(macho_file) orelse continue;
+            if (file.getIndex() != self.index) continue;
+            const target_sym = target_sym_ref.getSymbol(macho_file).?;
+            const target_atom = target_sym.getAtom(macho_file) orelse continue;
+            const isec = target_atom.getInputSection(macho_file);
+            if (!Object.isCstringLiteral(isec) and !Object.isFixedSizeLiteral(isec) and !Object.isPtrLiteral(isec)) continue;
+            const lp_index = target_atom.getExtra(macho_file).literal_pool_index;
+            const lp_sym = lp.getSymbol(lp_index, macho_file);
+            const lp_atom_ref = lp_sym.atom_ref;
+            if (target_atom.atom_index != lp_atom_ref.index or target_atom.file != lp_atom_ref.file) {
+                target_sym.atom_ref = lp_atom_ref;
             }
+        }
+    }
+
+    for (self.symbols.items) |*sym| {
+        const atom = sym.getAtom(macho_file) orelse continue;
+        const isec = atom.getInputSection(macho_file);
+        if (!Object.isCstringLiteral(isec) and !Object.isFixedSizeLiteral(isec) and !Object.isPtrLiteral(isec)) continue;
+        const lp_index = atom.getExtra(macho_file).literal_pool_index;
+        const lp_sym = lp.getSymbol(lp_index, macho_file);
+        const lp_atom_ref = lp_sym.atom_ref;
+        if (atom.atom_index != lp_atom_ref.index or self.index != lp_atom_ref.file) {
+            sym.atom_ref = lp_atom_ref;
         }
     }
 }
@@ -2258,8 +2273,8 @@ fn addAtom(self: *Object, allocator: Allocator, args: AddAtomArgs) !Atom.Index {
         .size = args.size,
         .off = args.off,
         .extra = try self.addAtomExtra(allocator, .{}),
+        .alignment = args.alignment,
     };
-    atom.alignment.store(args.alignment, .seq_cst);
     return atom_index;
 }
 
