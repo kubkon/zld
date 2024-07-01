@@ -3,8 +3,7 @@ const builtin = @import("builtin");
 const build_options = @import("build_options");
 
 pub const enable = if (builtin.is_test) false else build_options.enable_tracy;
-// pub const enable_allocation = enable;
-pub const enable_allocation = false;
+pub const enable_allocation = enable;
 pub const enable_callstack = enable;
 
 // TODO: make this configurable
