@@ -162,7 +162,7 @@ fn testBuildVersionMacOS(b: *Build, opts: Options) *Step {
 
         const exe = ld(b, "a.out", opts);
         exe.addFileSource(obj.getFile());
-        exe.addArgs(&.{ "-syslibroot", opts.macos_sdk });
+        exe.addArgs(&.{ "-dynamic", "-syslibroot", opts.macos_sdk, "-lSystem", "-lc" });
 
         const check = exe.check();
         check.checkInHeaders();
@@ -182,12 +182,15 @@ fn testBuildVersionMacOS(b: *Build, opts: Options) *Step {
         const exe = ld(b, "a.out", opts);
         exe.addFileSource(obj.getFile());
         exe.addArgs(&.{
+            "-dynamic",
             "-syslibroot",
             opts.macos_sdk,
             "-platform_version",
             "macos",
             "10.13",
             "10.13",
+            "-lSystem",
+            "-lc",
         });
 
         const check = exe.check();
@@ -214,7 +217,7 @@ fn testBuildVersionIOS(b: *Build, opts: Options) *Step {
 
         const exe = ld(b, "a.out", opts);
         exe.addFileSource(obj.getFile());
-        exe.addArgs(&.{ "-syslibroot", ios_sdk });
+        exe.addArgs(&.{ "-dynamic", "-syslibroot", ios_sdk, "-lSystem", "-lc" });
 
         const check = exe.check();
         check.checkInHeaders();
@@ -233,7 +236,7 @@ fn testBuildVersionIOS(b: *Build, opts: Options) *Step {
 
         const exe = ld(b, "a.out", opts);
         exe.addFileSource(obj.getFile());
-        exe.addArgs(&.{ "-syslibroot", ios_sdk });
+        exe.addArgs(&.{ "-dynamic", "-syslibroot", ios_sdk, "-lSystem", "-lc" });
 
         const check = exe.check();
         check.checkInHeaders();
@@ -2698,7 +2701,16 @@ fn testSearchStrategy(b: *Build, opts: Options) *Step {
 
     const dylib = ld(b, "liba.dylib", opts);
     dylib.addFileSource(obj.getFile());
-    dylib.addArgs(&.{ "-syslibroot", opts.macos_sdk, "-dylib", "-install_name", "@rpath/liba.dylib" });
+    dylib.addArgs(&.{
+        "-dynamic",
+        "-syslibroot",
+        opts.macos_sdk,
+        "-dylib",
+        "-install_name",
+        "@rpath/liba.dylib",
+        "-lSystem",
+        "-lc",
+    });
 
     const main_c =
         \\#include<stdio.h>
@@ -3664,7 +3676,7 @@ fn testUnwindInfo(b: *Build, opts: Options) *Step {
     obj2.addArgs(flags);
 
     const exe = ld(b, "main", opts);
-    exe.addArgs(&.{ "-syslibroot", opts.macos_sdk, "-lc++" });
+    exe.addArgs(&.{ "-dynamic", "-syslibroot", opts.macos_sdk, "-lc++", "-lSystem", "-lc" });
     exe.addFileSource(obj.getFile());
     exe.addFileSource(obj1.getFile());
     exe.addFileSource(obj2.getFile());
@@ -4094,10 +4106,8 @@ fn lipo(b: *Build, name: []const u8) SysCmd {
 fn ld(b: *Build, name: []const u8, opts: Options) SysCmd {
     const cmd = Run.create(b, "ld");
     cmd.addFileArg(opts.zld);
-    cmd.addArg("-dynamic");
     cmd.addArg("-o");
     const out = cmd.addOutputFileArg(name);
-    cmd.addArgs(&.{ "-lSystem", "-lc" });
     return .{ .cmd = cmd, .out = out };
 }
 

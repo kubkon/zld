@@ -3,7 +3,9 @@ allocator: Allocator,
 file: fs.File,
 thread_pool: *ThreadPool,
 warnings: std.ArrayListUnmanaged(ErrorMsg) = .{},
+warnings_mutex: std.Thread.Mutex = .{},
 errors: std.ArrayListUnmanaged(ErrorMsg) = .{},
+errors_mutex: std.Thread.Mutex = .{},
 
 pub const Tag = enum {
     coff,
@@ -206,7 +208,9 @@ pub fn openPath(allocator: Allocator, tag: Tag, options: Options, thread_pool: *
 
 pub fn deinit(base: *Zld) void {
     base.file.close();
+    assert(base.warnings.items.len == 0);
     base.warnings.deinit(base.allocator);
+    assert(base.errors.items.len == 0);
     base.errors.deinit(base.allocator);
     switch (base.tag) {
         .elf => {
@@ -242,15 +246,13 @@ pub fn flush(base: *Zld) !void {
 }
 
 pub fn warn(base: *Zld, comptime format: []const u8, args: anytype) void {
-    base.warnings.ensureUnusedCapacity(base.allocator, 1) catch return;
-    const msg = std.fmt.allocPrint(base.allocator, format, args) catch return;
-    base.warnings.appendAssumeCapacity(.{ .msg = msg });
+    const warning = base.addWarningWithNotes(0) catch return;
+    warning.addMsg(format, args) catch return;
 }
 
 pub fn fatal(base: *Zld, comptime format: []const u8, args: anytype) void {
-    base.errors.ensureUnusedCapacity(base.allocator, 1) catch return;
-    const msg = std.fmt.allocPrint(base.allocator, format, args) catch return;
-    base.errors.appendAssumeCapacity(.{ .msg = msg });
+    const err = base.addErrorWithNotes(0) catch return;
+    err.addMsg(format, args) catch return;
 }
 
 pub const ErrorWithNotes = struct {
@@ -277,6 +279,8 @@ pub const ErrorWithNotes = struct {
 };
 
 pub fn addErrorWithNotes(base: *Zld, note_count: usize) !ErrorWithNotes {
+    base.errors_mutex.lock();
+    defer base.errors_mutex.unlock();
     const err_index = base.errors.items.len;
     const err_msg = try base.errors.addOne(base.allocator);
     err_msg.* = .{ .msg = undefined };
@@ -285,6 +289,8 @@ pub fn addErrorWithNotes(base: *Zld, note_count: usize) !ErrorWithNotes {
 }
 
 pub fn addWarningWithNotes(base: *Zld, note_count: usize) !ErrorWithNotes {
+    base.warnings_mutex.lock();
+    defer base.warnings_mutex.unlock();
     const err_index = base.warnings.items.len;
     const err_msg = try base.warnings.addOne(base.allocator);
     err_msg.* = .{ .msg = undefined };

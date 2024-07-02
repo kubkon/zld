@@ -19,6 +19,8 @@ pub fn build(b: *std.Build) void {
     };
     const use_llvm = b.option(bool, "use-llvm", "Whether to use LLVM") orelse true;
     const use_lld = if (builtin.os.tag == .macos) false else use_llvm;
+    const sanitize_thread = b.option(bool, "sanitize-thread", "Enable thread-sanitization") orelse false;
+    const single_threaded = b.option(bool, "single-threaded", "Force single-threaded") orelse false;
 
     const yaml = b.dependency("zig-yaml", .{
         .target = target,
@@ -36,6 +38,8 @@ pub fn build(b: *std.Build) void {
         .optimize = mode,
         .use_llvm = use_llvm,
         .use_lld = use_lld,
+        .sanitize_thread = sanitize_thread,
+        .single_threaded = single_threaded,
     });
     exe.root_module.addImport("yaml", yaml.module("yaml"));
     exe.root_module.addImport("dis_x86_64", dis_x86_64.module("dis_x86_64"));
@@ -91,6 +95,8 @@ pub fn build(b: *std.Build) void {
         .optimize = mode,
         .use_llvm = use_llvm,
         .use_lld = use_lld,
+        .sanitize_thread = sanitize_thread,
+        .single_threaded = single_threaded,
     });
     const unit_tests_opts = b.addOptions();
     unit_tests.root_module.addOptions("build_options", unit_tests_opts);

@@ -4,15 +4,14 @@
 value: u64 = 0,
 
 /// Offset into the linker's intern table.
-name: u32 = 0,
+name: MachO.String = .{},
 
 /// File where this symbol is defined.
 file: File.Index = 0,
 
-/// Atom containing this symbol if any.
-/// Index of 0 means there is no associated atom with this symbol.
+/// Reference to Atom containing this symbol if any.
 /// Use `getAtom` to get the pointer to the atom.
-atom: Atom.Index = 0,
+atom_ref: MachO.Ref = .{ .index = 0, .file = 0 },
 
 /// Assigned output section index for this symbol.
 out_n_sect: u8 = 0,
@@ -23,6 +22,8 @@ nlist_idx: u32 = 0,
 
 /// Misc flags for the symbol packaged as packed struct for compression.
 flags: Flags = .{},
+
+sect_flags: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),
 
 visibility: Visibility = .local,
 
@@ -55,15 +56,18 @@ pub fn weakRef(symbol: Symbol, macho_file: *MachO) bool {
 }
 
 pub fn getName(symbol: Symbol, macho_file: *MachO) [:0]const u8 {
-    if (symbol.flags.global) return macho_file.string_intern.getAssumeExists(symbol.name);
     return switch (symbol.getFile(macho_file).?) {
-        .dylib => unreachable, // There are no local symbols for dylibs
         inline else => |x| x.getString(symbol.name),
     };
 }
 
 pub fn getAtom(symbol: Symbol, macho_file: *MachO) ?*Atom {
-    return macho_file.getAtom(symbol.atom);
+    return symbol.atom_ref.getAtom(macho_file);
+}
+
+pub fn getOutputSectionIndex(symbol: Symbol, macho_file: *MachO) u8 {
+    if (symbol.getAtom(macho_file)) |atom| return atom.out_n_sect;
+    return symbol.out_n_sect;
 }
 
 pub fn getFile(symbol: Symbol, macho_file: *MachO) ?File {
@@ -74,8 +78,9 @@ pub fn getFile(symbol: Symbol, macho_file: *MachO) ?File {
 pub fn getNlist(symbol: Symbol, macho_file: *MachO) macho.nlist_64 {
     const file = symbol.getFile(macho_file).?;
     return switch (file) {
+        .dylib => unreachable,
         .object => |x| x.symtab.items(.nlist)[symbol.nlist_idx],
-        else => unreachable,
+        .internal => |x| x.symtab.items[symbol.nlist_idx],
     };
 }
 
@@ -95,7 +100,7 @@ pub fn getDylibOrdinal(symbol: Symbol, macho_file: *MachO) ?u16 {
 }
 
 pub fn getSymbolRank(symbol: Symbol, macho_file: *MachO) u32 {
-    const file = symbol.getFile(macho_file) orelse return std.math.maxInt(u32);
+    const file = symbol.getFile(macho_file).?;
     const in_archive = switch (file) {
         .object => |x| !x.alive,
         else => false,
@@ -111,9 +116,9 @@ pub fn getAddress(symbol: Symbol, opts: struct {
     stubs: bool = true,
 }, macho_file: *MachO) u64 {
     if (opts.stubs) {
-        if (symbol.flags.stubs) {
+        if (symbol.getSectionFlags().stubs) {
             return symbol.getStubsAddress(macho_file);
-        } else if (symbol.flags.objc_stubs) {
+        } else if (symbol.getSectionFlags().objc_stubs) {
             return symbol.getObjcStubsAddress(macho_file);
         }
     }
@@ -122,34 +127,36 @@ pub fn getAddress(symbol: Symbol, opts: struct {
 }
 
 pub fn getGotAddress(symbol: Symbol, macho_file: *MachO) u64 {
-    if (!symbol.flags.got) return 0;
-    const extra = symbol.getExtra(macho_file).?;
+    if (!symbol.getSectionFlags().got) return 0;
+    const extra = symbol.getExtra(macho_file);
     return macho_file.got.getAddress(extra.got, macho_file);
 }
 
 pub fn getStubsAddress(symbol: Symbol, macho_file: *MachO) u64 {
-    if (!symbol.flags.stubs) return 0;
-    const extra = symbol.getExtra(macho_file).?;
+    if (!symbol.getSectionFlags().stubs) return 0;
+    const extra = symbol.getExtra(macho_file);
     return macho_file.stubs.getAddress(extra.stubs, macho_file);
 }
 
 pub fn getObjcStubsAddress(symbol: Symbol, macho_file: *MachO) u64 {
-    if (!symbol.flags.objc_stubs) return 0;
-    const extra = symbol.getExtra(macho_file).?;
+    if (!symbol.getSectionFlags().objc_stubs) return 0;
+    const extra = symbol.getExtra(macho_file);
     return macho_file.objc_stubs.getAddress(extra.objc_stubs, macho_file);
 }
 
 pub fn getObjcSelrefsAddress(symbol: Symbol, macho_file: *MachO) u64 {
-    if (!symbol.flags.objc_stubs) return 0;
-    const extra = symbol.getExtra(macho_file).?;
-    const atom = macho_file.getAtom(extra.objc_selrefs).?;
-    assert(atom.flags.alive);
-    return atom.getAddress(macho_file);
+    if (!symbol.getSectionFlags().objc_stubs) return 0;
+    const extra = symbol.getExtra(macho_file);
+    const file = symbol.getFile(macho_file).?;
+    return switch (file) {
+        .dylib => unreachable,
+        inline else => |x| x.symbols.items[extra.objc_selrefs].getAddress(.{}, macho_file),
+    };
 }
 
 pub fn getTlvPtrAddress(symbol: Symbol, macho_file: *MachO) u64 {
-    if (!symbol.flags.tlv_ptr) return 0;
-    const extra = symbol.getExtra(macho_file).?;
+    if (!symbol.getSectionFlags().tlv_ptr) return 0;
+    const extra = symbol.getExtra(macho_file);
     return macho_file.tlv_ptr.getAddress(extra.tlv_ptr, macho_file);
 }
 
@@ -160,7 +167,7 @@ pub fn getOutputSymtabIndex(symbol: Symbol, macho_file: *MachO) ?u32 {
     const symtab_ctx = switch (file) {
         inline else => |x| x.output_symtab_ctx,
     };
-    var idx = symbol.getExtra(macho_file).?.symtab;
+    var idx = symbol.getExtra(macho_file).symtab;
     if (symbol.isLocal()) {
         idx += symtab_ctx.ilocal;
     } else if (symbol.flags.@"export") {
@@ -172,20 +179,25 @@ pub fn getOutputSymtabIndex(symbol: Symbol, macho_file: *MachO) ?u32 {
     return idx;
 }
 
+pub fn getSectionFlags(symbol: Symbol) SectionFlags {
+    return @bitCast(symbol.sect_flags.load(.seq_cst));
+}
+
+pub fn setSectionFlags(symbol: *Symbol, flags: SectionFlags) void {
+    _ = symbol.sect_flags.fetchOr(@bitCast(flags), .seq_cst);
+}
+
 const AddExtraOpts = struct {
     got: ?u32 = null,
     stubs: ?u32 = null,
     objc_stubs: ?u32 = null,
-    objc_selrefs: ?u32 = null,
     tlv_ptr: ?u32 = null,
     symtab: ?u32 = null,
+    objc_selrefs: ?u32 = null,
 };
 
-pub fn addExtra(symbol: *Symbol, opts: AddExtraOpts, macho_file: *MachO) !void {
-    if (symbol.getExtra(macho_file) == null) {
-        symbol.extra = try macho_file.addSymbolExtra(.{});
-    }
-    var extra = symbol.getExtra(macho_file).?;
+pub fn addExtra(symbol: *Symbol, opts: AddExtraOpts, macho_file: *MachO) void {
+    var extra = symbol.getExtra(macho_file);
     inline for (@typeInfo(@TypeOf(opts)).Struct.fields) |field| {
         if (@field(opts, field.name)) |x| {
             @field(extra, field.name) = x;
@@ -194,18 +206,22 @@ pub fn addExtra(symbol: *Symbol, opts: AddExtraOpts, macho_file: *MachO) !void {
     symbol.setExtra(extra, macho_file);
 }
 
-pub inline fn getExtra(symbol: Symbol, macho_file: *MachO) ?Extra {
-    return macho_file.getSymbolExtra(symbol.extra);
+pub inline fn getExtra(symbol: Symbol, macho_file: *MachO) Extra {
+    return switch (symbol.getFile(macho_file).?) {
+        inline else => |x| x.getSymbolExtra(symbol.extra),
+    };
 }
 
 pub inline fn setExtra(symbol: Symbol, extra: Extra, macho_file: *MachO) void {
-    macho_file.setSymbolExtra(symbol.extra, extra);
+    return switch (symbol.getFile(macho_file).?) {
+        inline else => |x| x.setSymbolExtra(symbol.extra, extra),
+    };
 }
 
 pub fn setOutputSym(symbol: Symbol, macho_file: *MachO, out: *macho.nlist_64) void {
     if (symbol.isLocal()) {
         out.n_type = if (symbol.flags.abs) macho.N_ABS else macho.N_SECT;
-        out.n_sect = if (symbol.flags.abs) 0 else @intCast(symbol.out_n_sect + 1);
+        out.n_sect = if (symbol.flags.abs) 0 else @intCast(symbol.getOutputSectionIndex(macho_file) + 1);
         out.n_desc = 0;
         out.n_value = symbol.getAddress(.{ .stubs = false }, macho_file);
 
@@ -217,7 +233,7 @@ pub fn setOutputSym(symbol: Symbol, macho_file: *MachO, out: *macho.nlist_64) vo
         assert(symbol.visibility == .global);
         out.n_type = macho.N_EXT;
         out.n_type |= if (symbol.flags.abs) macho.N_ABS else macho.N_SECT;
-        out.n_sect = if (symbol.flags.abs) 0 else @intCast(symbol.out_n_sect + 1);
+        out.n_sect = if (symbol.flags.abs) 0 else @intCast(symbol.getOutputSectionIndex(macho_file) + 1);
         out.n_value = symbol.getAddress(.{ .stubs = false }, macho_file);
         out.n_desc = 0;
 
@@ -292,8 +308,8 @@ fn format2(
         symbol.getAddress(.{}, ctx.macho_file),
     });
     if (symbol.getFile(ctx.macho_file)) |file| {
-        if (symbol.out_n_sect != 0) {
-            try writer.print(" : sect({d})", .{symbol.out_n_sect});
+        if (symbol.getOutputSectionIndex(ctx.macho_file) != 0) {
+            try writer.print(" : sect({d})", .{symbol.getOutputSectionIndex(ctx.macho_file)});
         }
         if (symbol.getAtom(ctx.macho_file)) |atom| {
             try writer.print(" : atom({d})", .{atom.atom_index});
@@ -318,11 +334,6 @@ pub const Flags = packed struct {
 
     /// Whether the symbol is exported at runtime.
     @"export": bool = false,
-
-    /// Whether the symbol is effectively an extern and takes part in global
-    /// symbol resolution. Then, its name will be saved in global string interning
-    /// table.
-    global: bool = false,
 
     /// Whether this symbol is weak.
     weak: bool = false,
@@ -350,7 +361,9 @@ pub const Flags = packed struct {
 
     /// Whether the symbol makes into the output symtab or not.
     output_symtab: bool = false,
+};
 
+pub const SectionFlags = packed struct(u8) {
     /// Whether the symbol contains __got indirection.
     got: bool = false,
 
@@ -362,6 +375,8 @@ pub const Flags = packed struct {
 
     /// Whether the symbol contains __objc_stubs indirection.
     objc_stubs: bool = false,
+
+    _: u4 = 0,
 };
 
 pub const Visibility = enum {
@@ -374,12 +389,22 @@ pub const Extra = struct {
     got: u32 = 0,
     stubs: u32 = 0,
     objc_stubs: u32 = 0,
-    objc_selrefs: u32 = 0,
     tlv_ptr: u32 = 0,
     symtab: u32 = 0,
+    objc_selrefs: u32 = 0,
 };
 
 pub const Index = u32;
+
+pub const Ref = struct {
+    index: Symbol.Index,
+    file: File.Index,
+
+    pub fn getSymbol(ref: Ref, macho_file: *MachO) ?*Symbol {
+        const file = ref.getFile(macho_file) orelse return null;
+        return file.getSymbol(ref.index);
+    }
+};
 
 const assert = std.debug.assert;
 const macho = std.macho;

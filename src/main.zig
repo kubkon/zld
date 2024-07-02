@@ -68,6 +68,8 @@ fn print(comptime format: []const u8, args: anytype) void {
 }
 
 fn fatal(comptime format: []const u8, args: anytype) noreturn {
+    std.debug.lockStdErr();
+    defer std.debug.unlockStdErr();
     print(format, args);
     std.process.exit(1);
 }
@@ -113,6 +115,7 @@ pub fn main() !void {
     const zld = try Zld.openPath(gpa, tag, opts, &thread_pool);
     defer zld.deinit();
     zld.flush() catch |err| switch (err) {
+        error.FlushFailed,
         error.InferCpuFailed,
         error.ParseFailed,
         error.MultipleSymbolDefinition,
