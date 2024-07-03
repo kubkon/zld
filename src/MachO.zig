@@ -2299,8 +2299,11 @@ fn writeLoadCommands(self: *MachO) !struct { usize, usize, usize } {
     ncmds += 1;
     try writer.writeStruct(self.dysymtab_cmd);
     ncmds += 1;
-    try load_commands.writeDylinkerLC(writer);
-    ncmds += 1;
+
+    if (!self.options.dylib) {
+        try load_commands.writeDylinkerLC(writer);
+        ncmds += 1;
+    }
 
     if (self.getInternalObject()) |obj| {
         if (obj.getEntryRef(self)) |ref| {

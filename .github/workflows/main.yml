@@ -13,7 +13,7 @@ jobs:
 
     steps:
     - uses: actions/checkout@v3
-    - uses: goto-bus-stop/setup-zig@v2
+    - uses: goto-bus-stop/setup-zig@v2.2.0
       with:
         version: master
     - run: zig version

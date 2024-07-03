@@ -38,11 +38,13 @@ pub fn calcLoadCommandsSize(macho_file: *MachO, assume_max_path_len: bool) u32 {
     // LC_DYSYMTAB
     sizeofcmds += @sizeOf(macho.dysymtab_command);
     // LC_LOAD_DYLINKER
-    sizeofcmds += calcInstallNameLen(
-        @sizeOf(macho.dylinker_command),
-        mem.sliceTo(default_dyld_path, 0),
-        false,
-    );
+    if (!options.dylib) {
+        sizeofcmds += calcInstallNameLen(
+            @sizeOf(macho.dylinker_command),
+            mem.sliceTo(default_dyld_path, 0),
+            false,
+        );
+    }
     // LC_MAIN
     if (!options.dylib) {
         sizeofcmds += @sizeOf(macho.entry_point_command);
@@ -135,7 +137,9 @@ pub fn calcLoadCommandsSizeObject(macho_file: *MachO) u32 {
 
 pub fn calcMinHeaderPadSize(macho_file: *MachO) u32 {
     const options = &macho_file.options;
-    var padding: u32 = calcLoadCommandsSize(macho_file, false) + (options.headerpad orelse 0);
+    // We match Apple's ld and LLVM's lld here.
+    const default_headerpad_size = options.headerpad orelse 32;
+    var padding: u32 = calcLoadCommandsSize(macho_file, false) + default_headerpad_size;
     log.debug("minimum requested headerpad size 0x{x}", .{padding + @sizeOf(macho.mach_header_64)});
 
     if (options.headerpad_max_install_names) {
