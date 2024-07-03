@@ -38,11 +38,13 @@ pub fn calcLoadCommandsSize(macho_file: *MachO, assume_max_path_len: bool) u32 {
     // LC_DYSYMTAB
     sizeofcmds += @sizeOf(macho.dysymtab_command);
     // LC_LOAD_DYLINKER
-    sizeofcmds += calcInstallNameLen(
-        @sizeOf(macho.dylinker_command),
-        mem.sliceTo(default_dyld_path, 0),
-        false,
-    );
+    if (!options.dylib) {
+        sizeofcmds += calcInstallNameLen(
+            @sizeOf(macho.dylinker_command),
+            mem.sliceTo(default_dyld_path, 0),
+            false,
+        );
+    }
     // LC_MAIN
     if (!options.dylib) {
         sizeofcmds += @sizeOf(macho.entry_point_command);
