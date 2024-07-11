@@ -66,24 +66,6 @@ pub fn getPriority(self: Atom, macho_file: *MachO) u64 {
     return (@as(u64, @intCast(file.getIndex())) << 32) | @as(u64, @intCast(self.n_sect));
 }
 
-pub fn getCode(self: Atom, macho_file: *MachO, buffer: []u8) !void {
-    assert(buffer.len == self.size);
-    switch (self.getFile(macho_file)) {
-        .dylib => unreachable,
-        .object => |x| {
-            const slice = x.sections.slice();
-            const file = macho_file.getFileHandle(x.file_handle);
-            const sect = slice.items(.header)[self.n_sect];
-            const amt = try file.preadAll(buffer, sect.offset + x.offset + self.off);
-            if (amt != buffer.len) return error.InputOutput;
-        },
-        .internal => |x| {
-            const code = x.getSectionData(self.n_sect);
-            @memcpy(buffer, code);
-        },
-    }
-}
-
 pub fn getRelocs(self: Atom, macho_file: *MachO) []const Relocation {
     const relocs = switch (self.getFile(macho_file)) {
         .dylib => unreachable,

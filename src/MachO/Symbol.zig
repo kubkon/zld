@@ -314,9 +314,14 @@ fn format2(
         if (symbol.getAtom(ctx.macho_file)) |atom| {
             try writer.print(" : atom({d})", .{atom.atom_index});
         }
-        var buf: [2]u8 = .{'_'} ** 2;
+        var buf: [3]u8 = .{'_'} ** 3;
         if (symbol.flags.@"export") buf[0] = 'E';
         if (symbol.flags.import) buf[1] = 'I';
+        switch (symbol.visibility) {
+            .local => buf[2] = 'L',
+            .hidden => buf[2] = 'H',
+            .global => buf[2] = 'G',
+        }
         try writer.print(" : {s}", .{&buf});
         if (symbol.flags.weak) try writer.writeAll(" : weak");
         if (symbol.isSymbolStab(ctx.macho_file)) try writer.writeAll(" : stab");
@@ -383,6 +388,14 @@ pub const Visibility = enum {
     global,
     hidden,
     local,
+
+    pub fn rank(vis: Visibility) u2 {
+        return switch (vis) {
+            .local => 2,
+            .hidden => 1,
+            .global => 0,
+        };
+    }
 };
 
 pub const Extra = struct {
@@ -395,16 +408,6 @@ pub const Extra = struct {
 };
 
 pub const Index = u32;
-
-pub const Ref = struct {
-    index: Symbol.Index,
-    file: File.Index,
-
-    pub fn getSymbol(ref: Ref, macho_file: *MachO) ?*Symbol {
-        const file = ref.getFile(macho_file) orelse return null;
-        return file.getSymbol(ref.index);
-    }
-};
 
 const assert = std.debug.assert;
 const macho = std.macho;
