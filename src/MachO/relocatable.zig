@@ -121,21 +121,24 @@ fn calcSectionSizes(macho_file: *MachO) !void {
             macho_file.base.thread_pool.spawnWg(&wg, calcEhFrameSizeWorker, .{macho_file});
         }
 
-        for (macho_file.objects.items) |index| {
-            if (macho_file.unwind_info_sect_index) |_| {
+        if (macho_file.unwind_info_sect_index) |_| {
+            for (macho_file.objects.items) |index| {
                 macho_file.base.thread_pool.spawnWg(&wg, Object.calcCompactUnwindSizeRelocatable, .{
                     macho_file.getFile(index).?.object,
                     macho_file,
                 });
             }
-
+        }
+        for (macho_file.objects.items) |index| {
             macho_file.base.thread_pool.spawnWg(&wg, File.calcSymtabSize, .{ macho_file.getFile(index).?, macho_file });
         }
 
         macho_file.base.thread_pool.spawnWg(&wg, MachO.updateLinkeditSizeWorker, .{ macho_file, .data_in_code });
     }
 
-    calcCompactUnwindSize(macho_file);
+    if (macho_file.unwind_info_sect_index) |_| {
+        calcCompactUnwindSize(macho_file);
+    }
     calcSymtabSize(macho_file);
 
     if (macho_file.has_errors.swap(false, .seq_cst)) return error.FlushFailed;
