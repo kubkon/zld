@@ -21,10 +21,14 @@ segments: std.ArrayListUnmanaged(macho.segment_command_64) = .{},
 sections: std.MultiArrayList(Section) = .{},
 
 resolver: SymbolResolver = .{},
+
 /// This table will be populated after `scanRelocs` has run.
 /// Key is symbol index.
 undefs: std.AutoHashMapUnmanaged(Ref, std.ArrayListUnmanaged(Ref)) = .{},
 undefs_mutex: std.Thread.Mutex = .{},
+
+dupes: std.AutoHashMapUnmanaged(SymbolResolver.Index, std.ArrayListUnmanaged(File.Index)) = .{},
+dupes_mutex: std.Thread.Mutex = .{},
 
 pagezero_seg_index: ?u8 = null,
 text_seg_index: ?u8 = null,
@@ -102,7 +106,20 @@ pub fn deinit(self: *MachO) void {
     self.file_handles.deinit(gpa);
 
     self.resolver.deinit(gpa);
-    self.undefs.deinit(gpa);
+    {
+        var it = self.undefs.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.deinit(gpa);
+        }
+        self.undefs.deinit(gpa);
+    }
+    {
+        var it = self.dupes.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.deinit(gpa);
+        }
+        self.dupes.deinit(gpa);
+    }
 
     self.objects.deinit(gpa);
     self.dylibs.deinit(gpa);
@@ -258,6 +275,8 @@ pub fn flush(self: *MachO) !void {
     if (self.options.dead_strip) {
         try dead_strip.gcAtoms(self);
     }
+
+    try self.checkDuplicates();
 
     self.markImportsAndExports();
     self.deadStripDylibs();
@@ -1127,6 +1146,71 @@ fn claimUnresolved(self: *MachO) void {
     for (self.objects.items) |index| {
         self.getFile(index).?.object.claimUnresolved(self);
     }
+}
+
+fn checkDuplicates(self: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    var wg: WaitGroup = .{};
+    {
+        wg.reset();
+        defer wg.wait();
+        for (self.objects.items) |index| {
+            self.base.thread_pool.spawnWg(&wg, checkDuplicatesWorker, .{ self, self.getFile(index).? });
+        }
+        if (self.getInternalObject()) |object| {
+            self.base.thread_pool.spawnWg(&wg, checkDuplicatesWorker, .{ self, object.asFile() });
+        }
+    }
+
+    if (self.has_errors.swap(false, .seq_cst)) return error.FlushFailed;
+
+    try self.reportDuplicates();
+}
+
+fn checkDuplicatesWorker(self: *MachO, file: File) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+    file.checkDuplicates(self) catch |err| {
+        self.base.fatal("{}: failed to check duplicate definitions: {s}", .{
+            file.fmtPath(),
+            @errorName(err),
+        });
+        _ = self.has_errors.swap(true, .seq_cst);
+    };
+}
+
+fn reportDuplicates(self: *MachO) error{ HasDuplicates, OutOfMemory }!void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    const max_notes = 3;
+
+    var has_dupes = false;
+    var it = self.dupes.iterator();
+    while (it.next()) |entry| {
+        const sym = self.resolver.keys.items[entry.key_ptr.* - 1];
+        const notes = entry.value_ptr.*;
+        const nnotes = @min(notes.items.len, max_notes) + @intFromBool(notes.items.len > max_notes);
+
+        var err = try self.base.addErrorWithNotes(nnotes + 1);
+        try err.addMsg("duplicate symbol definition: {s}", .{sym.getName(self)});
+        try err.addNote("defined by {}", .{sym.getFile(self).?.fmtPath()});
+        has_dupes = true;
+
+        var inote: usize = 0;
+        while (inote < @min(notes.items.len, max_notes)) : (inote += 1) {
+            const file = self.getFile(notes.items[inote]).?;
+            try err.addNote("defined by {}", .{file.fmtPath()});
+        }
+
+        if (notes.items.len > max_notes) {
+            const remaining = notes.items.len - max_notes;
+            try err.addNote("defined {d} more times", .{remaining});
+        }
+    }
+    if (has_dupes) return error.HasDuplicates;
 }
 
 fn scanRelocs(self: *MachO) !void {
@@ -3040,6 +3124,11 @@ pub const SymbolResolver = struct {
         fn getName(key: Key, macho_file: *MachO) [:0]const u8 {
             const ref = Ref{ .index = key.index, .file = key.file };
             return ref.getSymbol(macho_file).?.getName(macho_file);
+        }
+
+        fn getFile(key: Key, macho_file: *MachO) ?File {
+            const ref = Ref{ .index = key.index, .file = key.file };
+            return ref.getFile(macho_file);
         }
 
         fn eql(key: Key, other: Key, macho_file: *MachO) bool {
