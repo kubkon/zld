@@ -235,9 +235,9 @@ pub const SkipTestStep = struct {
         return self;
     }
 
-    fn make(step: *Step, prog_node: std.Progress.Node) anyerror!void {
+    fn make(step: *Step, options: Step.MakeOptions) anyerror!void {
         _ = step;
-        _ = prog_node;
+        _ = options;
         return error.MakeSkipped;
     }
 };
