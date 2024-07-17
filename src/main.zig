@@ -118,7 +118,7 @@ pub fn main() !void {
         error.FlushFailed,
         error.InferCpuFailed,
         error.ParseFailed,
-        error.MultipleSymbolDefinition,
+        error.HasDuplicates,
         error.UndefinedSymbols,
         error.RelocError,
         error.ResolveFailed,

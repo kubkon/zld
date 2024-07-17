@@ -34,6 +34,31 @@ pub const File = union(enum) {
         }
     }
 
+    pub fn checkDuplicates(file: File, macho_file: *MachO) !void {
+        const tracy = trace(@src());
+        defer tracy.end();
+
+        const gpa = macho_file.base.allocator;
+
+        for (file.getSymbols(), file.getNlists(), 0..) |sym, nlist, i| {
+            if (sym.visibility != .global) continue;
+            if (sym.flags.weak) continue;
+            if (nlist.undf()) continue;
+            const ref = file.getSymbolRef(@intCast(i), macho_file);
+            const ref_file = ref.getFile(macho_file) orelse continue;
+            if (ref_file.getIndex() == file.getIndex()) continue;
+
+            macho_file.dupes_mutex.lock();
+            defer macho_file.dupes_mutex.unlock();
+
+            const gop = try macho_file.dupes.getOrPut(gpa, file.getGlobals()[i]);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = .{};
+            }
+            try gop.value_ptr.append(gpa, file.getIndex());
+        }
+    }
+
     pub fn scanRelocs(file: File, macho_file: *MachO) !void {
         switch (file) {
             .dylib => unreachable,
@@ -55,7 +80,7 @@ pub const File = union(enum) {
         weak: bool = false,
         tentative: bool = false,
     }) u32 {
-        if (file == .object and !args.archive) {
+        if (file != .dylib and !args.archive) {
             const base: u32 = blk: {
                 if (args.tentative) break :blk 3;
                 break :blk if (args.weak) 2 else 1;
@@ -113,6 +138,20 @@ pub const File = union(enum) {
     pub fn getSymbolRef(file: File, sym_index: Symbol.Index, macho_file: *MachO) MachO.Ref {
         return switch (file) {
             inline else => |x| x.getSymbolRef(sym_index, macho_file),
+        };
+    }
+
+    pub fn getNlists(file: File) []macho.nlist_64 {
+        return switch (file) {
+            .dylib => unreachable,
+            .internal => |x| x.symtab.items,
+            .object => |x| x.symtab.items(.nlist),
+        };
+    }
+
+    pub fn getGlobals(file: File) []MachO.SymbolResolver.Index {
+        return switch (file) {
+            inline else => |x| x.globals.items,
         };
     }
 
