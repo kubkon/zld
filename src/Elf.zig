@@ -1991,14 +1991,16 @@ fn validateEFlags(self: *Elf, name: []const u8, e_flags: elf.Elf64_Word) !void {
                 self_riscv_eflags.rvc = self_riscv_eflags.rvc or riscv_eflags.rvc;
                 self_riscv_eflags.tso = self_riscv_eflags.tso or riscv_eflags.tso;
 
+                var is_error: bool = false;
                 if (self_riscv_eflags.fabi != riscv_eflags.fabi) {
+                    is_error = true;
                     self.base.fatal("{s}: cannot link object files with different float-point ABIs", .{name});
                 }
                 if (self_riscv_eflags.rve != riscv_eflags.rve) {
+                    is_error = true;
                     self.base.fatal("{s}: cannot link object files with different RVEs", .{name});
                 }
-
-                return error.MismatchedEflags;
+                if (is_error) return error.MismatchedEflags;
             }
         },
         else => {},
