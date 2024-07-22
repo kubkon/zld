@@ -100,6 +100,8 @@ has_text_reloc: bool = false,
 num_ifunc_dynrelocs: usize = 0,
 default_sym_version: elf.Elf64_Versym,
 
+first_eflags: ?elf.Elf64_Word = null,
+
 pub fn openPath(allocator: Allocator, options: Options, thread_pool: *ThreadPool) !*Elf {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
         .truncate = true,
@@ -322,7 +324,11 @@ pub fn flush(self: *Elf) !void {
         self.parsePositional(arena, obj, search_dirs.items) catch |err| {
             has_parse_error = true;
             switch (err) {
-                error.FileNotFound, error.ParseFailed => {}, // already reported
+                error.MismatchedCpuArch,
+                error.MismatchedEflags,
+                error.FileNotFound,
+                error.ParseFailed,
+                => {}, // already reported
                 else => |e| {
                     self.base.fatal("{s}: unexpected error occurred while parsing input file: {s}", .{
                         obj.path, @errorName(e),
@@ -383,6 +389,7 @@ pub fn flush(self: *Elf) !void {
     };
     if (!self.options.shared and self.entry_index == null) {
         self.base.fatal("no entrypoint found: '{s}'", .{self.options.entry orelse "_start"});
+        return error.ParseFailed;
     }
 
     if (self.options.gc_sections) {
@@ -1827,7 +1834,9 @@ fn parseObject(self: *Elf, obj: LinkObject) !bool {
     try file.seekTo(0);
 
     if (!Object.isValidHeader(&header)) return false;
-    self.validateOrSetCpuArch(obj.path, header.e_machine.toTargetCpuArch().?);
+    const obj_arch = header.e_machine.toTargetCpuArch().?;
+    try self.validateOrSetCpuArch(obj.path, obj_arch);
+    try self.validateEFlags(obj.path, header.e_flags);
 
     const index = @as(u32, @intCast(try self.files.addOne(gpa)));
     self.files.set(index, .{ .object = .{
@@ -1891,7 +1900,7 @@ fn parseShared(self: *Elf, obj: LinkObject) !bool {
     try file.seekTo(0);
 
     if (!SharedObject.isValidHeader(&header)) return false;
-    self.validateOrSetCpuArch(obj.path, header.e_machine.toTargetCpuArch().?);
+    try self.validateOrSetCpuArch(obj.path, header.e_machine.toTargetCpuArch().?);
 
     const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
     self.files.set(index, .{ .shared = .{
@@ -1927,7 +1936,7 @@ fn parseLdScript(self: *Elf, arena: Allocator, obj: LinkObject, search_dirs: []c
     };
 
     if (script.cpu_arch) |cpu_arch| {
-        self.validateOrSetCpuArch(obj.path, cpu_arch);
+        try self.validateOrSetCpuArch(obj.path, cpu_arch);
     }
 
     for (script.args.items) |s_obj| {
@@ -1942,7 +1951,7 @@ fn parseLdScript(self: *Elf, arena: Allocator, obj: LinkObject, search_dirs: []c
 }
 
 // TODO we should also include extracted OS in here.
-fn validateOrSetCpuArch(self: *Elf, name: []const u8, cpu_arch: std.Target.Cpu.Arch) void {
+fn validateOrSetCpuArch(self: *Elf, name: []const u8, cpu_arch: std.Target.Cpu.Arch) !void {
     const self_cpu_arch = self.options.cpu_arch orelse blk: {
         self.options.cpu_arch = cpu_arch;
         const page_size = Options.defaultPageSize(cpu_arch) orelse
@@ -1963,6 +1972,37 @@ fn validateOrSetCpuArch(self: *Elf, name: []const u8, cpu_arch: std.Target.Cpu.A
             @tagName(cpu_arch.toElfMachine()),
             @tagName(self_cpu_arch.toElfMachine()),
         });
+        return error.MismatchedCpuArch;
+    }
+}
+
+fn validateEFlags(self: *Elf, name: []const u8, e_flags: elf.Elf64_Word) !void {
+    // validateOrSetCpuArch should be called before this.
+    const self_cpu_arch = self.options.cpu_arch.?;
+
+    if (self.first_eflags == null) self.first_eflags = e_flags;
+    const self_eflags: *elf.Elf64_Word = &self.first_eflags.?;
+
+    switch (self_cpu_arch) {
+        .riscv64 => {
+            if (e_flags != self_eflags.*) {
+                const riscv_eflags: riscv.RiscvEflags = @bitCast(e_flags);
+                const self_riscv_eflags: *riscv.RiscvEflags = @ptrCast(self_eflags);
+
+                self_riscv_eflags.rvc = self_riscv_eflags.rvc or riscv_eflags.rvc;
+                self_riscv_eflags.tso = self_riscv_eflags.tso or riscv_eflags.tso;
+
+                if (self_riscv_eflags.fabi != riscv_eflags.fabi) {
+                    self.base.fatal("{s}: cannot link object files with different float-point ABIs", .{name});
+                }
+                if (self_riscv_eflags.rve != riscv_eflags.rve) {
+                    self.base.fatal("{s}: cannot link object files with different RVEs", .{name});
+                }
+
+                return error.MismatchedEflags;
+            }
+        },
+        else => {},
     }
 }
 
@@ -3272,6 +3312,7 @@ const state_log = std.log.scoped(.state);
 const synthetic = @import("Elf/synthetic.zig");
 const thunks = @import("Elf/thunks.zig");
 const trace = @import("tracy.zig").trace;
+const riscv = @import("riscv.zig");
 
 const Allocator = mem.Allocator;
 const Archive = @import("Elf/Archive.zig");
