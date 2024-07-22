@@ -389,7 +389,6 @@ pub fn flush(self: *Elf) !void {
     };
     if (!self.options.shared and self.entry_index == null) {
         self.base.fatal("no entrypoint found: '{s}'", .{self.options.entry orelse "_start"});
-        return error.ParseFailed;
     }
 
     if (self.options.gc_sections) {
