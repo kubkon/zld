@@ -243,7 +243,7 @@ pub fn flush(self: *MachO) !void {
     }
 
     for (resolved_objects.items) |obj| {
-        self.parsePositional(obj) catch |err| switch (err) {
+        self.classifyInputFile(obj) catch |err| switch (err) {
             else => |e| {
                 self.base.fatal("{s}: unexpected error occurred while parsing input file: {s}", .{
                     obj.path, @errorName(e),
@@ -253,7 +253,7 @@ pub fn flush(self: *MachO) !void {
         };
     }
 
-    try self.parseObjects();
+    try self.parseInputFiles();
     try self.parseDependentDylibs(arena, lib_dirs.items, framework_dirs.items);
 
     if (!self.options.relocatable) {
@@ -583,7 +583,7 @@ fn inferCpuArchAndPlatformInObject(self: *MachO, obj: LinkObject, platforms: any
     } else null;
 }
 
-fn parsePositional(self: *MachO, obj: LinkObject) !void {
+fn classifyInputFile(self: *MachO, obj: LinkObject) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -689,7 +689,10 @@ fn addObject(self: *MachO, obj: LinkObject, handle: File.HandleIndex, offset: u6
     try self.objects.append(gpa, index);
 }
 
-fn parseObjects(self: *MachO) !void {
+fn parseInputFiles(self: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     var wg: WaitGroup = .{};
 
     {
@@ -962,15 +965,13 @@ fn parseDependentDylibs(
 /// 5. Remove references to dead objects/shared objects
 /// 6. Re-run symbol resolution on pruned objects and shared objects sets.
 pub fn resolveSymbols(self: *MachO) !void {
-    {
-        const tracy = trace(@src());
-        defer tracy.end();
+    const tracy = trace(@src());
+    defer tracy.end();
 
-        // Resolve symbols on the set of all objects and shared objects (even if some are unneeded).
-        for (self.objects.items) |index| try self.getFile(index).?.resolveSymbols(self);
-        for (self.dylibs.items) |index| try self.getFile(index).?.resolveSymbols(self);
-        if (self.getInternalObject()) |obj| try obj.resolveSymbols(self);
-    }
+    // Resolve symbols on the set of all objects and shared objects (even if some are unneeded).
+    for (self.objects.items) |index| try self.getFile(index).?.resolveSymbols(self);
+    for (self.dylibs.items) |index| try self.getFile(index).?.resolveSymbols(self);
+    if (self.getInternalObject()) |obj| try obj.resolveSymbols(self);
 
     // Mark live objects.
     self.markLive();
@@ -989,23 +990,13 @@ pub fn resolveSymbols(self: *MachO) !void {
         } else i += 1;
     }
 
-    {
-        const tracy = trace(@src());
-        defer tracy.end();
+    // Re-resolve the symbols.
+    for (self.objects.items) |index| try self.getFile(index).?.resolveSymbols(self);
+    for (self.dylibs.items) |index| try self.getFile(index).?.resolveSymbols(self);
+    if (self.getInternalObject()) |obj| try obj.resolveSymbols(self);
 
-        // Re-resolve the symbols.
-        for (self.objects.items) |index| try self.getFile(index).?.resolveSymbols(self);
-        for (self.dylibs.items) |index| try self.getFile(index).?.resolveSymbols(self);
-        if (self.getInternalObject()) |obj| try obj.resolveSymbols(self);
-    }
-
-    {
-        const tracy = trace(@src());
-        defer tracy.end();
-
-        // Merge symbol visibility
-        for (self.objects.items) |index| self.getFile(index).?.object.mergeSymbolVisibility(self);
-    }
+    // Merge symbol visibility
+    for (self.objects.items) |index| self.getFile(index).?.object.mergeSymbolVisibility(self);
 }
 
 fn markLive(self: *MachO) void {
@@ -2058,6 +2049,9 @@ fn resizeSections(self: *MachO) !void {
 }
 
 fn writeSectionsAndUpdateLinkeditSizes(self: *MachO) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
     const gpa = self.base.allocator;
 
     const cmd = self.symtab_cmd;
