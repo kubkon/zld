@@ -10,10 +10,7 @@ pub const Entry = struct {
             if (entry.target.eql(other.target)) {
                 return entry.offset < other.offset;
             }
-            if (entry.target.file == other.target.file) {
-                return entry.target.index < other.target.index;
-            }
-            return entry.target.file < other.target.file;
+            return entry.target.lessThan(other.target);
         }
         return entry.segment_id < other.segment_id;
     }
