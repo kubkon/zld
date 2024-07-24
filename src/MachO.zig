@@ -24,10 +24,10 @@ resolver: SymbolResolver = .{},
 
 /// This table will be populated after `scanRelocs` has run.
 /// Key is symbol index.
-undefs: std.AutoHashMapUnmanaged(Ref, std.ArrayListUnmanaged(Ref)) = .{},
+undefs: std.AutoArrayHashMapUnmanaged(SymbolResolver.Index, std.ArrayListUnmanaged(Ref)) = .{},
 undefs_mutex: std.Thread.Mutex = .{},
 
-dupes: std.AutoHashMapUnmanaged(SymbolResolver.Index, std.ArrayListUnmanaged(File.Index)) = .{},
+dupes: std.AutoArrayHashMapUnmanaged(SymbolResolver.Index, std.ArrayListUnmanaged(File.Index)) = .{},
 dupes_mutex: std.Thread.Mutex = .{},
 
 pagezero_seg_index: ?u8 = null,
@@ -106,20 +106,14 @@ pub fn deinit(self: *MachO) void {
     self.file_handles.deinit(gpa);
 
     self.resolver.deinit(gpa);
-    {
-        var it = self.undefs.iterator();
-        while (it.next()) |entry| {
-            entry.value_ptr.deinit(gpa);
-        }
-        self.undefs.deinit(gpa);
+    for (self.undefs.values()) |*val| {
+        val.deinit(gpa);
     }
-    {
-        var it = self.dupes.iterator();
-        while (it.next()) |entry| {
-            entry.value_ptr.deinit(gpa);
-        }
-        self.dupes.deinit(gpa);
+    self.undefs.deinit(gpa);
+    for (self.dupes.values()) |*val| {
+        val.deinit(gpa);
     }
+    self.dupes.deinit(gpa);
 
     self.objects.deinit(gpa);
     self.dylibs.deinit(gpa);
@@ -1176,19 +1170,29 @@ fn reportDuplicates(self: *MachO) error{ HasDuplicates, OutOfMemory }!void {
     const tracy = trace(@src());
     defer tracy.end();
 
+    if (self.dupes.keys().len == 0) return; // Nothing to do
+
+    const gpa = self.base.allocator;
     const max_notes = 3;
 
-    var has_dupes = false;
-    var it = self.dupes.iterator();
-    while (it.next()) |entry| {
-        const sym = self.resolver.keys.items[entry.key_ptr.* - 1];
-        const notes = entry.value_ptr.*;
+    // We will sort by name, and then by file to ensure deterministic output.
+    var keys = try std.ArrayList(SymbolResolver.Index).initCapacity(gpa, self.dupes.keys().len);
+    defer keys.deinit();
+    keys.appendSliceAssumeCapacity(self.dupes.keys());
+    self.sortGlobalSymbolsByName(keys.items);
+
+    for (self.dupes.values()) |*refs| {
+        mem.sort(File.Index, refs.items, {}, std.sort.asc(File.Index));
+    }
+
+    for (keys.items) |key| {
+        const sym = self.resolver.keys.items[key - 1];
+        const notes = self.dupes.get(key).?;
         const nnotes = @min(notes.items.len, max_notes) + @intFromBool(notes.items.len > max_notes);
 
         var err = try self.base.addErrorWithNotes(nnotes + 1);
         try err.addMsg("duplicate symbol definition: {s}", .{sym.getName(self)});
         try err.addNote("defined by {}", .{sym.getFile(self).?.fmtPath()});
-        has_dupes = true;
 
         var inote: usize = 0;
         while (inote < @min(notes.items.len, max_notes)) : (inote += 1) {
@@ -1201,7 +1205,7 @@ fn reportDuplicates(self: *MachO) error{ HasDuplicates, OutOfMemory }!void {
             try err.addNote("defined {d} more times", .{remaining});
         }
     }
-    if (has_dupes) return error.HasDuplicates;
+    return error.HasDuplicates;
 }
 
 fn scanRelocs(self: *MachO) !void {
@@ -1246,12 +1250,24 @@ fn scanRelocsWorker(self: *MachO, file: File) void {
     };
 }
 
+fn sortGlobalSymbolsByName(self: *MachO, symbols: []SymbolResolver.Index) void {
+    const lessThan = struct {
+        fn lessThan(ctx: *MachO, lhs: SymbolResolver.Index, rhs: SymbolResolver.Index) bool {
+            const lhs_name = ctx.resolver.keys.items[lhs - 1].getName(ctx);
+            const rhs_name = ctx.resolver.keys.items[rhs - 1].getName(ctx);
+            return mem.order(u8, lhs_name, rhs_name) == .lt;
+        }
+    }.lessThan;
+    mem.sort(SymbolResolver.Index, symbols, self, lessThan);
+}
+
 fn reportUndefs(self: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
     if (self.options.undefined_treatment == .suppress or
         self.options.undefined_treatment == .dynamic_lookup) return;
+    if (self.undefs.keys().len == 0) return; // Nothing to do
 
     const addFn = switch (self.options.undefined_treatment) {
         .dynamic_lookup => unreachable, // handled above
@@ -1260,18 +1276,33 @@ fn reportUndefs(self: *MachO) !void {
         .warn => &Zld.addWarningWithNotes,
     };
 
+    const gpa = self.base.allocator;
     const max_notes = 4;
 
-    var has_undefs = false;
-    var it = self.undefs.iterator();
-    while (it.next()) |entry| {
-        const undef_sym = entry.key_ptr.getSymbol(self).?;
-        const notes = entry.value_ptr.*;
+    // We will sort by name, and then by file to ensure deterministic output.
+    var keys = try std.ArrayList(SymbolResolver.Index).initCapacity(gpa, self.undefs.keys().len);
+    defer keys.deinit();
+    keys.appendSliceAssumeCapacity(self.undefs.keys());
+    self.sortGlobalSymbolsByName(keys.items);
+
+    const refLessThan = struct {
+        fn lessThan(ctx: void, lhs: Ref, rhs: Ref) bool {
+            _ = ctx;
+            return lhs.lessThan(rhs);
+        }
+    }.lessThan;
+
+    for (self.undefs.values()) |*refs| {
+        mem.sort(Ref, refs.items, {}, refLessThan);
+    }
+
+    for (keys.items) |key| {
+        const undef_sym = self.resolver.keys.items[key - 1];
+        const notes = self.undefs.get(key).?;
         const nnotes = @min(notes.items.len, max_notes) + @intFromBool(notes.items.len > max_notes);
 
         const err = try addFn(&self.base, nnotes);
         try err.addMsg("undefined symbol: {s}", .{undef_sym.getName(self)});
-        has_undefs = true;
 
         var inote: usize = 0;
         while (inote < @min(notes.items.len, max_notes)) : (inote += 1) {
@@ -1286,7 +1317,7 @@ fn reportUndefs(self: *MachO) !void {
             try err.addNote("referenced {d} more times", .{remaining});
         }
     }
-    if (has_undefs) return error.UndefinedSymbols;
+    return error.UndefinedSymbols;
 }
 
 fn initSyntheticSections(self: *MachO) !void {
@@ -3037,6 +3068,13 @@ pub const Ref = struct {
 
     pub fn eql(ref: Ref, other: Ref) bool {
         return ref.index == other.index and ref.file == other.file;
+    }
+
+    pub fn lessThan(ref: Ref, other: Ref) bool {
+        if (ref.file == other.file) {
+            return ref.index < other.index;
+        }
+        return ref.file < other.file;
     }
 
     pub fn getFile(ref: Ref, macho_file: *MachO) ?File {
