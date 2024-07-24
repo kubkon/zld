@@ -110,8 +110,14 @@ pub const LibStub = struct {
     inner: []Tbd,
 
     pub fn loadFromFile(allocator: Allocator, file: fs.File) !LibStub {
-        const source = try file.readToEndAlloc(allocator, std.math.maxInt(u32));
+        const filesize = blk: {
+            const stat = file.stat() catch break :blk std.math.maxInt(u32);
+            break :blk @min(stat.size, std.math.maxInt(u32));
+        };
+        const source = try allocator.alloc(u8, filesize);
         defer allocator.free(source);
+        const amt = try file.preadAll(source, 0);
+        if (amt != filesize) return error.InputOutput;
 
         var lib_stub = LibStub{
             .yaml = try Yaml.load(allocator, source),
