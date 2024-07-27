@@ -66,6 +66,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testRelocatableZig(b, opts));
     macho_step.dependOn(testSearchStrategy(b, opts));
     macho_step.dependOn(testSectionBoundarySymbols(b, opts));
+    macho_step.dependOn(testSectionBoundarySymbols2(b, opts));
     macho_step.dependOn(testSegmentBoundarySymbols(b, opts));
     macho_step.dependOn(testStackSize(b, opts));
     macho_step.dependOn(testSymbolStabs(b, opts));
@@ -2832,6 +2833,43 @@ fn testSectionBoundarySymbols(b: *Build, opts: Options) *Step {
         check.checkNotPresent("external section$start$__DATA_CONST$__not_present");
         test_step.dependOn(&check.step);
     }
+
+    return test_step;
+}
+
+fn testSectionBoundarySymbols2(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-section-boundary-symbols-2", "");
+
+    const exe = cc(b, "main", opts);
+    exe.addCSource(
+        \\#include <stdio.h>
+        \\struct pair { int a; int b; };
+        \\struct pair first __attribute__((section("__DATA,__pairs"))) = { 1, 2 };
+        \\struct pair second __attribute__((section("__DATA,__pairs"))) = { 3, 4 };
+        \\extern struct pair pairs_start __asm("section$start$__DATA$__pairs");
+        \\extern struct pair pairs_end __asm("section$end$__DATA$__pairs");
+        \\int main() {
+        \\  printf("%d,%d\n", first.a, first.b);
+        \\  printf("%d,%d\n", second.a, second.b);
+        \\  struct pair* p;
+        \\  for (p = &pairs_start; p < &pairs_end; p++) {
+        \\    p->a = 0;
+        \\  }
+        \\  printf("%d,%d\n", first.a, first.b);
+        \\  printf("%d,%d\n", second.a, second.b);
+        \\  return 0;
+        \\}
+    );
+
+    const run = exe.run();
+    run.expectStdOutEqual(
+        \\1,2
+        \\3,4
+        \\0,2
+        \\0,4
+        \\
+    );
+    test_step.dependOn(run.step());
 
     return test_step;
 }
