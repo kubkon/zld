@@ -1207,7 +1207,11 @@ fn writeHeader(self: *Coff) !void {
     const timestamp = std.time.timestamp();
     const size_of_optional_header = @as(u16, @intCast(self.getOptionalHeaderSize() + self.getDataDirectoryHeadersSize()));
     var coff_header = coff.CoffHeader{
-        .machine = coff.MachineType.fromTargetCpuArch(self.options.cpu_arch.?),
+        .machine = switch (self.options.cpu_arch.?) {
+            .x86_64 => .X64,
+            .aarch64 => .ARM64,
+            else => unreachable,
+        },
         .number_of_sections = @as(u16, @intCast(self.sections.slice().len)),
         .time_date_stamp = @as(u32, @truncate(@as(u64, @bitCast(timestamp)))),
         .pointer_to_symbol_table = 0, // TODO relocatable
@@ -1289,14 +1293,14 @@ fn writeHeader(self: *Coff) !void {
 
 pub fn isCoffObj(buffer: *const [@sizeOf(coff.CoffHeader)]u8) bool {
     const header = @as(*align(1) const coff.CoffHeader, @ptrCast(buffer)).*;
-    if (header.machine == .Unknown and header.number_of_sections == 0xffff) return false;
+    if (header.machine == .UNKNOWN and header.number_of_sections == 0xffff) return false;
     if (header.size_of_optional_header != 0) return false;
     return true;
 }
 
 pub fn isImportLib(buffer: *const [@sizeOf(coff.ImportHeader)]u8) bool {
     const header = @as(*align(1) const coff.ImportHeader, @ptrCast(buffer)).*;
-    return header.sig1 == .Unknown and header.sig2 == 0xffff;
+    return header.sig1 == .UNKNOWN and header.sig2 == 0xffff;
 }
 
 pub fn isArchive(data: *const [Archive.magic.len]u8) bool {
