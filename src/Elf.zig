@@ -1954,7 +1954,7 @@ fn validateOrSetCpuArch(self: *Elf, name: []const u8, cpu_arch: std.Target.Cpu.A
     const self_cpu_arch = self.options.cpu_arch orelse blk: {
         self.options.cpu_arch = cpu_arch;
         const page_size = Options.defaultPageSize(cpu_arch) orelse
-            return self.base.fatal("{s}: unhandled architecture '{s}'", .{ name, @tagName(cpu_arch.toElfMachine()) });
+            return self.base.fatal("{s}: unhandled architecture '{s}'", .{ name, @tagName(cpu_arch) });
         // TODO move this error into Options
         if (self.options.image_base % page_size != 0) {
             self.base.fatal("specified --image-base=0x{x} is not a multiple of page size of 0x{x}", .{
@@ -1966,11 +1966,7 @@ fn validateOrSetCpuArch(self: *Elf, name: []const u8, cpu_arch: std.Target.Cpu.A
         break :blk self.options.cpu_arch.?;
     };
     if (self_cpu_arch != cpu_arch) {
-        self.base.fatal("{s}: invalid architecture '{s}', expected '{s}'", .{
-            name,
-            @tagName(cpu_arch.toElfMachine()),
-            @tagName(self_cpu_arch.toElfMachine()),
-        });
+        self.base.fatal("{s}: invalid architecture '{s}', expected '{s}'", .{ name, @tagName(cpu_arch), @tagName(self_cpu_arch) });
         return error.MismatchedCpuArch;
     }
 }
@@ -2639,7 +2635,12 @@ fn writeHeader(self: *Elf) !void {
     var header = elf.Elf64_Ehdr{
         .e_ident = undefined,
         .e_type = if (self.options.pic) .DYN else .EXEC,
-        .e_machine = self.options.cpu_arch.?.toElfMachine(),
+        .e_machine = switch (self.options.cpu_arch.?) {
+            .x86_64 => .X86_64,
+            .aarch64 => .AARCH64,
+            .riscv64 => .RISCV,
+            else => unreachable,
+        },
         .e_version = 1,
         .e_entry = if (self.entry_index) |index| @as(u64, @intCast(self.getSymbol(index).getAddress(.{}, self))) else 0,
         .e_phoff = @sizeOf(elf.Elf64_Ehdr),

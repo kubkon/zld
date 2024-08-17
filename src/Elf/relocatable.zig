@@ -369,7 +369,12 @@ fn writeHeader(elf_file: *Elf) !void {
     var header = elf.Elf64_Ehdr{
         .e_ident = undefined,
         .e_type = .REL,
-        .e_machine = elf_file.options.cpu_arch.?.toElfMachine(),
+        .e_machine = switch (elf_file.options.cpu_arch.?) {
+            .x86_64 => .X86_64,
+            .aarch64 => .AARCH64,
+            .riscv64 => .RISCV,
+            else => unreachable,
+        },
         .e_version = 1,
         .e_entry = 0,
         .e_phoff = 0,

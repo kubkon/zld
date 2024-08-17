@@ -4,8 +4,8 @@
 
     .dependencies = .{
         .@"zig-yaml" = .{
-            .url = "https://github.com/kubkon/zig-yaml/archive/beddd5da24de91d430ca7028b00986f7745b13e9.tar.gz",
-            .hash = "1220841471bd4891cbb199d27cc5e7e0fb0a5b7c5388a70bd24fa3eb7285755c396c",
+            .url = "https://github.com/kubkon/zig-yaml/archive/325dbdd276604dccf184c32fef9600b0ac48343d.tar.gz",
+            .hash = "1220e8870ca83e47b98807e89b5b636072413f6c09f9b26037e4c98c55e4960ac55a",
         },
         .@"zig-dis-x86_64" = .{
             .url = "https://github.com/kubkon/zig-dis-x86_64/archive/5203b9affc5045e000ae7963d988e155e98e396d.tar.gz",
