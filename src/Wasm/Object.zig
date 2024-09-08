@@ -867,7 +867,7 @@ fn ElementType(comptime ptr: type) type {
 /// signedness of the given type `T`.
 /// Asserts `T` is an integer.
 fn readLeb(comptime T: type, reader: anytype) !T {
-    return switch (@typeInfo(T).Int.signedness) {
+    return switch (@typeInfo(T).int.signedness) {
         .signed => try leb.readILEB128(T, reader),
         .unsigned => try leb.readULEB128(T, reader),
     };
@@ -877,7 +877,7 @@ fn readLeb(comptime T: type, reader: anytype) !T {
 /// Asserts `T` is an enum
 fn readEnum(comptime T: type, reader: anytype) !T {
     switch (@typeInfo(T)) {
-        .Enum => |enum_type| return @as(T, @enumFromInt(try readLeb(enum_type.tag_type, reader))),
+        .@"enum" => |enum_type| return @as(T, @enumFromInt(try readLeb(enum_type.tag_type, reader))),
         else => @compileError("T must be an enum. Instead was given type " ++ @typeName(T)),
     }
 }

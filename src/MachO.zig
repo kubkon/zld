@@ -1727,7 +1727,7 @@ fn calcSectionSizeWorker(self: *MachO, sect_id: u8) void {
 fn createThunksWorker(self: *MachO, sect_id: u8) void {
     const tracy = trace(@src());
     defer tracy.end();
-    thunks.createThunks(sect_id, self) catch |err| {
+    self.createThunks(sect_id) catch |err| {
         const header = self.sections.items(.header)[sect_id];
         self.base.fatal("failed to create thunks and calculate size of section '{s},{s}': {s}", .{
             header.segName(),
@@ -2741,7 +2741,7 @@ pub fn getFileHandle(self: MachO, index: File.HandleIndex) File.Handle {
     return self.file_handles.items[index];
 }
 
-pub fn addThunk(self: *MachO) !Thunk.Index {
+fn addThunk(self: *MachO) !Thunk.Index {
     const index = @as(Thunk.Index, @intCast(self.thunks.items.len));
     const thunk = try self.thunks.addOne(self.base.allocator);
     thunk.* = .{};
@@ -2751,6 +2751,92 @@ pub fn addThunk(self: *MachO) !Thunk.Index {
 pub fn getThunk(self: *MachO, index: Thunk.Index) *Thunk {
     assert(index < self.thunks.items.len);
     return &self.thunks.items[index];
+}
+
+fn createThunks(self: *MachO, sect_id: u8) !void {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    const advance = struct {
+        fn advance(sect: *macho.section_64, size: u64, pow2_align: u32) !u64 {
+            const alignment = try math.powi(u32, 2, pow2_align);
+            const offset = mem.alignForward(u64, sect.size, alignment);
+            const padding = offset - sect.size;
+            sect.size += padding + size;
+            sect.@"align" = @max(sect.@"align", pow2_align);
+            return offset;
+        }
+    }.advance;
+
+    const scanRelocations = struct {
+        fn scanRelocations(thunk_index: Thunk.Index, gpa: Allocator, atoms: []const MachO.Ref, mf: *MachO) !void {
+            const tr = trace(@src());
+            defer tr.end();
+
+            const thunk = mf.getThunk(thunk_index);
+
+            for (atoms) |ref| {
+                const atom = ref.getAtom(mf).?;
+                log.debug("atom({d}) {s}", .{ atom.atom_index, atom.getName(mf) });
+                for (atom.getRelocs(mf)) |rel| {
+                    if (rel.type != .branch) continue;
+                    if (Thunk.isReachable(atom, rel, mf)) continue;
+                    try thunk.symbols.put(gpa, rel.getTargetSymbolRef(atom.*, mf), {});
+                }
+                atom.addExtra(.{ .thunk = thunk_index }, mf);
+            }
+        }
+    }.scanRelocations;
+
+    // Branch instruction has 26 bits immediate but is 4 byte aligned.
+    const jump_bits = @bitSizeOf(i28);
+    const max_distance = (1 << (jump_bits - 1));
+
+    // A branch will need an extender if its target is larger than
+    // `2^(jump_bits - 1) - margin` where margin is some arbitrary number.
+    // mold uses 5MiB margin, while ld64 uses 4MiB margin. We will follow mold
+    // and assume margin to be 5MiB.
+    const max_allowed_distance = max_distance - 0x500_000;
+
+    const gpa = self.base.allocator;
+    const slice = self.sections.slice();
+    const header = &slice.items(.header)[sect_id];
+    const thnks = &slice.items(.thunks)[sect_id];
+    const atoms = slice.items(.atoms)[sect_id].items;
+    assert(atoms.len > 0);
+
+    for (atoms) |ref| {
+        ref.getAtom(self).?.value = @bitCast(@as(i64, -1));
+    }
+
+    var i: usize = 0;
+    while (i < atoms.len) {
+        const start = i;
+        const start_atom = atoms[start].getAtom(self).?;
+        assert(start_atom.alive.load(.seq_cst));
+        start_atom.value = try advance(header, start_atom.size, start_atom.alignment);
+        i += 1;
+
+        while (i < atoms.len and
+            header.size - start_atom.value < max_allowed_distance) : (i += 1)
+        {
+            const atom = atoms[i].getAtom(self).?;
+            assert(atom.alive.load(.seq_cst));
+            atom.value = try advance(header, atom.size, atom.alignment);
+        }
+
+        // Insert a thunk at the group end
+        const thunk_index = try self.addThunk();
+        const thunk = self.getThunk(thunk_index);
+        thunk.out_n_sect = sect_id;
+        try thnks.append(gpa, thunk_index);
+
+        // Scan relocs in the group and create trampolines for any unreachable callsite
+        try scanRelocations(thunk_index, gpa, atoms[start..i], self);
+        thunk.value = try advance(header, thunk.size(), 2);
+
+        log.debug("thunk({d}) : {}", .{ thunk_index, thunk.fmt(self) });
+    }
 }
 
 pub fn eatPrefix(path: []const u8, prefix: []const u8) ?[]const u8 {
@@ -3225,7 +3311,6 @@ const relocatable = @import("MachO/relocatable.zig");
 const synthetic = @import("MachO/synthetic.zig");
 const state_log = std.log.scoped(.state);
 const std = @import("std");
-const thunks = @import("MachO/thunks.zig");
 const trace = @import("tracy.zig").trace;
 
 const Allocator = mem.Allocator;
@@ -3256,7 +3341,7 @@ const Symbol = @import("MachO/Symbol.zig");
 const StringTable = @import("StringTable.zig");
 const StubsSection = synthetic.StubsSection;
 const StubsHelperSection = synthetic.StubsHelperSection;
-const Thunk = thunks.Thunk;
+const Thunk = @import("MachO/Thunk.zig");
 const ThreadPool = std.Thread.Pool;
 const TlvPtrSection = synthetic.TlvPtrSection;
 const UnwindInfo = @import("MachO/UnwindInfo.zig");

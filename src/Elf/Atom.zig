@@ -123,7 +123,7 @@ pub fn addExtra(atom: *Atom, opts: AddExtraOpts, elf_file: *Elf) !void {
         atom.extra = try elf_file.addAtomExtra(.{});
     }
     var extra = atom.getExtra(elf_file).?;
-    inline for (@typeInfo(@TypeOf(opts)).Struct.fields) |field| {
+    inline for (@typeInfo(@TypeOf(opts)).@"struct".fields) |field| {
         if (@field(opts, field.name)) |x| {
             @field(extra, field.name) = x;
         }
@@ -1890,4 +1890,4 @@ const Fde = @import("eh_frame.zig").Fde;
 const File = @import("file.zig").File;
 const Object = @import("Object.zig");
 const Symbol = @import("Symbol.zig");
-const Thunk = @import("thunks.zig").Thunk;
+const Thunk = @import("Thunk.zig");

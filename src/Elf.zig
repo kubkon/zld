@@ -866,7 +866,7 @@ fn calcSectionSizes(self: *Elf) !void {
             if (atoms.items.len == 0) continue;
 
             // Create jump/branch range extenders if needed.
-            try thunks.createThunks(@intCast(i), self);
+            try self.createThunks(@intCast(i));
         }
     }
 
@@ -1833,7 +1833,7 @@ fn parseObject(self: *Elf, obj: LinkObject) !bool {
     try file.seekTo(0);
 
     if (!Object.isValidHeader(&header)) return false;
-    const obj_arch = header.e_machine.toTargetCpuArch().?;
+    const obj_arch = cpuArchFromElfMachine(header.e_machine);
     try self.validateOrSetCpuArch(obj.path, obj_arch);
     try self.validateEFlags(obj.path, header.e_flags);
 
@@ -1899,7 +1899,8 @@ fn parseShared(self: *Elf, obj: LinkObject) !bool {
     try file.seekTo(0);
 
     if (!SharedObject.isValidHeader(&header)) return false;
-    try self.validateOrSetCpuArch(obj.path, header.e_machine.toTargetCpuArch().?);
+    const cpu_arch = cpuArchFromElfMachine(header.e_machine);
+    try self.validateOrSetCpuArch(obj.path, cpu_arch);
 
     const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
     self.files.set(index, .{ .shared = .{
@@ -1969,6 +1970,16 @@ fn validateOrSetCpuArch(self: *Elf, name: []const u8, cpu_arch: std.Target.Cpu.A
         self.base.fatal("{s}: invalid architecture '{s}', expected '{s}'", .{ name, @tagName(cpu_arch), @tagName(self_cpu_arch) });
         return error.MismatchedCpuArch;
     }
+}
+
+/// TODO convert from std.Target.Cpu.Arch into std.elf.EM and remove this.
+fn cpuArchFromElfMachine(em: std.elf.EM) std.Target.Cpu.Arch {
+    return switch (em) {
+        .AARCH64 => .aarch64,
+        .X86_64 => .x86_64,
+        .RISCV => .riscv64,
+        else => @panic("unhandled e_machine value"),
+    };
 }
 
 fn validateEFlags(self: *Elf, name: []const u8, e_flags: elf.Elf64_Word) !void {
@@ -2767,14 +2778,14 @@ pub fn getAtom(self: Elf, atom_index: Atom.Index) ?*Atom {
 }
 
 pub fn addAtomExtra(self: *Elf, extra: Atom.Extra) !u32 {
-    const fields = @typeInfo(Atom.Extra).Struct.fields;
+    const fields = @typeInfo(Atom.Extra).@"struct".fields;
     try self.atoms_extra.ensureUnusedCapacity(self.base.allocator, fields.len);
     return self.addAtomExtraAssumeCapacity(extra);
 }
 
 pub fn addAtomExtraAssumeCapacity(self: *Elf, extra: Atom.Extra) u32 {
     const index = @as(u32, @intCast(self.atoms_extra.items.len));
-    const fields = @typeInfo(Atom.Extra).Struct.fields;
+    const fields = @typeInfo(Atom.Extra).@"struct".fields;
     inline for (fields) |field| {
         self.atoms_extra.appendAssumeCapacity(switch (field.type) {
             u32 => @field(extra, field.name),
@@ -2786,7 +2797,7 @@ pub fn addAtomExtraAssumeCapacity(self: *Elf, extra: Atom.Extra) u32 {
 
 pub fn getAtomExtra(self: *Elf, index: u32) ?Atom.Extra {
     if (index == 0) return null;
-    const fields = @typeInfo(Atom.Extra).Struct.fields;
+    const fields = @typeInfo(Atom.Extra).@"struct".fields;
     var i: usize = index;
     var result: Atom.Extra = undefined;
     inline for (fields) |field| {
@@ -2801,7 +2812,7 @@ pub fn getAtomExtra(self: *Elf, index: u32) ?Atom.Extra {
 
 pub fn setAtomExtra(self: *Elf, index: u32, extra: Atom.Extra) void {
     assert(index > 0);
-    const fields = @typeInfo(Atom.Extra).Struct.fields;
+    const fields = @typeInfo(Atom.Extra).@"struct".fields;
     inline for (fields, 0..) |field, i| {
         self.atoms_extra.items[index + i] = switch (field.type) {
             u32 => @field(extra, field.name),
@@ -2810,7 +2821,7 @@ pub fn setAtomExtra(self: *Elf, index: u32, extra: Atom.Extra) void {
     }
 }
 
-pub fn addThunk(self: *Elf) !Thunk.Index {
+fn addThunk(self: *Elf) !Thunk.Index {
     const index = @as(Thunk.Index, @intCast(self.thunks.items.len));
     const thunk = try self.thunks.addOne(self.base.allocator);
     thunk.* = .{};
@@ -2820,6 +2831,71 @@ pub fn addThunk(self: *Elf) !Thunk.Index {
 pub fn getThunk(self: *Elf, index: Thunk.Index) *Thunk {
     assert(index < self.thunks.items.len);
     return &self.thunks.items[index];
+}
+
+fn createThunks(self: *Elf, shndx: u32) !void {
+    const advance = struct {
+        fn advance(shdr: *elf.Elf64_Shdr, size: u64, pow2_align: u8) !i64 {
+            const alignment = try math.powi(u32, 2, pow2_align);
+            const offset = mem.alignForward(u64, shdr.sh_size, alignment);
+            const padding = offset - shdr.sh_size;
+            shdr.sh_size += padding + size;
+            shdr.sh_addralign = @max(shdr.sh_addralign, alignment);
+            return @intCast(offset);
+        }
+    }.advance;
+
+    const gpa = self.base.allocator;
+    const cpu_arch = self.options.cpu_arch.?;
+    const slice = self.sections.slice();
+    const shdr = &slice.items(.shdr)[shndx];
+    const atoms = slice.items(.atoms)[shndx].items;
+    assert(atoms.len > 0);
+
+    for (atoms) |atom_index| {
+        self.getAtom(atom_index).?.value = -1;
+    }
+
+    var i: usize = 0;
+    while (i < atoms.len) {
+        const start = i;
+        const start_atom = self.getAtom(atoms[start]).?;
+        assert(start_atom.flags.alive);
+        start_atom.value = try advance(shdr, start_atom.size, start_atom.alignment);
+        i += 1;
+
+        while (i < atoms.len) : (i += 1) {
+            const atom_index = atoms[i];
+            const atom = self.getAtom(atom_index).?;
+            assert(atom.flags.alive);
+            const alignment = try math.powi(u32, 2, atom.alignment);
+            if (@as(i64, @intCast(mem.alignForward(u64, shdr.sh_size, alignment))) - start_atom.value >= Thunk.maxAllowedDistance(cpu_arch)) break;
+            atom.value = try advance(shdr, atom.size, atom.alignment);
+        }
+
+        // Insert a thunk at the group end
+        const thunk_index = try self.addThunk();
+        const thunk = self.getThunk(thunk_index);
+        thunk.out_shndx = shndx;
+
+        // Scan relocs in the group and create trampolines for any unreachable callsite
+        for (atoms[start..i]) |atom_index| {
+            const atom = self.getAtom(atom_index).?;
+            const object = atom.getObject(self);
+            log.debug("atom({d}) {s}", .{ atom_index, atom.getName(self) });
+            for (atom.getRelocs(self)) |rel| {
+                if (Thunk.isReachable(atom, rel, self)) continue;
+                const target = object.symbols.items[rel.r_sym()];
+                try thunk.symbols.put(gpa, target, {});
+            }
+            try atom.addExtra(.{ .thunk = thunk_index }, self);
+            atom.flags.thunk = true;
+        }
+
+        thunk.value = try advance(shdr, thunk.size(self), 2);
+
+        log.debug("thunk({d}) : {}", .{ thunk_index, thunk.fmt(self) });
+    }
 }
 
 pub fn addSymbol(self: *Elf) !Symbol.Index {
@@ -2835,14 +2911,14 @@ pub fn getSymbol(self: *Elf, index: Symbol.Index) *Symbol {
 }
 
 pub fn addSymbolExtra(self: *Elf, extra: Symbol.Extra) !u32 {
-    const fields = @typeInfo(Symbol.Extra).Struct.fields;
+    const fields = @typeInfo(Symbol.Extra).@"struct".fields;
     try self.symbols_extra.ensureUnusedCapacity(self.base.allocator, fields.len);
     return self.addSymbolExtraAssumeCapacity(extra);
 }
 
 pub fn addSymbolExtraAssumeCapacity(self: *Elf, extra: Symbol.Extra) u32 {
     const index = @as(u32, @intCast(self.symbols_extra.items.len));
-    const fields = @typeInfo(Symbol.Extra).Struct.fields;
+    const fields = @typeInfo(Symbol.Extra).@"struct".fields;
     inline for (fields) |field| {
         self.symbols_extra.appendAssumeCapacity(switch (field.type) {
             u32 => @field(extra, field.name),
@@ -2854,7 +2930,7 @@ pub fn addSymbolExtraAssumeCapacity(self: *Elf, extra: Symbol.Extra) u32 {
 
 pub fn getSymbolExtra(self: *Elf, index: u32) ?Symbol.Extra {
     if (index == 0) return null;
-    const fields = @typeInfo(Symbol.Extra).Struct.fields;
+    const fields = @typeInfo(Symbol.Extra).@"struct".fields;
     var i: usize = index;
     var result: Symbol.Extra = undefined;
     inline for (fields) |field| {
@@ -2869,7 +2945,7 @@ pub fn getSymbolExtra(self: *Elf, index: u32) ?Symbol.Extra {
 
 pub fn setSymbolExtra(self: *Elf, index: u32, extra: Symbol.Extra) void {
     assert(index > 0);
-    const fields = @typeInfo(Symbol.Extra).Struct.fields;
+    const fields = @typeInfo(Symbol.Extra).@"struct".fields;
     inline for (fields, 0..) |field, i| {
         self.symbols_extra.items[index + i] = switch (field.type) {
             u32 => @field(extra, field.name),
@@ -3312,7 +3388,6 @@ const relocatable = @import("Elf/relocatable.zig");
 const relocation = @import("Elf/relocation.zig");
 const state_log = std.log.scoped(.state);
 const synthetic = @import("Elf/synthetic.zig");
-const thunks = @import("Elf/thunks.zig");
 const trace = @import("tracy.zig").trace;
 const riscv = @import("riscv.zig");
 
@@ -3342,6 +3417,6 @@ const SharedObject = @import("Elf/SharedObject.zig");
 const StringTable = @import("StringTable.zig");
 const Symbol = @import("Elf/Symbol.zig");
 const ThreadPool = std.Thread.Pool;
-const Thunk = @import("Elf/thunks.zig").Thunk;
+const Thunk = @import("Elf/Thunk.zig");
 const VerneedSection = synthetic.VerneedSection;
 const Zld = @import("Zld.zig");
