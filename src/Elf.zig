@@ -90,7 +90,6 @@ thunks: std.ArrayListUnmanaged(Thunk) = .{},
 
 merge_sections: std.ArrayListUnmanaged(MergeSection) = .{},
 merge_subsections: std.ArrayListUnmanaged(MergeSubsection) = .{},
-merge_input_sections: std.ArrayListUnmanaged(InputMergeSection) = .{},
 
 comdat_groups: std.ArrayListUnmanaged(ComdatGroup) = .{},
 comdat_groups_owners: std.ArrayListUnmanaged(ComdatGroupOwner) = .{},
@@ -155,10 +154,6 @@ pub fn deinit(self: *Elf) void {
     }
     self.merge_sections.deinit(gpa);
     self.merge_subsections.deinit(gpa);
-    for (self.merge_input_sections.items) |*sect| {
-        sect.deinit(gpa);
-    }
-    self.merge_input_sections.deinit(gpa);
     self.comdat_groups.deinit(gpa);
     self.comdat_groups_owners.deinit(gpa);
     self.comdat_groups_table.deinit(gpa);
@@ -296,8 +291,6 @@ pub fn flush(self: *Elf) !void {
     try self.symbols_extra.append(gpa, 0);
     // Append null file.
     try self.files.append(gpa, .null);
-    // Append null input merge section.
-    try self.merge_input_sections.append(gpa, .{});
 
     var arena_allocator = std.heap.ArenaAllocator.init(gpa);
     defer arena_allocator.deinit();
@@ -2984,18 +2977,6 @@ pub fn getOrCreateGlobal(self: *Elf, off: u32) !GetOrCreateGlobalResult {
 pub fn getGlobalByName(self: *Elf, name: []const u8) ?u32 {
     const off = self.string_intern.getOffset(name) orelse return null;
     return self.globals.get(off);
-}
-
-pub fn addInputMergeSection(self: *Elf) !InputMergeSection.Index {
-    const index: InputMergeSection.Index = @intCast(self.merge_input_sections.items.len);
-    const msec = try self.merge_input_sections.addOne(self.base.allocator);
-    msec.* = .{};
-    return index;
-}
-
-pub fn getInputMergeSection(self: *Elf, index: InputMergeSection.Index) ?*InputMergeSection {
-    if (index == 0) return null;
-    return &self.merge_input_sections.items[index];
 }
 
 pub fn addMergeSubsection(self: *Elf) !MergeSubsection.Index {
