@@ -85,6 +85,13 @@ pub const File = union(enum) {
         }
     }
 
+    pub fn getComdatGroup(file: File, ind: Elf.ComdatGroup.Index) *Elf.ComdatGroup {
+        return switch (file) {
+            .internal, .shared => unreachable,
+            .object => |x| x.getComdatGroup(ind),
+        };
+    }
+
     pub fn getLocals(file: File) []const Symbol.Index {
         return switch (file) {
             .object => |x| x.getLocals(),

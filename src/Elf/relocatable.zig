@@ -122,19 +122,12 @@ fn initSections(elf_file: *Elf) !void {
 }
 
 fn initComdatGroups(elf_file: *Elf) !void {
-    const tracy = trace(@src());
-    defer tracy.end();
-
     const gpa = elf_file.base.allocator;
 
     for (elf_file.objects.items) |index| {
         const object = elf_file.getFile(index).?.object;
-
-        for (object.comdat_groups.items) |cg_index| {
-            const cg = elf_file.getComdatGroup(cg_index);
-            const cg_owner = elf_file.getComdatGroupOwner(cg.owner);
-            if (cg_owner.file != index) continue;
-
+        for (object.comdat_groups.items, 0..) |cg, cg_index| {
+            if (!cg.alive) continue;
             const cg_sec = try elf_file.comdat_group_sections.addOne(gpa);
             cg_sec.* = .{
                 .shndx = try elf_file.addSection(.{
@@ -143,7 +136,7 @@ fn initComdatGroups(elf_file: *Elf) !void {
                     .entsize = @sizeOf(u32),
                     .addralign = @alignOf(u32),
                 }),
-                .cg_index = cg_index,
+                .cg_ref = .{ .index = @intCast(cg_index), .file = index },
             };
         }
     }
@@ -205,9 +198,8 @@ fn calcComdatGroupsSizes(elf_file: *Elf) void {
         shdr.sh_size = cg.size(elf_file);
         shdr.sh_link = elf_file.symtab_sect_index.?;
 
-        const sym = elf_file.getSymbol(cg.getSymbol(elf_file));
-        shdr.sh_info = sym.getOutputSymtabIndex(elf_file) orelse
-            elf_file.sections.items(.sym_index)[sym.shndx];
+        const sym = cg.getSymbol(elf_file);
+        shdr.sh_info = sym.getOutputSymtabIndex(elf_file) orelse sym.shndx;
     }
 }
 

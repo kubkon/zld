@@ -91,10 +91,6 @@ thunks: std.ArrayListUnmanaged(Thunk) = .{},
 merge_sections: std.ArrayListUnmanaged(MergeSection) = .{},
 merge_subsections: std.ArrayListUnmanaged(MergeSubsection) = .{},
 
-comdat_groups: std.ArrayListUnmanaged(ComdatGroup) = .{},
-comdat_groups_owners: std.ArrayListUnmanaged(ComdatGroupOwner) = .{},
-comdat_groups_table: std.AutoHashMapUnmanaged(u32, ComdatGroupOwner.Index) = .{},
-
 has_text_reloc: bool = false,
 num_ifunc_dynrelocs: usize = 0,
 default_sym_version: elf.Elf64_Versym,
@@ -154,9 +150,6 @@ pub fn deinit(self: *Elf) void {
     }
     self.merge_sections.deinit(gpa);
     self.merge_subsections.deinit(gpa);
-    self.comdat_groups.deinit(gpa);
-    self.comdat_groups_owners.deinit(gpa);
-    self.comdat_groups_table.deinit(gpa);
     self.symbols.deinit(gpa);
     self.symbols_extra.deinit(gpa);
     self.globals.deinit(gpa);
@@ -2046,34 +2039,17 @@ fn resolveSymbols(self: *Elf) !void {
         } else i += 1;
     }
 
-    // Dedup comdat groups.
-    for (self.objects.items) |index| {
-        const object = self.getFile(index).?.object;
-        for (object.comdat_groups.items) |cg_index| {
-            const cg = self.getComdatGroup(cg_index);
-            const cg_owner = self.getComdatGroupOwner(cg.owner);
-            const owner_file_index = if (self.getFile(cg_owner.file)) |file|
-                file.object.index
-            else
-                std.math.maxInt(File.Index);
-            cg_owner.file = @min(owner_file_index, index);
-        }
-    }
+    {
+        // Dedup comdat groups.
+        var table = std.StringHashMap(Ref).init(self.base.allocator);
+        defer table.deinit();
 
-    for (self.objects.items) |index| {
-        const object = self.getFile(index).?.object;
-        for (object.comdat_groups.items) |cg_index| {
-            const cg = self.getComdatGroup(cg_index);
-            const cg_owner = self.getComdatGroupOwner(cg.owner);
-            if (cg_owner.file != index) {
-                for (cg.getComdatGroupMembers(self)) |shndx| {
-                    const atom_index = object.atoms.items[shndx];
-                    if (self.getAtom(atom_index)) |atom| {
-                        atom.flags.alive = false;
-                        atom.markFdesDead(self);
-                    }
-                }
-            }
+        for (self.objects.items) |index| {
+            try self.getFile(index).?.object.resolveComdatGroups(self, &table);
+        }
+
+        for (self.objects.items) |index| {
+            self.getFile(index).?.object.markComdatGroupsDead(self);
         }
     }
 
@@ -3019,40 +2995,8 @@ pub fn getMergeSection(self: *Elf, index: MergeSection.Index) *MergeSection {
     return &self.merge_sections.items[index];
 }
 
-const GetOrCreateComdatGroupOwnerResult = struct {
-    found_existing: bool,
-    index: ComdatGroupOwner.Index,
-};
-
-pub fn getOrCreateComdatGroupOwner(self: *Elf, off: u32) !GetOrCreateComdatGroupOwnerResult {
-    const gpa = self.base.allocator;
-    const gop = try self.comdat_groups_table.getOrPut(gpa, off);
-    if (!gop.found_existing) {
-        const index = @as(ComdatGroupOwner.Index, @intCast(self.comdat_groups_owners.items.len));
-        const owner = try self.comdat_groups_owners.addOne(gpa);
-        owner.* = .{};
-        gop.value_ptr.* = index;
-    }
-    return .{
-        .found_existing = gop.found_existing,
-        .index = gop.value_ptr.*,
-    };
-}
-
-pub fn addComdatGroup(self: *Elf) !ComdatGroup.Index {
-    const index = @as(ComdatGroup.Index, @intCast(self.comdat_groups.items.len));
-    _ = try self.comdat_groups.addOne(self.base.allocator);
-    return index;
-}
-
-pub inline fn getComdatGroup(self: *Elf, index: ComdatGroup.Index) *ComdatGroup {
-    assert(index < self.comdat_groups.items.len);
-    return &self.comdat_groups.items[index];
-}
-
-pub inline fn getComdatGroupOwner(self: *Elf, index: ComdatGroupOwner.Index) *ComdatGroupOwner {
-    assert(index < self.comdat_groups_owners.items.len);
-    return &self.comdat_groups_owners.items[index];
+pub fn getComdatGroup(self: *Elf, ref: Ref) *ComdatGroup {
+    return self.getFile(ref.file).?.getComdatGroup(ref.index);
 }
 
 const RelaDyn = struct {
@@ -3294,7 +3238,12 @@ fn fmtDumpState(
         try writer.print("merge_sect({d}) : {}\n", .{ index, msec.fmt(self) });
     }
     try writer.writeByte('\n');
-    try writer.writeAll("Output sections\n");
+    try writer.writeAll("Output COMDAT groups\n");
+    for (self.comdat_group_sections.items) |cg| {
+        try writer.print("  shdr({d}) : COMDAT({})\n", .{ cg.shndx, cg.cg_ref });
+    }
+    try writer.writeByte('\n');
+    try writer.writeAll("Output shdrs\n");
     try writer.print("{}\n", .{self.fmtSections()});
     try writer.writeAll("Output phdrs\n");
     try writer.print("{}\n", .{self.fmtPhdrs()});
@@ -3313,21 +3262,44 @@ const Section = struct {
     sym_index: u32 = 0,
 };
 
-const ComdatGroupOwner = struct {
-    file: File.Index = 0,
+pub const Ref = struct {
+    index: u32 = 0,
+    file: u32 = 0,
 
-    const Index = u32;
+    pub fn eql(ref: Ref, other: Ref) bool {
+        return ref.index == other.index and ref.file == other.file;
+    }
+
+    pub fn format(
+        ref: Ref,
+        comptime unused_fmt_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = unused_fmt_string;
+        _ = options;
+        try writer.print("ref({},{})", .{ ref.index, ref.file });
+    }
 };
 
 pub const ComdatGroup = struct {
-    owner: ComdatGroupOwner.Index,
-    file: File.Index,
+    signature_off: u32,
+    file_index: File.Index,
     shndx: u32,
     members_start: u32,
     members_len: u32,
+    alive: bool = true,
+
+    pub fn getFile(cg: ComdatGroup, elf_file: *Elf) File {
+        return elf_file.getFile(cg.file_index).?;
+    }
+
+    pub fn getSignature(cg: ComdatGroup, elf_file: *Elf) [:0]const u8 {
+        return cg.getFile(elf_file).object.getString(cg.signature_off);
+    }
 
     pub fn getComdatGroupMembers(cg: ComdatGroup, elf_file: *Elf) []const u32 {
-        const object = elf_file.getFile(cg.file).?.object;
+        const object = cg.getFile(elf_file).object;
         return object.comdat_group_data.items[cg.members_start..][0..cg.members_len];
     }
 

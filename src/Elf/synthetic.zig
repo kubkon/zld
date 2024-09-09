@@ -1409,30 +1409,30 @@ pub const CopyRelSection = struct {
 
 pub const ComdatGroupSection = struct {
     shndx: u32,
-    cg_index: u32,
+    cg_ref: Elf.Ref,
 
-    fn getFile(cgs: ComdatGroupSection, elf_file: *Elf) ?File {
-        const cg = elf_file.getComdatGroup(cgs.cg_index);
-        const cg_owner = elf_file.getComdatGroupOwner(cg.owner);
-        return elf_file.getFile(cg_owner.file);
+    fn getComdatGroup(cgs: ComdatGroupSection, elf_file: *Elf) *Elf.ComdatGroup {
+        const cg_file = elf_file.getFile(cgs.cg_ref.file).?;
+        return cg_file.object.getComdatGroup(cgs.cg_ref.index);
     }
 
-    pub fn getSymbol(cgs: ComdatGroupSection, elf_file: *Elf) Symbol.Index {
-        const cg = elf_file.getComdatGroup(cgs.cg_index);
-        const object = cgs.getFile(elf_file).?.object;
+    pub fn getSymbol(cgs: ComdatGroupSection, elf_file: *Elf) *Symbol {
+        const cg = cgs.getComdatGroup(elf_file);
+        const object = cg.getFile(elf_file).object;
         const shdr = object.shdrs.items[cg.shndx];
-        return object.symbols.items[shdr.sh_info];
+        const sym_index = object.symbols.items[shdr.sh_info];
+        return elf_file.getSymbol(sym_index);
     }
 
     pub fn size(cgs: ComdatGroupSection, elf_file: *Elf) usize {
-        const cg = elf_file.getComdatGroup(cgs.cg_index);
+        const cg = cgs.getComdatGroup(elf_file);
         const members = cg.getComdatGroupMembers(elf_file);
         return (members.len + 1) * @sizeOf(u32);
     }
 
     pub fn write(cgs: ComdatGroupSection, elf_file: *Elf, writer: anytype) !void {
-        const cg = elf_file.getComdatGroup(cgs.cg_index);
-        const object = cgs.getFile(elf_file).?.object;
+        const cg = cgs.getComdatGroup(elf_file);
+        const object = cg.getFile(elf_file).object;
         const members = cg.getComdatGroupMembers(elf_file);
         try writer.writeInt(u32, elf.GRP_COMDAT, .little);
         for (members) |shndx| {
@@ -1441,8 +1441,12 @@ pub const ComdatGroupSection = struct {
                 elf.SHT_RELA => {
                     const atom_index = object.atoms.items[shdr.sh_info];
                     const atom = elf_file.getAtom(atom_index).?;
-                    const rela_shndx = elf_file.sections.items(.rela_shndx)[atom.out_shndx];
-                    try writer.writeInt(u32, rela_shndx, .little);
+                    const rela_shndx = for (elf_file.sections.items(.shdr), 0..) |rela_shdr, rela_shndx| {
+                        if (rela_shdr.sh_type == elf.SHT_RELA and
+                            atom.out_shndx == rela_shdr.sh_info)
+                            break rela_shndx;
+                    } else unreachable;
+                    try writer.writeInt(u32, @intCast(rela_shndx), .little);
                 },
                 else => {
                     const atom_index = object.atoms.items[shndx];
