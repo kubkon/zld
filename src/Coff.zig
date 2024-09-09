@@ -367,7 +367,7 @@ fn parseArchive(self: *Coff, obj: LinkObject, queue: anytype) ParseError!bool {
 
     var has_parse_error = false;
     for (archive.members.items) |member| {
-        const member_cpu_arch = member.machine.toTargetCpuArch() orelse {
+        const member_cpu_arch = cpuArchFromCoffMachineType(member.machine) orelse {
             extra_log.debug("{s}({s}): TODO unhandled machine type {}", .{ obj.path, member.name, member.machine });
             continue;
         };
@@ -1395,6 +1395,15 @@ pub fn getImageBase(self: Coff) u64 {
     };
 }
 
+/// TODO convert from std.Target.Cpu.Arch into std.coff.MachineType and remove this.
+fn cpuArchFromCoffMachineType(em: std.coff.MachineType) ?std.Target.Cpu.Arch {
+    return switch (em) {
+        .ARM64 => .aarch64,
+        .X64 => .x86_64,
+        else => null,
+    };
+}
+
 pub fn addAlternateName(self: *Coff, from: []const u8, to: []const u8) !void {
     const gpa = self.base.allocator;
     const from_index = blk: {
@@ -1493,14 +1502,14 @@ pub fn getSymbol(self: *Coff, index: Symbol.Index) *Symbol {
 }
 
 pub fn addSymbolExtra(self: *Coff, extra: Symbol.Extra) !u32 {
-    const fields = @typeInfo(Symbol.Extra).Struct.fields;
+    const fields = @typeInfo(Symbol.Extra).@"struct".fields;
     try self.symbols_extra.ensureUnusedCapacity(self.base.allocator, fields.len);
     return self.addSymbolExtraAssumeCapacity(extra);
 }
 
 pub fn addSymbolExtraAssumeCapacity(self: *Coff, extra: Symbol.Extra) u32 {
     const index = @as(u32, @intCast(self.symbols_extra.items.len));
-    const fields = @typeInfo(Symbol.Extra).Struct.fields;
+    const fields = @typeInfo(Symbol.Extra).@"struct".fields;
     inline for (fields) |field| {
         self.symbols_extra.appendAssumeCapacity(switch (field.type) {
             u32 => @field(extra, field.name),
@@ -1512,7 +1521,7 @@ pub fn addSymbolExtraAssumeCapacity(self: *Coff, extra: Symbol.Extra) u32 {
 
 pub fn getSymbolExtra(self: Coff, index: u32) ?Symbol.Extra {
     if (index == 0) return null;
-    const fields = @typeInfo(Symbol.Extra).Struct.fields;
+    const fields = @typeInfo(Symbol.Extra).@"struct".fields;
     var i: usize = index;
     var result: Symbol.Extra = undefined;
     inline for (fields) |field| {
@@ -1527,7 +1536,7 @@ pub fn getSymbolExtra(self: Coff, index: u32) ?Symbol.Extra {
 
 pub fn setSymbolExtra(self: *Coff, index: u32, extra: Symbol.Extra) void {
     assert(index > 0);
-    const fields = @typeInfo(Symbol.Extra).Struct.fields;
+    const fields = @typeInfo(Symbol.Extra).@"struct".fields;
     inline for (fields, 0..) |field, i| {
         self.symbols_extra.items[index + i] = switch (field.type) {
             u32 => @field(extra, field.name),
@@ -1636,7 +1645,7 @@ fn formatSectionFlags(
 ) !void {
     _ = options;
     _ = unused_fmt_string;
-    inline for (@typeInfo(coff.SectionHeaderFlags).Struct.fields) |field| {
+    inline for (@typeInfo(coff.SectionHeaderFlags).@"struct".fields) |field| {
         if (@field(flags, field.name) == 0b1) {
             try writer.writeAll(field.name ++ " ");
         }
