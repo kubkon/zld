@@ -60,7 +60,7 @@ symbols_extra: std.ArrayListUnmanaged(u32) = .{},
 globals: std.AutoHashMapUnmanaged(u32, Symbol.Index) = .{},
 /// This table will be populated after `scanRelocs` has run.
 /// Key is symbol index.
-undefs: std.AutoHashMapUnmanaged(Symbol.Index, std.ArrayListUnmanaged(Atom.Index)) = .{},
+undefs: std.AutoHashMapUnmanaged(Symbol.Index, std.ArrayListUnmanaged(Ref)) = .{},
 
 string_intern: StringTable = .{},
 
@@ -84,8 +84,6 @@ rela_dyn: std.ArrayListUnmanaged(elf.Elf64_Rela) = .{},
 rela_plt: std.ArrayListUnmanaged(elf.Elf64_Rela) = .{},
 comdat_group_sections: std.ArrayListUnmanaged(ComdatGroupSection) = .{},
 
-atoms: std.ArrayListUnmanaged(Atom) = .{},
-atoms_extra: std.ArrayListUnmanaged(u32) = .{},
 thunks: std.ArrayListUnmanaged(Thunk) = .{},
 
 merge_sections: std.ArrayListUnmanaged(MergeSection) = .{},
@@ -139,8 +137,6 @@ pub fn deinit(self: *Elf) void {
     self.shstrtab.deinit(gpa);
     self.symtab.deinit(gpa);
     self.strtab.deinit(gpa);
-    self.atoms.deinit(gpa);
-    self.atoms_extra.deinit(gpa);
     for (self.thunks.items) |*thunk| {
         thunk.deinit(gpa);
     }
@@ -275,9 +271,6 @@ pub fn flush(self: *Elf) !void {
     try self.dynstrtab.buffer.append(gpa, 0);
     // Append null section.
     _ = try self.addSection(.{ .name = "" });
-    // Append null atom.
-    try self.atoms.append(gpa, .{});
-    try self.atoms_extra.append(gpa, 0);
     // Append null symbols.
     try self.symtab.append(gpa, null_sym);
     try self.symbols.append(gpa, .{});
@@ -456,11 +449,11 @@ fn sortInitFini(self: *Elf) !void {
 
     const Entry = struct {
         priority: i32,
-        atom_index: Atom.Index,
+        atom_ref: Elf.Ref,
 
         pub fn lessThan(ctx: *Elf, lhs: @This(), rhs: @This()) bool {
             if (lhs.priority == rhs.priority) {
-                return ctx.getAtom(lhs.atom_index).?.getPriority(ctx) < ctx.getAtom(rhs.atom_index).?.getPriority(ctx);
+                return ctx.getAtom(lhs.atom_ref).?.getPriority(ctx) < ctx.getAtom(rhs.atom_ref).?.getPriority(ctx);
             }
             return lhs.priority < rhs.priority;
         }
@@ -490,8 +483,8 @@ fn sortInitFini(self: *Elf) !void {
         try entries.ensureTotalCapacityPrecise(atoms.items.len);
         defer entries.deinit();
 
-        for (atoms.items) |atom_index| {
-            const atom = self.getAtom(atom_index).?;
+        for (atoms.items) |ref| {
+            const atom = self.getAtom(ref).?;
             const file = atom.getObject(self);
             const priority = blk: {
                 if (is_ctor_dtor) {
@@ -504,14 +497,14 @@ fn sortInitFini(self: *Elf) !void {
                 const priority = std.fmt.parseUnsigned(u16, it.first(), 10) catch default;
                 break :blk priority;
             };
-            entries.appendAssumeCapacity(.{ .priority = priority, .atom_index = atom_index });
+            entries.appendAssumeCapacity(.{ .priority = priority, .atom_ref = ref });
         }
 
         mem.sort(Entry, entries.items, self, Entry.lessThan);
 
         atoms.clearRetainingCapacity();
         for (entries.items) |entry| {
-            atoms.appendAssumeCapacity(entry.atom_index);
+            atoms.appendAssumeCapacity(entry.atom_ref);
         }
     }
 }
@@ -519,8 +512,8 @@ fn sortInitFini(self: *Elf) !void {
 fn initOutputSections(self: *Elf) !void {
     for (self.objects.items) |index| {
         const object = self.getFile(index).?.object;
-        for (object.atoms.items) |atom_index| {
-            const atom = self.getAtom(atom_index) orelse continue;
+        for (object.atoms_indexes.items) |atom_index| {
+            const atom = object.getAtom(atom_index) orelse continue;
             if (!atom.flags.alive) continue;
             atom.out_shndx = try object.initOutputSection(self, atom.getInputShdr(self));
         }
@@ -746,11 +739,14 @@ pub fn initShStrtab(self: *Elf) !void {
 pub fn addAtomsToSections(self: *Elf) !void {
     for (self.objects.items) |index| {
         const object = self.getFile(index).?.object;
-        for (object.atoms.items) |atom_index| {
-            const atom = self.getAtom(atom_index) orelse continue;
+        for (object.atoms_indexes.items) |atom_index| {
+            const atom = object.getAtom(atom_index) orelse continue;
             if (!atom.flags.alive) continue;
             const atoms = &self.sections.items(.atoms)[atom.out_shndx];
-            try atoms.append(self.base.allocator, atom_index);
+            try atoms.append(self.base.allocator, .{
+                .index = atom_index,
+                .file = index,
+            });
         }
 
         for (object.getLocals()) |local_index| {
@@ -835,8 +831,8 @@ fn calcSectionSizes(self: *Elf) !void {
         if (atoms.items.len == 0) continue;
         if (self.requiresThunks() and shdr.sh_flags & elf.SHF_EXECINSTR != 0) continue;
 
-        for (atoms.items) |atom_index| {
-            const atom = self.getAtom(atom_index).?;
+        for (atoms.items) |ref| {
+            const atom = self.getAtom(ref).?;
             const alignment = try math.powi(u64, 2, atom.alignment);
             const offset = mem.alignForward(u64, shdr.sh_size, alignment);
             const padding = offset - shdr.sh_size;
@@ -1551,8 +1547,9 @@ pub fn sortSections(self: *Elf) !void {
     }
 
     for (self.objects.items) |index| {
-        for (self.getFile(index).?.object.atoms.items) |atom_index| {
-            const atom = self.getAtom(atom_index) orelse continue;
+        const object = self.getFile(index).?.object;
+        for (object.atoms_indexes.items) |atom_index| {
+            const atom = object.getAtom(atom_index) orelse continue;
             if (!atom.flags.alive) continue;
             atom.out_shndx = backlinks[atom.out_shndx];
         }
@@ -2084,8 +2081,8 @@ fn markEhFrameAtomsDead(self: *Elf) void {
         const file = self.getFile(index).?;
         if (!file.isAlive()) continue;
         const object = file.object;
-        for (object.atoms.items) |atom_index| {
-            const atom = self.getAtom(atom_index) orelse continue;
+        for (object.atoms_indexes.items) |atom_index| {
+            const atom = object.getAtom(atom_index) orelse continue;
             const is_eh_frame = (self.options.cpu_arch.? == .x86_64 and atom.getInputShdr(self).sh_type == elf.SHT_X86_64_UNWIND) or
                 mem.eql(u8, atom.getName(self), ".eh_frame");
             if (atom.flags.alive and is_eh_frame) atom.flags.alive = false;
@@ -2234,7 +2231,7 @@ fn claimUnresolved(self: *Elf) void {
             };
 
             global.value = 0;
-            global.atom = 0;
+            global.atom_ref = .{};
             global.sym_idx = sym_idx;
             global.file = object.index;
             global.ver_idx = if (is_import) elf.VER_NDX_LOCAL else self.default_sym_version;
@@ -2403,12 +2400,12 @@ fn writeAtoms(self: *Elf) !void {
 
         var stream = std.io.fixedBufferStream(buffer);
 
-        for (atoms.items) |atom_index| {
-            const atom = self.getAtom(atom_index).?;
+        for (atoms.items) |ref| {
+            const atom = self.getAtom(ref).?;
             assert(atom.flags.alive);
             const off: u64 = @intCast(atom.value);
-            log.debug("writing ATOM(%{d},'{s}') at offset 0x{x}", .{
-                atom_index,
+            log.debug("writing ATOM({},'{s}') at offset 0x{x}", .{
+                ref,
                 atom.getName(self),
                 shdr.sh_offset + off,
             });
@@ -2733,63 +2730,6 @@ pub fn getFileHandle(self: Elf, index: File.HandleIndex) File.Handle {
     return self.file_handles.items[index];
 }
 
-pub fn addAtom(self: *Elf) !Atom.Index {
-    const index = @as(u32, @intCast(self.atoms.items.len));
-    const atom = try self.atoms.addOne(self.base.allocator);
-    atom.* = .{};
-    return index;
-}
-
-pub fn getAtom(self: Elf, atom_index: Atom.Index) ?*Atom {
-    if (atom_index == 0) return null;
-    assert(atom_index < self.atoms.items.len);
-    return &self.atoms.items[atom_index];
-}
-
-pub fn addAtomExtra(self: *Elf, extra: Atom.Extra) !u32 {
-    const fields = @typeInfo(Atom.Extra).@"struct".fields;
-    try self.atoms_extra.ensureUnusedCapacity(self.base.allocator, fields.len);
-    return self.addAtomExtraAssumeCapacity(extra);
-}
-
-pub fn addAtomExtraAssumeCapacity(self: *Elf, extra: Atom.Extra) u32 {
-    const index = @as(u32, @intCast(self.atoms_extra.items.len));
-    const fields = @typeInfo(Atom.Extra).@"struct".fields;
-    inline for (fields) |field| {
-        self.atoms_extra.appendAssumeCapacity(switch (field.type) {
-            u32 => @field(extra, field.name),
-            else => @compileError("bad field type"),
-        });
-    }
-    return index;
-}
-
-pub fn getAtomExtra(self: *Elf, index: u32) ?Atom.Extra {
-    if (index == 0) return null;
-    const fields = @typeInfo(Atom.Extra).@"struct".fields;
-    var i: usize = index;
-    var result: Atom.Extra = undefined;
-    inline for (fields) |field| {
-        @field(result, field.name) = switch (field.type) {
-            u32 => self.atoms_extra.items[i],
-            else => @compileError("bad field type"),
-        };
-        i += 1;
-    }
-    return result;
-}
-
-pub fn setAtomExtra(self: *Elf, index: u32, extra: Atom.Extra) void {
-    assert(index > 0);
-    const fields = @typeInfo(Atom.Extra).@"struct".fields;
-    inline for (fields, 0..) |field, i| {
-        self.atoms_extra.items[index + i] = switch (field.type) {
-            u32 => @field(extra, field.name),
-            else => @compileError("bad field type"),
-        };
-    }
-}
-
 fn addThunk(self: *Elf) !Thunk.Index {
     const index = @as(Thunk.Index, @intCast(self.thunks.items.len));
     const thunk = try self.thunks.addOne(self.base.allocator);
@@ -2821,8 +2761,8 @@ fn createThunks(self: *Elf, shndx: u32) !void {
     const atoms = slice.items(.atoms)[shndx].items;
     assert(atoms.len > 0);
 
-    for (atoms) |atom_index| {
-        self.getAtom(atom_index).?.value = -1;
+    for (atoms) |ref| {
+        self.getAtom(ref).?.value = -1;
     }
 
     var i: usize = 0;
@@ -2834,8 +2774,8 @@ fn createThunks(self: *Elf, shndx: u32) !void {
         i += 1;
 
         while (i < atoms.len) : (i += 1) {
-            const atom_index = atoms[i];
-            const atom = self.getAtom(atom_index).?;
+            const ref = atoms[i];
+            const atom = self.getAtom(ref).?;
             assert(atom.flags.alive);
             const alignment = try math.powi(u32, 2, atom.alignment);
             if (@as(i64, @intCast(mem.alignForward(u64, shdr.sh_size, alignment))) - start_atom.value >= Thunk.maxAllowedDistance(cpu_arch)) break;
@@ -2848,16 +2788,16 @@ fn createThunks(self: *Elf, shndx: u32) !void {
         thunk.out_shndx = shndx;
 
         // Scan relocs in the group and create trampolines for any unreachable callsite
-        for (atoms[start..i]) |atom_index| {
-            const atom = self.getAtom(atom_index).?;
+        for (atoms[start..i]) |ref| {
+            const atom = self.getAtom(ref).?;
             const object = atom.getObject(self);
-            log.debug("atom({d}) {s}", .{ atom_index, atom.getName(self) });
+            log.debug("atom({}) {s}", .{ ref, atom.getName(self) });
             for (atom.getRelocs(self)) |rel| {
                 if (Thunk.isReachable(atom, rel, self)) continue;
                 const target = object.symbols.items[rel.r_sym()];
                 try thunk.symbols.put(gpa, target, {});
             }
-            try atom.addExtra(.{ .thunk = thunk_index }, self);
+            atom.addExtra(.{ .thunk = thunk_index }, self);
             atom.flags.thunk = true;
         }
 
@@ -2993,6 +2933,11 @@ pub fn getOrCreateMergeSection(self: *Elf, name: [:0]const u8, flags: u64, @"typ
 pub fn getMergeSection(self: *Elf, index: MergeSection.Index) *MergeSection {
     assert(index < self.merge_sections.items.len);
     return &self.merge_sections.items[index];
+}
+
+pub fn getAtom(self: *Elf, ref: Ref) ?*Atom {
+    const file = self.getFile(ref.file) orelse return null;
+    return file.getAtom(ref.index);
 }
 
 pub fn getComdatGroup(self: *Elf, ref: Ref) *ComdatGroup {
@@ -3257,7 +3202,7 @@ pub const LinkObject = struct {
 
 const Section = struct {
     shdr: elf.Elf64_Shdr,
-    atoms: std.ArrayListUnmanaged(Atom.Index) = .{},
+    atoms: std.ArrayListUnmanaged(Ref) = .{},
     rela_shndx: u32 = 0,
     sym_index: u32 = 0,
 };

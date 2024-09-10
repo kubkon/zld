@@ -46,7 +46,7 @@ fn claimUnresolved(elf_file: *Elf) void {
             }
 
             global.value = 0;
-            global.atom = 0;
+            global.atom_ref = .{};
             global.sym_idx = sym_idx;
             global.file = object.index;
         }
@@ -60,8 +60,8 @@ fn initSections(elf_file: *Elf) !void {
     for (elf_file.objects.items) |index| {
         const object = elf_file.getFile(index).?.object;
 
-        for (object.atoms.items) |atom_index| {
-            const atom = elf_file.getAtom(atom_index) orelse continue;
+        for (object.atoms_indexes.items) |atom_index| {
+            const atom = object.getAtom(atom_index) orelse continue;
             if (!atom.flags.alive) continue;
             atom.out_shndx = try object.initOutputSection(elf_file, atom.getInputShdr(elf_file));
 
@@ -155,8 +155,8 @@ fn calcSectionSizes(elf_file: *Elf) !void {
 
         const rela_shdr = if (rela_shndx != 0) &elf_file.sections.items(.shdr)[rela_shndx] else null;
 
-        for (atoms.items) |atom_index| {
-            const atom = elf_file.getAtom(atom_index).?;
+        for (atoms.items) |ref| {
+            const atom = elf_file.getAtom(ref).?;
             const alignment = try math.powi(u64, 2, atom.alignment);
             const offset = mem.alignForward(u64, shdr.sh_size, alignment);
             const padding = offset - shdr.sh_size;
@@ -235,12 +235,12 @@ fn writeAtoms(elf_file: *Elf) !void {
             0;
         @memset(buffer, padding_byte);
 
-        for (atoms.items) |atom_index| {
-            const atom = elf_file.getAtom(atom_index).?;
+        for (atoms.items) |ref| {
+            const atom = elf_file.getAtom(ref).?;
             assert(atom.flags.alive);
             const off: u64 = @intCast(atom.value);
-            log.debug("writing ATOM(%{d},'{s}') at offset 0x{x}", .{
-                atom_index,
+            log.debug("writing ATOM({},'{s}') at offset 0x{x}", .{
+                ref,
                 atom.getName(elf_file),
                 shdr.sh_offset + off,
             });
@@ -272,8 +272,8 @@ fn writeSyntheticSections(elf_file: *Elf) !void {
         var relocs = try std.ArrayList(elf.Elf64_Rela).initCapacity(gpa, num_relocs);
         defer relocs.deinit();
 
-        for (atoms.items) |atom_index| {
-            const atom = elf_file.getAtom(atom_index) orelse continue;
+        for (atoms.items) |ref| {
+            const atom = elf_file.getAtom(ref) orelse continue;
             if (!atom.flags.alive) continue;
             try atom.writeRelocs(elf_file, &relocs);
         }

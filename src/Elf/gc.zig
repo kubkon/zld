@@ -31,8 +31,8 @@ fn collectRoots(roots: *std.ArrayList(*Atom), elf_file: *Elf) !void {
     for (elf_file.objects.items) |index| {
         const object = elf_file.getFile(index).?.object;
 
-        for (object.atoms.items) |atom_index| {
-            const atom = elf_file.getAtom(atom_index) orelse continue;
+        for (object.atoms_indexes.items) |atom_index| {
+            const atom = object.getAtom(atom_index) orelse continue;
             if (!atom.flags.alive) continue;
 
             const shdr = atom.getInputShdr(elf_file);
@@ -125,8 +125,9 @@ fn prune(elf_file: *Elf) void {
     defer tracy.end();
 
     for (elf_file.objects.items) |index| {
-        for (elf_file.getFile(index).?.object.atoms.items) |atom_index| {
-            const atom = elf_file.getAtom(atom_index) orelse continue;
+        const object = elf_file.getFile(index).?.object;
+        for (object.atoms_indexes.items) |atom_index| {
+            const atom = object.getAtom(atom_index) orelse continue;
             if (atom.flags.alive and !atom.flags.visited) {
                 atom.flags.alive = false;
                 atom.markFdesDead(elf_file);
@@ -138,8 +139,9 @@ fn prune(elf_file: *Elf) void {
 pub fn dumpPrunedAtoms(elf_file: *Elf) !void {
     const stderr = std.io.getStdErr().writer();
     for (elf_file.objects.items) |index| {
-        for (elf_file.getFile(index).?.object.atoms.items) |atom_index| {
-            const atom = elf_file.getAtom(atom_index) orelse continue;
+        const object = elf_file.getFile(index).?.object;
+        for (object.atoms_indexes.items) |atom_index| {
+            const atom = object.getAtom(atom_index) orelse continue;
             if (!atom.flags.alive)
                 try stderr.print("ld.zld: removing unused section '{s}' in file '{}'\n", .{
                     atom.getName(elf_file),

@@ -30,7 +30,7 @@ flags: Flags = .{},
 extra: u32 = 0,
 
 pub fn getName(self: Atom, elf_file: *Elf) [:0]const u8 {
-    return elf_file.string_intern.getAssumeExists(self.name);
+    return self.getObject(elf_file).getString(self.name);
 }
 
 pub fn getAddress(self: Atom, elf_file: *Elf) i64 {
@@ -99,14 +99,14 @@ pub fn getPriority(self: Atom, elf_file: *Elf) u64 {
 
 pub fn getRelocs(self: Atom, elf_file: *Elf) []const elf.Elf64_Rela {
     if (self.relocs_shndx == 0) return &[0]elf.Elf64_Rela{};
-    const extra = self.getExtra(elf_file).?;
+    const extra = self.getExtra(elf_file);
     const object = self.getObject(elf_file);
     return object.relocs.items[extra.rel_index..][0..extra.rel_count];
 }
 
 pub fn getThunk(self: Atom, elf_file: *Elf) *Thunk {
     assert(self.flags.thunk);
-    const extra = self.getExtra(elf_file).?;
+    const extra = self.getExtra(elf_file);
     return elf_file.getThunk(extra.thunk);
 }
 
@@ -118,25 +118,23 @@ const AddExtraOpts = struct {
     rel_count: ?u32 = null,
 };
 
-pub fn addExtra(atom: *Atom, opts: AddExtraOpts, elf_file: *Elf) !void {
-    if (atom.getExtra(elf_file) == null) {
-        atom.extra = try elf_file.addAtomExtra(.{});
-    }
-    var extra = atom.getExtra(elf_file).?;
+pub fn addExtra(atom: *Atom, opts: AddExtraOpts, elf_file: *Elf) void {
+    const object = atom.getObject(elf_file);
+    var extras = object.getAtomExtra(atom.extra);
     inline for (@typeInfo(@TypeOf(opts)).@"struct".fields) |field| {
         if (@field(opts, field.name)) |x| {
-            @field(extra, field.name) = x;
+            @field(extras, field.name) = x;
         }
     }
-    atom.setExtra(extra, elf_file);
+    object.setAtomExtra(atom.extra, extras);
 }
 
-pub inline fn getExtra(atom: Atom, elf_file: *Elf) ?Extra {
-    return elf_file.getAtomExtra(atom.extra);
+pub fn getExtra(atom: Atom, elf_file: *Elf) Extra {
+    return atom.getObject(elf_file).getAtomExtra(atom.extra);
 }
 
-pub inline fn setExtra(atom: Atom, extra: Extra, elf_file: *Elf) void {
-    elf_file.setAtomExtra(atom.extra, extra);
+pub fn setExtra(atom: Atom, extras: Extra, elf_file: *Elf) void {
+    atom.getObject(elf_file).setAtomExtra(atom.extra, extras);
 }
 
 pub fn writeRelocs(self: Atom, elf_file: *Elf, out_relocs: *std.ArrayList(elf.Elf64_Rela)) !void {
@@ -184,7 +182,7 @@ pub fn writeRelocs(self: Atom, elf_file: *Elf, out_relocs: *std.ArrayList(elf.El
 
 pub fn getFdes(self: Atom, elf_file: *Elf) []Fde {
     if (!self.flags.fde) return &[0]Fde{};
-    const extra = self.getExtra(elf_file).?;
+    const extra = self.getExtra(elf_file);
     const object = self.getObject(elf_file);
     return object.fdes.items[extra.fde_start..][0..extra.fde_count];
 }
@@ -444,7 +442,10 @@ fn reportUndefSymbol(self: Atom, rel: elf.Elf64_Rela, elf_file: *Elf) !bool {
         if (!gop.found_existing) {
             gop.value_ptr.* = .{};
         }
-        try gop.value_ptr.append(gpa, self.atom_index);
+        try gop.value_ptr.append(gpa, .{
+            .index = self.atom_index,
+            .file = self.file,
+        });
         return true;
     }
 
@@ -737,7 +738,7 @@ fn format2(
     });
     if (atom.flags.fde) {
         try writer.writeAll(" : fdes{ ");
-        const extra = atom.getExtra(elf_file).?;
+        const extra = atom.getExtra(elf_file);
         for (atom.getFdes(elf_file), extra.fde_start..) |fde, i| {
             try writer.print("{d}", .{i});
             if (!fde.alive) try writer.writeAll("([*])");

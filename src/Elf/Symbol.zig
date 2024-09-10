@@ -10,9 +10,8 @@ name: u32 = 0,
 file: File.Index = 0,
 
 /// Atom containing this symbol if any.
-/// Index of 0 means there is no associated atom with this symbol.
 /// Use `getAtom` to get the pointer to the atom.
-atom: Atom.Index = 0,
+atom_ref: Elf.Ref = .{},
 
 /// Assigned output section index for this symbol.
 shndx: u32 = 0,
@@ -57,7 +56,7 @@ pub fn getName(symbol: Symbol, elf_file: *Elf) [:0]const u8 {
 }
 
 pub fn getAtom(symbol: Symbol, elf_file: *Elf) ?*Atom {
-    return elf_file.getAtom(symbol.atom);
+    return elf_file.getAtom(symbol.atom_ref);
 }
 
 pub fn getMergeSubsection(symbol: Symbol, elf_file: *Elf) ?*MergeSubsection {

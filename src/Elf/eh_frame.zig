@@ -47,8 +47,8 @@ pub const Fde = struct {
         const relocs = fde.getRelocs(elf_file);
         const rel = relocs[0];
         const sym = object.symtab.items[rel.r_sym()];
-        const atom_index = object.atoms.items[sym.st_shndx];
-        return elf_file.getAtom(atom_index).?;
+        const atom_index = object.atoms_indexes.items[sym.st_shndx];
+        return object.getAtom(atom_index).?;
     }
 
     pub fn getRelocs(fde: Fde, elf_file: *Elf) []align(1) const elf.Elf64_Rela {

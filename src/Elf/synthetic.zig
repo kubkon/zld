@@ -1439,8 +1439,8 @@ pub const ComdatGroupSection = struct {
             const shdr = object.shdrs.items[shndx];
             switch (shdr.sh_type) {
                 elf.SHT_RELA => {
-                    const atom_index = object.atoms.items[shdr.sh_info];
-                    const atom = elf_file.getAtom(atom_index).?;
+                    const atom_index = object.atoms_indexes.items[shdr.sh_info];
+                    const atom = object.getAtom(atom_index).?;
                     const rela_shndx = for (elf_file.sections.items(.shdr), 0..) |rela_shdr, rela_shndx| {
                         if (rela_shdr.sh_type == elf.SHT_RELA and
                             atom.out_shndx == rela_shdr.sh_info)
@@ -1449,8 +1449,8 @@ pub const ComdatGroupSection = struct {
                     try writer.writeInt(u32, @intCast(rela_shndx), .little);
                 },
                 else => {
-                    const atom_index = object.atoms.items[shndx];
-                    const atom = elf_file.getAtom(atom_index).?;
+                    const atom_index = object.atoms_indexes.items[shndx];
+                    const atom = object.getAtom(atom_index).?;
                     try writer.writeInt(u32, atom.out_shndx, .little);
                 },
             }

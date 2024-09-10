@@ -85,6 +85,13 @@ pub const File = union(enum) {
         }
     }
 
+    pub fn getAtom(file: File, ind: Atom.Index) ?*Atom {
+        return switch (file) {
+            .internal, .shared => unreachable,
+            .object => |x| x.getAtom(ind),
+        };
+    }
+
     pub fn getComdatGroup(file: File, ind: Elf.ComdatGroup.Index) *Elf.ComdatGroup {
         return switch (file) {
             .internal, .shared => unreachable,
@@ -134,6 +141,7 @@ const std = @import("std");
 const elf = std.elf;
 
 const Allocator = std.mem.Allocator;
+const Atom = @import("Atom.zig");
 const Elf = @import("../Elf.zig");
 const InternalObject = @import("InternalObject.zig");
 const Object = @import("Object.zig");

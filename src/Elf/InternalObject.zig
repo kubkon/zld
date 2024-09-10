@@ -38,7 +38,7 @@ pub fn resolveSymbols(self: *InternalObject, elf_file: *Elf) void {
         const global = elf_file.getSymbol(index);
         if (self.asFile().getSymbolRank(this_sym, false) < global.getSymbolRank(elf_file)) {
             global.value = 0;
-            global.atom = 0;
+            global.atom_ref = .{};
             global.file = self.index;
             global.sym_idx = sym_idx;
             global.ver_idx = elf_file.default_sym_version;
