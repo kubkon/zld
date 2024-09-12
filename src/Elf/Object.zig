@@ -130,7 +130,7 @@ pub fn parse(self: *Object, elf_file: *Elf) !void {
     try self.merge_sections.append(gpa, .{});
 
     try self.initAtoms(gpa, file, elf_file);
-    try self.initSymtab(gpa, elf_file);
+    try self.initSymbols(gpa, elf_file);
 
     for (self.shdrs.items, 0..) |shdr, i| {
         const atom = self.getAtom(self.atoms_indexes.items[i]) orelse continue;
@@ -276,7 +276,7 @@ fn skipShdr(self: *Object, index: u32, elf_file: *Elf) bool {
     return ignore;
 }
 
-fn initSymtab(self: *Object, allocator: Allocator, elf_file: *Elf) !void {
+fn initSymbols(self: *Object, allocator: Allocator, elf_file: *Elf) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
