@@ -28,19 +28,10 @@ pub const File = union(enum) {
         }
     }
 
-    pub fn resolveSymbols(file: File, elf_file: *Elf) void {
-        switch (file) {
+    pub fn resolveSymbols(file: File, elf_file: *Elf) !void {
+        return switch (file) {
             inline else => |x| x.resolveSymbols(elf_file),
-        }
-    }
-
-    pub fn resetGlobals(file: File, elf_file: *Elf) void {
-        for (file.getGlobals()) |global_index| {
-            const global = elf_file.getSymbol(global_index);
-            const name = global.name;
-            global.* = .{};
-            global.name = name;
-        }
+        };
     }
 
     pub fn isAlive(file: File) bool {
@@ -85,6 +76,54 @@ pub const File = union(enum) {
         }
     }
 
+    pub fn createSymbolIndirection(file: File, elf_file: *Elf) !void {
+        const symbols = switch (file) {
+            inline else => |x| x.symbols.items,
+        };
+        for (symbols, 0..) |*sym, i| {
+            const ref = file.resolveSymbol(@intCast(i), elf_file);
+            const ref_sym = elf_file.getSymbol(ref) orelse continue;
+            if (ref_sym.getFile(elf_file).?.getIndex() != file.getIndex()) continue;
+            if (!sym.isLocal(elf_file) and !sym.flags.has_dynamic) {
+                log.debug("'{s}' is non-local", .{sym.getName(elf_file)});
+                try elf_file.dynsym.addSymbol(ref, elf_file);
+            }
+            if (sym.flags.got) {
+                log.debug("'{s}' needs GOT", .{sym.getName(elf_file)});
+                _ = try elf_file.got.addGotSymbol(ref, elf_file);
+            }
+            if (sym.flags.plt) {
+                if (sym.flags.is_canonical) {
+                    log.debug("'{s}' needs CPLT", .{sym.getName(elf_file)});
+                    sym.flags.@"export" = true;
+                    try elf_file.plt.addSymbol(ref, elf_file);
+                } else if (sym.flags.got) {
+                    log.debug("'{s}' needs PLTGOT", .{sym.getName(elf_file)});
+                    try elf_file.plt_got.addSymbol(ref, elf_file);
+                } else {
+                    log.debug("'{s}' needs PLT", .{sym.getName(elf_file)});
+                    try elf_file.plt.addSymbol(ref, elf_file);
+                }
+            }
+            if (sym.flags.copy_rel and !sym.flags.has_copy_rel) {
+                log.debug("'{s}' needs COPYREL", .{sym.getName(elf_file)});
+                try elf_file.copy_rel.addSymbol(ref, elf_file);
+            }
+            if (sym.flags.tlsgd) {
+                log.debug("'{s}' needs TLSGD", .{sym.getName(elf_file)});
+                try elf_file.got.addTlsGdSymbol(ref, elf_file);
+            }
+            if (sym.flags.gottp) {
+                log.debug("'{s}' needs GOTTP", .{sym.getName(elf_file)});
+                try elf_file.got.addGotTpSymbol(ref, elf_file);
+            }
+            if (sym.flags.tlsdesc) {
+                log.debug("'{s}' needs TLSDESC", .{sym.getName(elf_file)});
+                try elf_file.got.addTlsDescSymbol(ref, elf_file);
+            }
+        }
+    }
+
     pub fn getAtom(file: File, ind: Atom.Index) ?*Atom {
         return switch (file) {
             .internal, .shared => unreachable,
@@ -99,16 +138,21 @@ pub const File = union(enum) {
         };
     }
 
-    pub fn getLocals(file: File) []const Symbol.Index {
+    pub fn resolveSymbol(file: File, ind: Symbol.Index, elf_file: *Elf) Elf.Ref {
         return switch (file) {
-            .object => |x| x.getLocals(),
-            inline else => &[0]Symbol.Index{},
+            inline else => |x| x.resolveSymbol(ind, elf_file),
         };
     }
 
-    pub fn getGlobals(file: File) []const Symbol.Index {
+    pub fn getSymbol(file: File, ind: Symbol.Index) *Symbol {
         return switch (file) {
-            inline else => |x| x.getGlobals(),
+            inline else => |x| &x.symbols.items[ind],
+        };
+    }
+
+    pub fn getString(file: File, off: u32) [:0]const u8 {
+        return switch (file) {
+            inline else => |x| x.getString(off),
         };
     }
 
@@ -139,6 +183,7 @@ pub const File = union(enum) {
 
 const std = @import("std");
 const elf = std.elf;
+const log = std.log.scoped(.elf);
 
 const Allocator = std.mem.Allocator;
 const Atom = @import("Atom.zig");

@@ -33,23 +33,7 @@ fn claimUnresolved(elf_file: *Elf) void {
     defer tracy.end();
 
     for (elf_file.objects.items) |index| {
-        const object = elf_file.getFile(index).?.object;
-        const first_global = object.first_global orelse return;
-        for (object.getGlobals(), 0..) |global_index, i| {
-            const sym_idx = @as(u32, @intCast(first_global + i));
-            const sym = object.symtab.items[sym_idx];
-            if (sym.st_shndx != elf.SHN_UNDEF) continue;
-
-            const global = elf_file.getSymbol(global_index);
-            if (global.getFile(elf_file)) |_| {
-                if (global.getSourceSymbol(elf_file).st_shndx != elf.SHN_UNDEF) continue;
-            }
-
-            global.value = 0;
-            global.atom_ref = .{};
-            global.sym_idx = sym_idx;
-            global.file = object.index;
-        }
+        elf_file.getFile(index).?.object.claimUnresolvedRelocatable(elf_file);
     }
 }
 
@@ -185,7 +169,7 @@ fn calcSectionSizes(elf_file: *Elf) !void {
 
     if (elf_file.shstrtab_sect_index) |index| {
         const shdr = &elf_file.sections.items(.shdr)[index];
-        shdr.sh_size = elf_file.shstrtab.buffer.items.len;
+        shdr.sh_size = elf_file.shstrtab.items.len;
     }
 }
 
@@ -199,7 +183,7 @@ fn calcComdatGroupsSizes(elf_file: *Elf) void {
         shdr.sh_link = elf_file.symtab_sect_index.?;
 
         const sym = cg.getSymbol(elf_file);
-        shdr.sh_info = sym.getOutputSymtabIndex(elf_file) orelse sym.shndx;
+        shdr.sh_info = sym.getOutputSymtabIndex(elf_file) orelse sym.getShndx(elf_file).?;
     }
 }
 
@@ -223,7 +207,7 @@ fn writeAtoms(elf_file: *Elf) !void {
         if (atoms.items.len == 0) continue;
         if (shdr.sh_type == elf.SHT_NOBITS) continue;
 
-        log.debug("writing atoms in '{s}' section", .{elf_file.shstrtab.getAssumeExists(shdr.sh_name)});
+        log.debug("writing atoms in '{s}' section", .{elf_file.getShString(shdr.sh_name)});
 
         var buffer = try gpa.alloc(u8, shdr.sh_size);
         defer gpa.free(buffer);
@@ -289,7 +273,7 @@ fn writeSyntheticSections(elf_file: *Elf) !void {
         mem.sort(elf.Elf64_Rela, relocs.items, {}, SortRelocs.lessThan);
 
         log.debug("writing {s} from 0x{x} to 0x{x}", .{
-            elf_file.shstrtab.getAssumeExists(shdr.sh_name),
+            elf_file.getShString(shdr.sh_name),
             shdr.sh_offset,
             shdr.sh_offset + shdr.sh_size,
         });
@@ -331,7 +315,7 @@ fn writeSyntheticSections(elf_file: *Elf) !void {
 
     if (elf_file.shstrtab_sect_index) |shndx| {
         const shdr = elf_file.sections.items(.shdr)[shndx];
-        try elf_file.base.file.pwriteAll(elf_file.shstrtab.buffer.items, shdr.sh_offset);
+        try elf_file.base.file.pwriteAll(elf_file.shstrtab.items, shdr.sh_offset);
     }
 }
 

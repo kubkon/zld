@@ -152,8 +152,8 @@ pub const Cie = struct {
             if (cie_rel.r_type() != other_rel.r_type()) return false;
             if (cie_rel.r_addend != other_rel.r_addend) return false;
 
-            const cie_sym = cie.getObject(elf_file).getSymbol(cie_rel.r_sym(), elf_file);
-            const other_sym = other.getObject(elf_file).getSymbol(other_rel.r_sym(), elf_file);
+            const cie_sym = cie.getObject(elf_file).symbols.items[cie_rel.r_sym()];
+            const other_sym = other.getObject(elf_file).symbols.items[other_rel.r_sym()];
             if (!std.mem.eql(u8, std.mem.asBytes(&cie_sym), std.mem.asBytes(&other_sym))) return false;
         }
         return true;
@@ -361,7 +361,8 @@ pub fn writeEhFrame(elf_file: *Elf, writer: anytype) !void {
             const data = cie.getData(elf_file);
 
             for (cie.getRelocs(elf_file)) |rel| {
-                const sym = object.getSymbol(rel.r_sym(), elf_file);
+                const sym_ref = object.resolveSymbol(rel.r_sym(), elf_file);
+                const sym = elf_file.getSymbol(sym_ref).?;
                 resolveReloc(cie, sym, rel, elf_file, data) catch |err| switch (err) {
                     error.RelocError => has_reloc_errors = true,
                     else => |e| return e,
@@ -388,7 +389,8 @@ pub fn writeEhFrame(elf_file: *Elf, writer: anytype) !void {
             );
 
             for (fde.getRelocs(elf_file)) |rel| {
-                const sym = object.getSymbol(rel.r_sym(), elf_file);
+                const sym_ref = object.resolveSymbol(rel.r_sym(), elf_file);
+                const sym = elf_file.getSymbol(sym_ref).?;
                 resolveReloc(fde, sym, rel, elf_file, data) catch |err| switch (err) {
                     error.RelocError => has_reloc_errors = true,
                     else => |e| return e,
@@ -437,7 +439,7 @@ pub fn writeEhFrameRelocatable(elf_file: *Elf, writer: anytype) !void {
     }
 }
 
-fn emitReloc(elf_file: *Elf, rec: anytype, sym: *const Symbol, rel: elf.Elf64_Rela) elf.Elf64_Rela {
+fn emitReloc(elf_file: *Elf, rec: anytype, sym: Symbol, rel: elf.Elf64_Rela) elf.Elf64_Rela {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -449,7 +451,7 @@ fn emitReloc(elf_file: *Elf, rec: anytype, sym: *const Symbol, rel: elf.Elf64_Re
     switch (sym.getType(elf_file)) {
         elf.STT_SECTION => {
             r_addend += @intCast(sym.getAddress(.{}, elf_file));
-            r_sym = elf_file.sections.items(.sym_index)[sym.shndx];
+            r_sym = elf_file.sections.items(.sym_index)[sym.getShndx(elf_file).?];
         },
         else => {
             r_sym = sym.getOutputSymtabIndex(elf_file) orelse 0;
@@ -483,7 +485,7 @@ pub fn writeEhFrameRelocs(elf_file: *Elf, writer: anytype) !void {
         for (object.cies.items) |cie| {
             if (!cie.alive) continue;
             for (cie.getRelocs(elf_file)) |rel| {
-                const sym = object.getSymbol(rel.r_sym(), elf_file);
+                const sym = object.symbols.items[rel.r_sym()];
                 const out_rel = emitReloc(elf_file, cie, sym, rel);
                 try writer.writeStruct(out_rel);
             }
@@ -492,7 +494,7 @@ pub fn writeEhFrameRelocs(elf_file: *Elf, writer: anytype) !void {
         for (object.fdes.items) |fde| {
             if (!fde.alive) continue;
             for (fde.getRelocs(elf_file)) |rel| {
-                const sym = object.getSymbol(rel.r_sym(), elf_file);
+                const sym = object.symbols.items[rel.r_sym()];
                 const out_rel = emitReloc(elf_file, fde, sym, rel);
                 try writer.writeStruct(out_rel);
             }
@@ -544,7 +546,8 @@ pub fn writeEhFrameHdr(elf_file: *Elf, writer: anytype) !void {
             const relocs = fde.getRelocs(elf_file);
             assert(relocs.len > 0); // Should this be an error? Things are completely broken anyhow if this trips...
             const rel = relocs[0];
-            const sym = object.getSymbol(rel.r_sym(), elf_file);
+            const sym_ref = object.resolveSymbol(rel.r_sym(), elf_file);
+            const sym = elf_file.getSymbol(sym_ref).?;
             const P = @as(i64, @intCast(fde.getAddress(elf_file)));
             const S = @as(i64, @intCast(sym.getAddress(.{}, elf_file)));
             const A = rel.r_addend;

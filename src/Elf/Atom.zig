@@ -146,7 +146,7 @@ pub fn writeRelocs(self: Atom, elf_file: *Elf, out_relocs: *std.ArrayList(elf.El
     const cpu_arch = elf_file.options.cpu_arch.?;
     const object = self.getObject(elf_file);
     for (self.getRelocs(elf_file)) |rel| {
-        const target = object.getSymbol(rel.r_sym(), elf_file);
+        const target = object.symbols.items[rel.r_sym()];
         const r_type = rel.r_type();
         const r_offset: u64 = @intCast(self.value + @as(i64, @intCast(rel.r_offset)));
         var r_addend = rel.r_addend;
@@ -157,7 +157,10 @@ pub fn writeRelocs(self: Atom, elf_file: *Elf, out_relocs: *std.ArrayList(elf.El
                 r_sym = elf_file.sections.items(.sym_index)[msub.getMergeSection(elf_file).out_shndx];
             } else {
                 r_addend += @intCast(target.getAddress(.{}, elf_file));
-                r_sym = elf_file.sections.items(.sym_index)[target.shndx];
+                r_sym = if (target.getShndx(elf_file)) |shndx|
+                    elf_file.sections.items(.sym_index)[shndx]
+                else
+                    0;
             },
             else => {
                 r_sym = target.getOutputSymtabIndex(elf_file) orelse 0;
@@ -207,11 +210,25 @@ pub fn scanRelocs(self: Atom, elf_file: *Elf) !void {
     var it = RelocsIterator{ .relocs = relocs };
     while (it.next()) |rel| {
         const r_kind = relocation.decode(rel.r_type(), cpu_arch);
-
         if (r_kind == .none) continue;
-        if (try self.reportUndefSymbol(rel, elf_file)) continue;
 
-        const symbol = object.getSymbol(rel.r_sym(), elf_file);
+        const symbol_ref = object.resolveSymbol(rel.r_sym(), elf_file);
+        const symbol = elf_file.getSymbol(symbol_ref) orelse {
+            const sym_name = object.symbols.items[rel.r_sym()].getName(elf_file);
+            // Violation of One Definition Rule for COMDATs.
+            elf_file.base.fatal("{}: {s}: {s} refers to a discarded COMDAT section", .{
+                object.fmtPath(),
+                self.getName(elf_file),
+                sym_name,
+            });
+            continue;
+        };
+
+        const is_synthetic_symbol = rel.r_sym() >= object.symtab.items.len;
+
+        // Report an undefined symbol.
+        if (!is_synthetic_symbol and (try self.reportUndefSymbol(symbol, rel, elf_file)))
+            continue;
 
         if (symbol.isIFunc(elf_file)) {
             symbol.flags.got = true;
@@ -250,23 +267,23 @@ fn scanReloc(self: Atom, symbol: *Symbol, rel: elf.Elf64_Rela, action: RelocActi
         .none => {},
 
         .@"error" => if (symbol.isAbs(elf_file))
-            try self.noPicError(symbol, rel, elf_file)
+            try self.noPicError(symbol.*, rel, elf_file)
         else
-            try self.picError(symbol, rel, elf_file),
+            try self.picError(symbol.*, rel, elf_file),
 
         .copyrel => {
             if (elf_file.options.z_nocopyreloc) {
                 if (symbol.isAbs(elf_file))
-                    try self.noPicError(symbol, rel, elf_file)
+                    try self.noPicError(symbol.*, rel, elf_file)
                 else
-                    try self.picError(symbol, rel, elf_file);
+                    try self.picError(symbol.*, rel, elf_file);
             }
             symbol.flags.copy_rel = true;
         },
 
         .dyn_copyrel => {
             if (is_writeable or elf_file.options.z_nocopyreloc) {
-                try self.textReloc(symbol, elf_file);
+                try self.textReloc(symbol.*, elf_file);
                 object.num_dynrelocs += 1;
             } else {
                 symbol.flags.copy_rel = true;
@@ -292,7 +309,7 @@ fn scanReloc(self: Atom, symbol: *Symbol, rel: elf.Elf64_Rela, action: RelocActi
         },
 
         .dynrel, .baserel, .ifunc => {
-            try self.textReloc(symbol, elf_file);
+            try self.textReloc(symbol.*, elf_file);
             object.num_dynrelocs += 1;
 
             if (action == .ifunc) elf_file.num_ifunc_dynrelocs += 1;
@@ -300,7 +317,7 @@ fn scanReloc(self: Atom, symbol: *Symbol, rel: elf.Elf64_Rela, action: RelocActi
     }
 }
 
-inline fn textReloc(self: Atom, symbol: *const Symbol, elf_file: *Elf) !void {
+inline fn textReloc(self: Atom, symbol: Symbol, elf_file: *Elf) !void {
     const is_writeable = self.getInputShdr(elf_file).sh_flags & elf.SHF_WRITE != 0;
     if (!is_writeable) {
         if (elf_file.options.z_text) {
@@ -316,7 +333,7 @@ inline fn textReloc(self: Atom, symbol: *const Symbol, elf_file: *Elf) !void {
     }
 }
 
-inline fn noPicError(self: Atom, symbol: *const Symbol, rel: elf.Elf64_Rela, elf_file: *Elf) !void {
+inline fn noPicError(self: Atom, symbol: Symbol, rel: elf.Elf64_Rela, elf_file: *Elf) !void {
     elf_file.base.fatal(
         "{s}: {s}: {} relocation at offset 0x{x} against symbol '{s}' cannot be used; recompile with -fno-PIC",
         .{
@@ -330,7 +347,7 @@ inline fn noPicError(self: Atom, symbol: *const Symbol, rel: elf.Elf64_Rela, elf
     return error.RelocError;
 }
 
-inline fn picError(self: Atom, symbol: *const Symbol, rel: elf.Elf64_Rela, elf_file: *Elf) !void {
+inline fn picError(self: Atom, symbol: Symbol, rel: elf.Elf64_Rela, elf_file: *Elf) !void {
     elf_file.base.fatal(
         "{s}: {s}: {} relocation at offset 0x{x} against symbol '{s}' cannot be used; recompile with -fPIC",
         .{
@@ -357,7 +374,7 @@ const RelocAction = enum {
     ifunc,
 };
 
-fn getPcRelocAction(symbol: *const Symbol, elf_file: *Elf) RelocAction {
+fn getPcRelocAction(symbol: Symbol, elf_file: *Elf) RelocAction {
     // zig fmt: off
     const table: [3][4]RelocAction = .{
         //  Abs       Local   Import data  Import func
@@ -371,7 +388,7 @@ fn getPcRelocAction(symbol: *const Symbol, elf_file: *Elf) RelocAction {
     return table[output][data];
 }
 
-fn getAbsRelocAction(symbol: *const Symbol, elf_file: *Elf) RelocAction {
+fn getAbsRelocAction(symbol: Symbol, elf_file: *Elf) RelocAction {
     // zig fmt: off
     const table: [3][4]RelocAction = .{
         //  Abs    Local       Import data  Import func
@@ -385,7 +402,7 @@ fn getAbsRelocAction(symbol: *const Symbol, elf_file: *Elf) RelocAction {
     return table[output][data];
 }
 
-fn getDynAbsRelocAction(symbol: *const Symbol, elf_file: *Elf) RelocAction {
+fn getDynAbsRelocAction(symbol: Symbol, elf_file: *Elf) RelocAction {
     if (symbol.isIFunc(elf_file)) return .ifunc;
     // zig fmt: off
     const table: [3][4]RelocAction = .{
@@ -405,47 +422,30 @@ inline fn getOutputType(elf_file: *Elf) u2 {
     return if (elf_file.options.pie) 1 else 2;
 }
 
-inline fn getDataType(symbol: *const Symbol, elf_file: *Elf) u2 {
+inline fn getDataType(symbol: Symbol, elf_file: *Elf) u2 {
     if (symbol.isAbs(elf_file)) return 0;
     if (!symbol.flags.import) return 1;
     if (symbol.getType(elf_file) != elf.STT_FUNC) return 2;
     return 3;
 }
 
-fn reportUndefSymbol(self: Atom, rel: elf.Elf64_Rela, elf_file: *Elf) !bool {
+fn reportUndefSymbol(self: Atom, sym: *const Symbol, rel: elf.Elf64_Rela, elf_file: *Elf) !bool {
+    const gpa = elf_file.base.allocator;
     const object = self.getObject(elf_file);
-    if (rel.r_sym() >= object.symtab.items.len) return false;
-
-    const sym = object.getSymbol(rel.r_sym(), elf_file);
-    const s_rel_sym = object.symtab.items[rel.r_sym()];
-
-    // Check for violation of One Definition Rule for COMDATs.
-    if (sym.getFile(elf_file) == null) {
-        elf_file.base.fatal("{}: {s}: {s} refers to a discarded COMDAT section", .{
-            object.fmtPath(),
-            self.getName(elf_file),
-            sym.getName(elf_file),
-        });
-        return true;
-    }
-
-    // Next, report any undefined non-weak symbols that are not imports.
-    const s_sym = sym.getSourceSymbol(elf_file);
-    if (s_rel_sym.st_shndx == elf.SHN_UNDEF and
-        s_rel_sym.st_bind() == elf.STB_GLOBAL and
-        sym.sym_idx > 0 and
+    const rel_esym = object.symtab.items[rel.r_sym()];
+    const esym = sym.getElfSym(elf_file);
+    if (rel_esym.st_shndx == elf.SHN_UNDEF and
+        rel_esym.st_bind() == elf.STB_GLOBAL and
+        sym.esym_idx > 0 and
         !sym.flags.import and
-        s_sym.st_shndx == elf.SHN_UNDEF)
+        esym.st_shndx == elf.SHN_UNDEF)
     {
-        const gpa = elf_file.base.allocator;
-        const gop = try elf_file.undefs.getOrPut(gpa, object.symbols.items[rel.r_sym()]);
+        const idx = object.symbols_resolver.items[rel.r_sym() - object.first_global.?];
+        const gop = try elf_file.undefs.getOrPut(gpa, idx);
         if (!gop.found_existing) {
             gop.value_ptr.* = .{};
         }
-        try gop.value_ptr.append(gpa, .{
-            .index = self.atom_index,
-            .file = self.file,
-        });
+        try gop.value_ptr.append(gpa, .{ .index = self.atom_index, .file = self.file });
         return true;
     }
 
@@ -475,7 +475,7 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
         const r_kind = relocation.decode(rel.r_type(), cpu_arch);
         if (r_kind == .none) continue;
 
-        const target = object.getSymbol(rel.r_sym(), elf_file);
+        const target = object.symbols.items[rel.r_sym()];
 
         // We will use equation format to resolve relocations:
         // https://intezer.com/blog/malware-analysis/executable-and-linkable-format-101-part-3-relocations/
@@ -535,7 +535,7 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
 
 fn resolveDynAbsReloc(
     self: Atom,
-    target: *const Symbol,
+    target: Symbol,
     rel: elf.Elf64_Rela,
     action: RelocAction,
     elf_file: *Elf,
@@ -567,7 +567,7 @@ fn resolveDynAbsReloc(
             if (is_writeable or elf_file.options.z_nocopyreloc) {
                 elf_file.addRelaDynAssumeCapacity(.{
                     .offset = P,
-                    .sym = target.getExtra(elf_file).?.dynamic,
+                    .sym = target.getExtra(elf_file).dynamic,
                     .type = relocation.encode(.abs, cpu_arch),
                     .addend = A,
                 });
@@ -581,7 +581,7 @@ fn resolveDynAbsReloc(
             if (is_writeable) {
                 elf_file.addRelaDynAssumeCapacity(.{
                     .offset = P,
-                    .sym = target.getExtra(elf_file).?.dynamic,
+                    .sym = target.getExtra(elf_file).dynamic,
                     .type = relocation.encode(.abs, cpu_arch),
                     .addend = A,
                 });
@@ -594,7 +594,7 @@ fn resolveDynAbsReloc(
         .dynrel => {
             elf_file.addRelaDynAssumeCapacity(.{
                 .offset = P,
-                .sym = target.getExtra(elf_file).?.dynamic,
+                .sym = target.getExtra(elf_file).dynamic,
                 .type = relocation.encode(.abs, cpu_arch),
                 .addend = A,
             });
@@ -650,9 +650,23 @@ pub fn resolveRelocsNonAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void 
     while (it.next()) |rel| {
         const r_kind = relocation.decode(rel.r_type(), cpu_arch);
         if (r_kind == .none) continue;
-        if (try self.reportUndefSymbol(rel, elf_file)) continue;
 
-        const target = object.getSymbol(rel.r_sym(), elf_file);
+        const target_ref = object.resolveSymbol(rel.r_sym(), elf_file);
+        const target = elf_file.getSymbol(target_ref) orelse {
+            const sym_name = object.symbols.items[rel.r_sym()].getName(elf_file);
+            // Violation of One Definition Rule for COMDATs.
+            elf_file.base.fatal("{}: {s}: {s} refers to a discarded COMDAT section", .{
+                object.fmtPath(),
+                self.getName(elf_file),
+                sym_name,
+            });
+            continue;
+        };
+        const is_synthetic_symbol = rel.r_sym() >= object.symtab.items.len;
+
+        // Report an undefined symbol.
+        if (!is_synthetic_symbol and (try self.reportUndefSymbol(target, rel, elf_file)))
+            continue;
 
         const P = self.getAddress(elf_file) + @as(i64, @intCast(rel.r_offset));
         const A = rel.r_addend;
@@ -786,13 +800,13 @@ const x86_64 = struct {
 
         switch (r_type) {
             .@"64" => {
-                try atom.scanReloc(symbol, rel, getDynAbsRelocAction(symbol, elf_file), elf_file);
+                try atom.scanReloc(symbol, rel, getDynAbsRelocAction(symbol.*, elf_file), elf_file);
             },
 
             .@"32",
             .@"32S",
             => {
-                try atom.scanReloc(symbol, rel, getAbsRelocAction(symbol, elf_file), elf_file);
+                try atom.scanReloc(symbol, rel, getAbsRelocAction(symbol.*, elf_file), elf_file);
             },
 
             .GOT32,
@@ -816,7 +830,7 @@ const x86_64 = struct {
             },
 
             .PC32 => {
-                try atom.scanReloc(symbol, rel, getPcRelocAction(symbol, elf_file), elf_file);
+                try atom.scanReloc(symbol, rel, getPcRelocAction(symbol.*, elf_file), elf_file);
             },
 
             .TLSGD => {
@@ -872,7 +886,7 @@ const x86_64 = struct {
             .TPOFF32,
             .TPOFF64,
             => {
-                if (is_shared) try atom.picError(symbol, rel, elf_file);
+                if (is_shared) try atom.picError(symbol.*, rel, elf_file);
             },
 
             .GOTOFF64,
@@ -897,7 +911,7 @@ const x86_64 = struct {
         atom: Atom,
         elf_file: *Elf,
         rel: elf.Elf64_Rela,
-        target: *const Symbol,
+        target: Symbol,
         args: ResolveArgs,
         it: *RelocsIterator,
         code: []u8,
@@ -1063,11 +1077,11 @@ const x86_64 = struct {
             .GOTOFF64 => try cwriter.writeInt(i64, S + A - GOT, .little),
             .GOTPC64 => try cwriter.writeInt(i64, GOT + A, .little),
             .SIZE32 => {
-                const size = @as(i64, @intCast(target.getSourceSymbol(elf_file).st_size));
+                const size = @as(i64, @intCast(target.getElfSym(elf_file).st_size));
                 try cwriter.writeInt(u32, @as(u32, @bitCast(@as(i32, @intCast(size + A)))), .little);
             },
             .SIZE64 => {
-                const size = @as(i64, @intCast(target.getSourceSymbol(elf_file).st_size));
+                const size = @as(i64, @intCast(target.getElfSym(elf_file).st_size));
                 try cwriter.writeInt(i64, @as(i64, @intCast(size + A)), .little);
             },
             else => {
@@ -1279,11 +1293,11 @@ const aarch64 = struct {
 
         switch (r_type) {
             .ABS64 => {
-                try atom.scanReloc(symbol, rel, getDynAbsRelocAction(symbol, elf_file), elf_file);
+                try atom.scanReloc(symbol, rel, getDynAbsRelocAction(symbol.*, elf_file), elf_file);
             },
 
             .ADR_PREL_PG_HI21 => {
-                try atom.scanReloc(symbol, rel, getPcRelocAction(symbol, elf_file), elf_file);
+                try atom.scanReloc(symbol, rel, getPcRelocAction(symbol.*, elf_file), elf_file);
             },
 
             .ADR_GOT_PAGE => {
@@ -1308,7 +1322,7 @@ const aarch64 = struct {
             .TLSLE_ADD_TPREL_HI12,
             .TLSLE_ADD_TPREL_LO12_NC,
             => {
-                if (is_shared) try atom.picError(symbol, rel, elf_file);
+                if (is_shared) try atom.picError(symbol.*, rel, elf_file);
             },
 
             .TLSIE_ADR_GOTTPREL_PAGE21,
@@ -1360,7 +1374,7 @@ const aarch64 = struct {
         atom: Atom,
         elf_file: *Elf,
         rel: elf.Elf64_Rela,
-        target: *const Symbol,
+        target: Symbol,
         args: ResolveArgs,
         it: *RelocsIterator,
         code_buffer: []u8,
@@ -1407,8 +1421,8 @@ const aarch64 = struct {
             => {
                 const disp: i28 = math.cast(i28, S + A - P) orelse blk: {
                     const thunk = atom.getThunk(elf_file);
-                    const target_index = object.symbols.items[rel.r_sym()];
-                    const S_ = thunk.getTargetAddress(target_index, elf_file);
+                    const target_ref = object.resolveSymbol(rel.r_sym(), elf_file);
+                    const S_ = thunk.getTargetAddress(target_ref, elf_file);
                     break :blk math.cast(i28, S_ + A - P) orelse return error.Overflow;
                 };
                 aarch64_util.writeBranchImm(disp, code);
@@ -1627,11 +1641,11 @@ const riscv = struct {
 
         switch (r_type) {
             .@"64" => {
-                try atom.scanReloc(symbol, rel, getDynAbsRelocAction(symbol, elf_file), elf_file);
+                try atom.scanReloc(symbol, rel, getDynAbsRelocAction(symbol.*, elf_file), elf_file);
             },
 
             .HI20 => {
-                try atom.scanReloc(symbol, rel, getAbsRelocAction(symbol, elf_file), elf_file);
+                try atom.scanReloc(symbol, rel, getAbsRelocAction(symbol.*, elf_file), elf_file);
             },
 
             .CALL_PLT => if (symbol.flags.import) {
@@ -1664,7 +1678,7 @@ const riscv = struct {
         atom: Atom,
         elf_file: *Elf,
         rel: elf.Elf64_Rela,
-        target: *const Symbol,
+        target: Symbol,
         args: ResolveArgs,
         it: *RelocsIterator,
         code: []u8,
@@ -1745,7 +1759,7 @@ const riscv = struct {
                     return error.RelocError;
                 };
                 it.pos = pos;
-                const target_ = object.getSymbol(pair.r_sym(), elf_file);
+                const target_ = object.symbols.items[pair.r_sym()];
                 const S_ = target_.getAddress(.{}, elf_file);
                 const A_ = pair.r_addend;
                 const P_ = atom_addr + @as(i64, @intCast(pair.r_offset));

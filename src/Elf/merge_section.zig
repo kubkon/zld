@@ -19,7 +19,7 @@ pub const MergeSection = struct {
     }
 
     pub fn getName(msec: MergeSection, elf_file: *Elf) [:0]const u8 {
-        return elf_file.string_intern.getAssumeExists(msec.name);
+        return elf_file.getShString(msec.name);
     }
 
     pub fn getAddress(msec: MergeSection, elf_file: *Elf) i64 {

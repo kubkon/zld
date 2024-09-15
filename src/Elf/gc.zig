@@ -13,17 +13,20 @@ fn collectRoots(roots: *std.ArrayList(*Atom), elf_file: *Elf) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    if (elf_file.entry_index) |index| {
-        const global = elf_file.getSymbol(index);
-        try markSymbol(global, roots, elf_file);
+    if (elf_file.getInternalObject()) |obj| {
+        if (obj.getEntrySymbol(elf_file)) |sym| {
+            try markSymbol(sym, roots, elf_file);
+        }
     }
 
     for (elf_file.objects.items) |index| {
-        for (elf_file.getFile(index).?.object.getGlobals()) |global_index| {
-            const global = elf_file.getSymbol(global_index);
-            if (global.getFile(elf_file)) |file| {
-                if (file.getIndex() == index and global.flags.@"export")
-                    try markSymbol(global, roots, elf_file);
+        const object = elf_file.getFile(index).?.object;
+        for (0..object.getGlobals().len) |i| {
+            const ref = object.resolveSymbol(@intCast(i), elf_file);
+            const sym = elf_file.getSymbol(ref) orelse continue;
+            if (sym.getFile(elf_file).?.getIndex() != object.index) continue;
+            if (sym.flags.@"export") {
+                try markSymbol(sym, roots, elf_file);
             }
         }
     }
@@ -57,7 +60,7 @@ fn collectRoots(roots: *std.ArrayList(*Atom), elf_file: *Elf) !void {
         // Mark every atom referenced by CIE as alive.
         for (object.cies.items) |cie| {
             for (cie.getRelocs(elf_file)) |rel| {
-                const sym = object.getSymbol(rel.r_sym(), elf_file);
+                const sym = &object.symbols.items[rel.r_sym()];
                 try markSymbol(sym, roots, elf_file);
             }
         }
@@ -94,14 +97,14 @@ fn markLive(atom: *Atom, elf_file: *Elf) void {
 
     for (atom.getFdes(elf_file)) |fde| {
         for (fde.getRelocs(elf_file)[1..]) |rel| {
-            const target_sym = object.getSymbol(rel.r_sym(), elf_file);
+            const target_sym = object.symbols.items[rel.r_sym()];
             const target_atom = target_sym.getAtom(elf_file) orelse continue;
             if (markAtom(target_atom)) markLive(target_atom, elf_file);
         }
     }
 
     for (atom.getRelocs(elf_file)) |rel| {
-        const target_sym = object.getSymbol(rel.r_sym(), elf_file);
+        const target_sym = object.symbols.items[rel.r_sym()];
         if (target_sym.getMergeSubsection(elf_file)) |msub| {
             msub.alive = true;
             continue;

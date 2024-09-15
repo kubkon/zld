@@ -6,6 +6,7 @@ objects: std.ArrayListUnmanaged(File.Index) = .{},
 shared_objects: std.ArrayListUnmanaged(File.Index) = .{},
 files: std.MultiArrayList(File.Entry) = .{},
 file_handles: std.ArrayListUnmanaged(File.Handle) = .{},
+internal_object_index: ?File.Index = null,
 
 sections: std.MultiArrayList(Section) = .{},
 phdrs: std.ArrayListUnmanaged(elf.Elf64_Phdr) = .{},
@@ -34,41 +35,17 @@ gnu_hash_sect_index: ?u32 = null,
 versym_sect_index: ?u32 = null,
 verneed_sect_index: ?u32 = null,
 
-internal_object_index: ?u32 = null,
-dynamic_index: ?u32 = null,
-ehdr_start_index: ?u32 = null,
-init_array_start_index: ?u32 = null,
-init_array_end_index: ?u32 = null,
-fini_array_start_index: ?u32 = null,
-fini_array_end_index: ?u32 = null,
-preinit_array_start_index: ?u32 = null,
-preinit_array_end_index: ?u32 = null,
-got_index: ?u32 = null,
-plt_index: ?u32 = null,
-dso_handle_index: ?u32 = null,
-gnu_eh_frame_hdr_index: ?u32 = null,
-rela_iplt_start_index: ?u32 = null,
-rela_iplt_end_index: ?u32 = null,
-end_index: ?u32 = null,
-global_pointer_index: ?u32 = null,
-start_stop_indexes: std.ArrayListUnmanaged(u32) = .{},
-
-entry_index: ?u32 = null,
-
-symbols: std.ArrayListUnmanaged(Symbol) = .{},
-symbols_extra: std.ArrayListUnmanaged(u32) = .{},
-globals: std.AutoHashMapUnmanaged(u32, Symbol.Index) = .{},
+resolver: SymbolResolver = .{},
 /// This table will be populated after `scanRelocs` has run.
 /// Key is symbol index.
-undefs: std.AutoHashMapUnmanaged(Symbol.Index, std.ArrayListUnmanaged(Ref)) = .{},
+undefs: std.AutoArrayHashMapUnmanaged(SymbolResolver.Index, std.ArrayListUnmanaged(Ref)) = .{},
+dupes: std.AutoArrayHashMapUnmanaged(SymbolResolver.Index, std.ArrayListUnmanaged(File.Index)) = .{},
 
-string_intern: StringTable = .{},
-
-shstrtab: StringTable = .{},
+shstrtab: std.ArrayListUnmanaged(u8) = .empty,
 symtab: std.ArrayListUnmanaged(elf.Elf64_Sym) = .{},
-strtab: std.ArrayListUnmanaged(u8) = .{},
+strtab: std.ArrayListUnmanaged(u8) = .empty,
 dynsym: DynsymSection = .{},
-dynstrtab: StringTable = .{},
+dynstrtab: std.ArrayListUnmanaged(u8) = .empty,
 versym: std.ArrayListUnmanaged(elf.Elf64_Versym) = .{},
 verneed: VerneedSection = .{},
 
@@ -133,7 +110,6 @@ fn createEmpty(gpa: Allocator, options: Options, thread_pool: *ThreadPool) !*Elf
 
 pub fn deinit(self: *Elf) void {
     const gpa = self.base.allocator;
-    self.string_intern.deinit(gpa);
     self.shstrtab.deinit(gpa);
     self.symtab.deinit(gpa);
     self.strtab.deinit(gpa);
@@ -146,10 +122,7 @@ pub fn deinit(self: *Elf) void {
     }
     self.merge_sections.deinit(gpa);
     self.merge_subsections.deinit(gpa);
-    self.symbols.deinit(gpa);
-    self.symbols_extra.deinit(gpa);
-    self.globals.deinit(gpa);
-    self.start_stop_indexes.deinit(gpa);
+    self.resolver.deinit(gpa);
     self.got.deinit(gpa);
     self.plt.deinit(gpa);
     self.plt_got.deinit(gpa);
@@ -183,13 +156,14 @@ pub fn deinit(self: *Elf) void {
     self.rela_dyn.deinit(gpa);
     self.rela_plt.deinit(gpa);
     self.comdat_group_sections.deinit(gpa);
-    {
-        var it = self.undefs.valueIterator();
-        while (it.next()) |notes| {
-            notes.deinit(gpa);
-        }
-        self.undefs.deinit(gpa);
+    for (self.undefs.values()) |*value| {
+        value.deinit(gpa);
     }
+    self.undefs.deinit(gpa);
+    for (self.dupes.values()) |*value| {
+        value.deinit(gpa);
+    }
+    self.dupes.deinit(gpa);
 }
 
 fn resolveFile(
@@ -265,16 +239,13 @@ pub fn flush(self: *Elf) !void {
     const gpa = self.base.allocator;
 
     // Append empty string to string tables.
-    try self.string_intern.buffer.append(gpa, 0);
-    try self.shstrtab.buffer.append(gpa, 0);
+    try self.shstrtab.append(gpa, 0);
     try self.strtab.append(gpa, 0);
-    try self.dynstrtab.buffer.append(gpa, 0);
+    try self.dynstrtab.append(gpa, 0);
     // Append null section.
     _ = try self.addSection(.{ .name = "" });
-    // Append null symbols.
+    // Append null symbol.
     try self.symtab.append(gpa, null_sym);
-    try self.symbols.append(gpa, .{});
-    try self.symbols_extra.append(gpa, 0);
     // Append null file.
     try self.files.append(gpa, .null);
 
@@ -349,6 +320,9 @@ pub fn flush(self: *Elf) !void {
         const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
         self.files.set(index, .{ .internal = .{ .index = index } });
         self.internal_object_index = index;
+        const object = self.getInternalObject().?;
+        try object.init(gpa);
+        try object.initSymbols(self);
     }
 
     try self.resolveSymbols();
@@ -359,16 +333,6 @@ pub fn flush(self: *Elf) !void {
 
     try self.convertCommonSymbols();
     try self.markImportsAndExports();
-
-    // Set the entrypoint if found
-    self.entry_index = blk: {
-        if (self.options.shared) break :blk null;
-        const entry_name = self.options.entry orelse "_start";
-        break :blk self.getGlobalByName(entry_name);
-    };
-    if (!self.options.shared and self.entry_index == null) {
-        self.base.fatal("no entrypoint found: '{s}'", .{self.options.entry orelse "_start"});
-    }
 
     if (self.options.gc_sections) {
         try gc.gcAtoms(self);
@@ -385,7 +349,6 @@ pub fn flush(self: *Elf) !void {
     try self.addCommentString();
     try self.finalizeMergeSections();
     try self.initOutputSections();
-    try self.resolveSyntheticSymbols();
 
     if (self.options.z_execstack_if_needed) {
         for (self.objects.items) |index| {
@@ -411,7 +374,6 @@ pub fn flush(self: *Elf) !void {
     try self.calcSectionSizes();
 
     try self.allocateSections();
-    self.allocateSyntheticSymbols();
 
     self.shoff = blk: {
         const shdr = self.sections.items(.shdr)[self.sections.len - 1];
@@ -470,7 +432,7 @@ fn sortInitFini(self: *Elf) !void {
             elf.SHT_FINI_ARRAY,
             => is_init_fini = true,
             else => {
-                const name = self.shstrtab.getAssumeExists(shdr.sh_name);
+                const name = self.getShString(shdr.sh_name);
                 is_ctor_dtor = mem.indexOf(u8, name, ".ctors") != null or mem.indexOf(u8, name, ".dtors") != null;
             },
         }
@@ -691,7 +653,7 @@ fn initSyntheticSections(self: *Elf) !void {
         });
 
         const needs_versions = for (self.dynsym.entries.items) |dynsym| {
-            const symbol = self.getSymbol(dynsym.index);
+            const symbol = self.getSymbol(dynsym.ref).?;
             if (symbol.flags.import and symbol.ver_idx & elf.VERSYM_VERSION > elf.VER_NDX_GLOBAL) break true;
         } else false;
         if (needs_versions) {
@@ -747,38 +709,6 @@ pub fn addAtomsToSections(self: *Elf) !void {
                 .index = atom_index,
                 .file = index,
             });
-        }
-
-        for (object.getLocals()) |local_index| {
-            const local = self.getSymbol(local_index);
-            if (local.getMergeSubsection(self)) |msub| {
-                if (!msub.alive) continue;
-                local.shndx = msub.getMergeSection(self).out_shndx;
-                continue;
-            }
-            const atom = local.getAtom(self) orelse continue;
-            if (!atom.flags.alive) continue;
-            local.shndx = atom.out_shndx;
-        }
-
-        for (object.getGlobals()) |global_index| {
-            const global = self.getSymbol(global_index);
-            if (global.getFile(self).?.getIndex() != index) continue;
-            if (global.getMergeSubsection(self)) |msub| {
-                if (!msub.alive) continue;
-                global.shndx = msub.getMergeSection(self).out_shndx;
-                continue;
-            }
-            const atom = global.getAtom(self) orelse continue;
-            if (!atom.flags.alive) continue;
-            global.shndx = atom.out_shndx;
-        }
-
-        for (object.symbols.items[object.symtab.items.len..]) |local_index| {
-            const local = self.getSymbol(local_index);
-            const msub = local.getMergeSubsection(self).?;
-            if (!msub.alive) continue;
-            local.shndx = msub.getMergeSection(self).out_shndx;
         }
     }
 }
@@ -935,7 +865,7 @@ fn calcSectionSizes(self: *Elf) !void {
 
     if (self.dynstrtab_sect_index) |index| {
         const shdr = &self.sections.items(.shdr)[index];
-        shdr.sh_size = self.dynstrtab.buffer.items.len;
+        shdr.sh_size = self.dynstrtab.items.len;
     }
 
     if (self.versym_sect_index) |index| {
@@ -954,7 +884,7 @@ fn calcSectionSizes(self: *Elf) !void {
 
     if (self.shstrtab_sect_index) |index| {
         const shdr = &self.sections.items(.shdr)[index];
-        shdr.sh_size = self.shstrtab.buffer.items.len;
+        shdr.sh_size = self.shstrtab.items.len;
     }
 }
 
@@ -1356,7 +1286,7 @@ fn allocateSectionsInMemory(self: *Elf, base_offset: u64) !void {
     var i: usize = 0;
     while (i < shdrs.len) : (i += 1) {
         const shdr = &shdrs[i];
-        const name = self.shstrtab.getAssumeExists(shdr.sh_name);
+        const name = self.getShString(shdr.sh_name);
         if (!shdrIsAlloc(shdr.*)) continue;
         if (self.options.section_start.get(name)) |sh_addr| {
             addr = sh_addr;
@@ -1468,7 +1398,7 @@ fn allocateSections(self: *Elf) !void {
 
 fn getSectionRank(self: *Elf, shndx: u32) u8 {
     const shdr = self.sections.items(.shdr)[shndx];
-    const name = self.shstrtab.getAssumeExists(shdr.sh_name);
+    const name = self.getShString(shdr.sh_name);
     const flags = shdr.sh_flags;
     const rank: u8 = switch (shdr.sh_type) {
         elf.SHT_NULL => 0,
@@ -1642,151 +1572,6 @@ pub fn sortSections(self: *Elf) !void {
         if (shdr.sh_type != elf.SHT_NULL) {
             shdr.sh_link = self.symtab_sect_index.?;
             shdr.sh_info = @intCast(shndx);
-        }
-    }
-}
-
-fn allocateSyntheticSymbols(self: *Elf) void {
-    // _DYNAMIC
-    if (self.dynamic_sect_index) |shndx| {
-        const shdr = self.sections.items(.shdr)[shndx];
-        const symbol = self.getSymbol(self.dynamic_index.?);
-        symbol.value = @intCast(shdr.sh_addr);
-        symbol.shndx = shndx;
-    }
-
-    // __ehdr_start
-    {
-        const symbol = self.getSymbol(self.ehdr_start_index.?);
-        symbol.value = @intCast(self.options.image_base);
-        symbol.shndx = 1;
-    }
-
-    // __init_array_start, __init_array_end
-    if (self.getSectionByName(".init_array")) |shndx| {
-        const start_sym = self.getSymbol(self.init_array_start_index.?);
-        const end_sym = self.getSymbol(self.init_array_end_index.?);
-        const shdr = self.sections.items(.shdr)[shndx];
-        start_sym.shndx = shndx;
-        start_sym.value = @intCast(shdr.sh_addr);
-        end_sym.shndx = shndx;
-        end_sym.value = @intCast(shdr.sh_addr + shdr.sh_size);
-    }
-
-    // __fini_array_start, __fini_array_end
-    if (self.getSectionByName(".fini_array")) |shndx| {
-        const start_sym = self.getSymbol(self.fini_array_start_index.?);
-        const end_sym = self.getSymbol(self.fini_array_end_index.?);
-        const shdr = self.sections.items(.shdr)[shndx];
-        start_sym.shndx = shndx;
-        start_sym.value = @intCast(shdr.sh_addr);
-        end_sym.shndx = shndx;
-        end_sym.value = @intCast(shdr.sh_addr + shdr.sh_size);
-    }
-
-    // __preinit_array_start, __preinit_array_end
-    if (self.getSectionByName(".preinit_array")) |shndx| {
-        const start_sym = self.getSymbol(self.preinit_array_start_index.?);
-        const end_sym = self.getSymbol(self.preinit_array_end_index.?);
-        const shdr = self.sections.items(.shdr)[shndx];
-        start_sym.shndx = shndx;
-        start_sym.value = @intCast(shdr.sh_addr);
-        end_sym.shndx = shndx;
-        end_sym.value = @intCast(shdr.sh_addr + shdr.sh_size);
-    }
-
-    // _GLOBAL_OFFSET_TABLE_
-    if (self.options.cpu_arch.? == .x86_64) {
-        if (self.got_plt_sect_index) |shndx| {
-            const shdr = self.sections.items(.shdr)[shndx];
-            const symbol = self.getSymbol(self.got_index.?);
-            symbol.value = @intCast(shdr.sh_addr);
-            symbol.shndx = shndx;
-        }
-    } else {
-        if (self.got_sect_index) |shndx| {
-            const shdr = self.sections.items(.shdr)[shndx];
-            const symbol = self.getSymbol(self.got_index.?);
-            symbol.value = @intCast(shdr.sh_addr);
-            symbol.shndx = shndx;
-        }
-    }
-
-    // _PROCEDURE_LINKAGE_TABLE_
-    if (self.plt_sect_index) |shndx| {
-        const shdr = self.sections.items(.shdr)[shndx];
-        const symbol = self.getSymbol(self.plt_index.?);
-        symbol.value = @intCast(shdr.sh_addr);
-        symbol.shndx = shndx;
-    }
-
-    // __dso_handle
-    if (self.dso_handle_index) |index| {
-        const shdr = self.sections.items(.shdr)[1];
-        const symbol = self.getSymbol(index);
-        symbol.value = @intCast(shdr.sh_addr);
-        symbol.shndx = 0;
-    }
-
-    // __GNU_EH_FRAME_HDR
-    if (self.eh_frame_hdr_sect_index) |shndx| {
-        const shdr = self.sections.items(.shdr)[shndx];
-        const symbol = self.getSymbol(self.gnu_eh_frame_hdr_index.?);
-        symbol.value = @intCast(shdr.sh_addr);
-        symbol.shndx = shndx;
-    }
-
-    // __rela_iplt_start, __rela_iplt_end
-    if (self.rela_dyn_sect_index != null and self.options.static and !self.options.pie) {
-        const shndx = self.rela_dyn_sect_index.?;
-        const shdr = self.sections.items(.shdr)[shndx];
-        const end_addr = shdr.sh_addr + shdr.sh_size;
-        const start_addr = end_addr - self.getNumIRelativeRelocs() * @sizeOf(elf.Elf64_Rela);
-        const start_sym = self.getSymbol(self.rela_iplt_start_index.?);
-        const end_sym = self.getSymbol(self.rela_iplt_end_index.?);
-        start_sym.value = @intCast(start_addr);
-        start_sym.shndx = shndx;
-        end_sym.value = @intCast(end_addr);
-        end_sym.shndx = shndx;
-    }
-
-    // _end
-    {
-        const end_symbol = self.getSymbol(self.end_index.?);
-        for (self.sections.items(.shdr), 0..) |shdr, shndx| {
-            if (shdr.sh_flags & elf.SHF_ALLOC != 0) {
-                end_symbol.value = @intCast(shdr.sh_addr + shdr.sh_size);
-                end_symbol.shndx = @intCast(shndx);
-            }
-        }
-    }
-
-    // __start_*, __stop_*
-    {
-        var index: usize = 0;
-        while (index < self.start_stop_indexes.items.len) : (index += 2) {
-            const start = self.getSymbol(self.start_stop_indexes.items[index]);
-            const name = start.getName(self);
-            const stop = self.getSymbol(self.start_stop_indexes.items[index + 1]);
-            const shndx = self.getSectionByName(name["__start_".len..]).?;
-            const shdr = self.sections.items(.shdr)[shndx];
-            start.value = @intCast(shdr.sh_addr);
-            start.shndx = shndx;
-            stop.value = @intCast(shdr.sh_addr + shdr.sh_size);
-            stop.shndx = shndx;
-        }
-    }
-
-    // __global_pointer$
-    if (self.global_pointer_index) |index| {
-        const sym = self.getSymbol(index);
-        if (self.getSectionByName(".sdata")) |shndx| {
-            const shdr = self.sections.items(.shdr)[shndx];
-            sym.value = @intCast(shdr.sh_addr + 0x800);
-            sym.shndx = shndx;
-        } else {
-            sym.value = 0;
-            sym.shndx = 0;
         }
     }
 }
@@ -2009,15 +1794,15 @@ fn resolveSymbols(self: *Elf) !void {
     defer tracy.end();
 
     // Resolve symbols on the set of all objects and shared objects (even if some are unneeded).
-    for (self.objects.items) |index| self.getFile(index).?.resolveSymbols(self);
-    for (self.shared_objects.items) |index| self.getFile(index).?.resolveSymbols(self);
+    for (self.objects.items) |index| try self.getFile(index).?.resolveSymbols(self);
+    for (self.shared_objects.items) |index| try self.getFile(index).?.resolveSymbols(self);
+    if (self.getInternalObject()) |obj| try obj.asFile().resolveSymbols(self);
 
     // Mark live objects.
     self.markLive();
 
     // Reset state of all globals after marking live objects.
-    for (self.objects.items) |index| self.getFile(index).?.resetGlobals(self);
-    for (self.shared_objects.items) |index| self.getFile(index).?.resetGlobals(self);
+    self.resolver.reset();
 
     // Prune dead objects and shared objects.
     var i: usize = 0;
@@ -2027,7 +1812,6 @@ fn resolveSymbols(self: *Elf) !void {
             _ = self.objects.orderedRemove(i);
         } else i += 1;
     }
-
     i = 0;
     while (i < self.shared_objects.items.len) {
         const index = self.shared_objects.items[i];
@@ -2051,8 +1835,9 @@ fn resolveSymbols(self: *Elf) !void {
     }
 
     // Re-resolve the symbols.
-    for (self.objects.items) |index| self.getFile(index).?.resolveSymbols(self);
-    for (self.shared_objects.items) |index| self.getFile(index).?.resolveSymbols(self);
+    for (self.objects.items) |index| try self.getFile(index).?.resolveSymbols(self);
+    for (self.shared_objects.items) |index| try self.getFile(index).?.resolveSymbols(self);
+    if (self.getInternalObject()) |obj| try obj.asFile().resolveSymbols(self);
 }
 
 /// Traverses all objects and shared objects marking any object referenced by
@@ -2116,94 +1901,19 @@ fn convertCommonSymbols(self: *Elf) !void {
 fn markImportsAndExports(self: *Elf) !void {
     if (!self.options.shared)
         for (self.shared_objects.items) |index| {
-            for (self.getFile(index).?.shared.getGlobals()) |global_index| {
-                const global = self.getSymbol(global_index);
-                const file = global.getFile(self) orelse continue;
-                const vis = @as(elf.STV, @enumFromInt(global.getSourceSymbol(self).st_other));
-                if (file != .shared and vis != .HIDDEN) global.flags.@"export" = true;
-            }
+            self.getFile(index).?.shared.markImportsExports(self);
         };
 
     for (self.objects.items) |index| {
-        for (self.getFile(index).?.object.getGlobals()) |global_index| {
-            const global = self.getSymbol(global_index);
-            if (global.ver_idx == elf.VER_NDX_LOCAL) continue;
-            const file = global.getFile(self) orelse continue;
-            const vis = @as(elf.STV, @enumFromInt(global.getSourceSymbol(self).st_other));
-            if (vis == .HIDDEN) continue;
-            if (file == .shared and !global.isAbs(self)) {
-                global.flags.import = true;
-                continue;
-            }
-            if (file.getIndex() == index) {
-                global.flags.@"export" = true;
-
-                if (self.options.shared and vis != .PROTECTED) {
-                    global.flags.import = true;
-                }
-            }
-        }
+        self.getFile(index).?.object.markImportsExports(self);
     }
-}
-
-fn resolveSyntheticSymbols(self: *Elf) !void {
-    const is_shared = self.options.shared;
-    const internal_index = self.internal_object_index orelse return;
-    const internal = self.getFile(internal_index).?.internal;
-    self.dynamic_index = try internal.addSyntheticGlobal("_DYNAMIC", self);
-    self.ehdr_start_index = try internal.addSyntheticGlobal("__ehdr_start", self);
-    self.init_array_start_index = try internal.addSyntheticGlobal("__init_array_start", self);
-    self.init_array_end_index = try internal.addSyntheticGlobal("__init_array_end", self);
-    self.fini_array_start_index = try internal.addSyntheticGlobal("__fini_array_start", self);
-    self.fini_array_end_index = try internal.addSyntheticGlobal("__fini_array_end", self);
-    self.preinit_array_start_index = try internal.addSyntheticGlobal("__preinit_array_start", self);
-    self.preinit_array_end_index = try internal.addSyntheticGlobal("__preinit_array_end", self);
-    self.got_index = try internal.addSyntheticGlobal("_GLOBAL_OFFSET_TABLE_", self);
-    self.plt_index = try internal.addSyntheticGlobal("_PROCEDURE_LINKAGE_TABLE_", self);
-    self.end_index = try internal.addSyntheticGlobal("_end", self);
-
-    if (self.options.eh_frame_hdr) {
-        self.gnu_eh_frame_hdr_index = try internal.addSyntheticGlobal("__GNU_EH_FRAME_HDR", self);
-    }
-
-    if (self.getGlobalByName("__dso_handle")) |index| {
-        if (self.getSymbol(index).getFile(self) == null)
-            self.dso_handle_index = try internal.addSyntheticGlobal("__dso_handle", self);
-    }
-
-    self.rela_iplt_start_index = try internal.addSyntheticGlobal("__rela_iplt_start", self);
-    self.rela_iplt_end_index = try internal.addSyntheticGlobal("__rela_iplt_end", self);
-
-    for (self.sections.items(.shdr)) |shdr| {
-        if (self.getStartStopBasename(shdr)) |name| {
-            const gpa = self.base.allocator;
-            try self.start_stop_indexes.ensureUnusedCapacity(gpa, 2);
-
-            const start = try std.fmt.allocPrintZ(gpa, "__start_{s}", .{name});
-            defer gpa.free(start);
-            const stop = try std.fmt.allocPrintZ(gpa, "__stop_{s}", .{name});
-            defer gpa.free(stop);
-
-            self.start_stop_indexes.appendAssumeCapacity(try internal.addSyntheticGlobal(start, self));
-            self.start_stop_indexes.appendAssumeCapacity(try internal.addSyntheticGlobal(stop, self));
-        }
-    }
-
-    if (self.options.cpu_arch.? == .riscv64 and !is_shared) {
-        self.global_pointer_index = try internal.addSyntheticGlobal("__global_pointer$", self);
-    }
-
-    internal.resolveSymbols(self);
 }
 
 fn checkDuplicates(self: *Elf) !void {
-    var has_dupes = false;
     for (self.objects.items) |index| {
-        if (self.getFile(index).?.object.checkDuplicates(self)) {
-            has_dupes = true;
-        }
+        try self.getFile(index).?.object.checkDuplicates(self);
     }
-    if (has_dupes) return error.MultipleSymbolDefinition;
+    try self.reportDuplicates();
 }
 
 fn claimUnresolved(self: *Elf) void {
@@ -2211,61 +1921,63 @@ fn claimUnresolved(self: *Elf) void {
     defer tracy.end();
 
     for (self.objects.items) |index| {
-        const object = self.getFile(index).?.object;
-        const first_global = object.first_global orelse return;
-        for (object.getGlobals(), 0..) |global_index, i| {
-            const sym_idx = @as(u32, @intCast(first_global + i));
-            const sym = object.symtab.items[sym_idx];
-            if (sym.st_shndx != elf.SHN_UNDEF) continue;
-
-            const global = self.getSymbol(global_index);
-            if (global.getFile(self)) |_| {
-                if (global.getSourceSymbol(self).st_shndx != elf.SHN_UNDEF) continue;
-            }
-
-            const is_import = blk: {
-                if (!self.options.shared) break :blk false;
-                const vis = @as(elf.STV, @enumFromInt(sym.st_other));
-                if (vis == .HIDDEN) break :blk false;
-                break :blk true;
-            };
-
-            global.value = 0;
-            global.atom_ref = .{};
-            global.sym_idx = sym_idx;
-            global.file = object.index;
-            global.ver_idx = if (is_import) elf.VER_NDX_LOCAL else self.default_sym_version;
-            global.flags.import = is_import;
-        }
+        self.getFile(index).?.object.claimUnresolved(self);
     }
 }
 
-fn reportUndefs(self: *Elf) !void {
-    if (self.undefs.count() == 0) return;
+fn reportDuplicates(self: *Elf) error{ HasDuplicates, OutOfMemory }!void {
+    if (self.dupes.keys().len == 0) return; // Nothing to do
 
-    const max_notes = 4;
+    const max_notes = 3;
 
-    var it = self.undefs.iterator();
-    while (it.next()) |entry| {
-        const undef_sym = self.getSymbol(entry.key_ptr.*);
-        const notes = entry.value_ptr.*;
+    for (self.dupes.keys(), self.dupes.values()) |key, notes| {
+        const sym = self.resolver.keys.items[key - 1];
         const nnotes = @min(notes.items.len, max_notes) + @intFromBool(notes.items.len > max_notes);
 
-        const err = try self.base.addErrorWithNotes(nnotes);
-        try err.addMsg("undefined symbol: {s}", .{undef_sym.getName(self)});
+        var err = try self.base.addErrorWithNotes(nnotes + 1);
+        try err.addMsg("duplicate symbol definition: {s}", .{sym.getName(self)});
+        try err.addNote("defined by {}", .{sym.getFile(self).?.fmtPath()});
 
         var inote: usize = 0;
         while (inote < @min(notes.items.len, max_notes)) : (inote += 1) {
-            const atom = self.getAtom(notes.items[inote]).?;
-            const object = atom.getObject(self);
-            try err.addNote("referenced by {}:{s}", .{ object.fmtPath(), atom.getName(self) });
+            const file_ptr = self.getFile(notes.items[inote]).?;
+            try err.addNote("defined by {}", .{file_ptr.fmtPath()});
         }
 
         if (notes.items.len > max_notes) {
             const remaining = notes.items.len - max_notes;
+            try err.addNote("defined {d} more times", .{remaining});
+        }
+    }
+
+    return error.HasDuplicates;
+}
+
+fn reportUndefs(self: *Elf) !void {
+    if (self.undefs.keys().len == 0) return;
+
+    const max_notes = 4;
+
+    for (self.undefs.keys(), self.undefs.values()) |key, refs| {
+        const undef_sym = self.resolver.keys.items[key - 1];
+        const nrefs = @min(refs.items.len, max_notes);
+        const nnotes = nrefs + @intFromBool(refs.items.len > max_notes);
+
+        var err = try self.base.addErrorWithNotes(nnotes);
+        try err.addMsg("undefined symbol: {s}", .{undef_sym.getName(self)});
+
+        for (refs.items[0..nrefs]) |ref| {
+            const atom_ptr = self.getAtom(ref).?;
+            const object = atom_ptr.getObject(self);
+            try err.addNote("referenced by {s}:{s}", .{ object.fmtPath(), atom_ptr.getName(self) });
+        }
+
+        if (refs.items.len > max_notes) {
+            const remaining = refs.items.len - max_notes;
             try err.addNote("referenced {d} more times", .{remaining});
         }
     }
+
     return error.UndefinedSymbols;
 }
 
@@ -2280,52 +1992,21 @@ fn scanRelocs(self: *Elf) !void {
             else => |e| return e,
         };
     }
+
     try self.reportUndefs();
     if (has_reloc_error) return error.RelocError;
 
-    for (self.symbols.items, 0..) |*symbol, i| {
-        const index = @as(u32, @intCast(i));
-        if (!symbol.isLocal(self) and !symbol.flags.has_dynamic) {
-            log.debug("'{s}' is non-local", .{symbol.getName(self)});
-            try self.dynsym.addSymbol(index, self);
-        }
-        if (symbol.flags.got) {
-            log.debug("'{s}' needs GOT", .{symbol.getName(self)});
-            try self.got.addGotSymbol(index, self);
-        }
-        if (symbol.flags.plt) {
-            if (symbol.flags.is_canonical) {
-                log.debug("'{s}' needs CPLT", .{symbol.getName(self)});
-                symbol.flags.@"export" = true;
-                try self.plt.addSymbol(index, self);
-            } else if (symbol.flags.got) {
-                log.debug("'{s}' needs PLTGOT", .{symbol.getName(self)});
-                try self.plt_got.addSymbol(index, self);
-            } else {
-                log.debug("'{s}' needs PLT", .{symbol.getName(self)});
-                try self.plt.addSymbol(index, self);
-            }
-        }
-        if (symbol.flags.copy_rel and !symbol.flags.has_copy_rel) {
-            log.debug("'{s}' needs COPYREL", .{symbol.getName(self)});
-            try self.copy_rel.addSymbol(index, self);
-        }
-        if (symbol.flags.tlsgd) {
-            log.debug("'{s}' needs TLSGD", .{symbol.getName(self)});
-            try self.got.addTlsGdSymbol(index, self);
-        }
-        if (symbol.flags.gottp) {
-            log.debug("'{s}' needs GOTTP", .{symbol.getName(self)});
-            try self.got.addGotTpSymbol(index, self);
-        }
-        if (symbol.flags.tlsdesc) {
-            log.debug("'{s}' needs TLSDESC", .{symbol.getName(self)});
-            try self.got.addTlsDescSymbol(index, self);
-        }
+    for (self.objects.items) |index| {
+        try self.getFile(index).?.createSymbolIndirection(self);
     }
-
+    for (self.shared_objects.items) |index| {
+        try self.getFile(index).?.createSymbolIndirection(self);
+    }
+    if (self.getInternalObject()) |obj| {
+        try obj.asFile().createSymbolIndirection(self);
+    }
     if (self.got.flags.needs_tlsld) {
-        log.debug("needs TLSLD", .{});
+        log.debug("program needs TLSLD", .{});
         try self.got.addTlsLdSymbol(self);
     }
 }
@@ -2356,7 +2037,7 @@ fn setVerSymtab(self: *Elf) !void {
     try self.versym.resize(self.base.allocator, self.dynsym.count());
     self.versym.items[0] = elf.VER_NDX_LOCAL;
     for (self.dynsym.entries.items, 1..) |dynsym, i| {
-        const sym = self.getSymbol(dynsym.index);
+        const sym = self.getSymbol(dynsym.ref).?;
         self.versym.items[i] = sym.ver_idx;
     }
 
@@ -2387,7 +2068,7 @@ fn writeAtoms(self: *Elf) !void {
         if (atoms.items.len == 0) continue;
         if (shdr.sh_type == elf.SHT_NOBITS) continue;
 
-        log.debug("writing atoms in '{s}' section", .{self.shstrtab.getAssumeExists(shdr.sh_name)});
+        log.debug("writing atoms in '{s}' section", .{self.getShString(shdr.sh_name)});
 
         const buffer = try self.base.allocator.alloc(u8, shdr.sh_size);
         defer self.base.allocator.free(buffer);
@@ -2514,7 +2195,7 @@ fn writeSyntheticSections(self: *Elf) !void {
 
     if (self.dynstrtab_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
-        try self.base.file.pwriteAll(self.dynstrtab.buffer.items, shdr.sh_offset);
+        try self.base.file.pwriteAll(self.dynstrtab.items, shdr.sh_offset);
     }
 
     if (self.eh_frame_sect_index) |shndx| {
@@ -2585,7 +2266,7 @@ fn writeSyntheticSections(self: *Elf) !void {
 
     if (self.shstrtab_sect_index) |shndx| {
         const shdr = self.sections.items(.shdr)[shndx];
-        try self.base.file.pwriteAll(self.shstrtab.buffer.items, shdr.sh_offset);
+        try self.base.file.pwriteAll(self.shstrtab.items, shdr.sh_offset);
     }
 }
 
@@ -2609,6 +2290,10 @@ fn getRiscvEFlags(self: *Elf) !u32 {
 }
 
 fn writeHeader(self: *Elf) !void {
+    const e_entry: u64 = if (self.getInternalObject()) |obj| blk: {
+        const entry_sym = obj.getEntrySymbol(self) orelse break :blk 0;
+        break :blk @intCast(entry_sym.getAddress(.{}, self));
+    } else 0;
     var header = elf.Elf64_Ehdr{
         .e_ident = undefined,
         .e_type = if (self.options.pic) .DYN else .EXEC,
@@ -2619,7 +2304,7 @@ fn writeHeader(self: *Elf) !void {
             else => unreachable,
         },
         .e_version = 1,
-        .e_entry = if (self.entry_index) |index| @as(u64, @intCast(self.getSymbol(index).getAddress(.{}, self))) else 0,
+        .e_entry = e_entry,
         .e_phoff = @sizeOf(elf.Elf64_Ehdr),
         .e_shoff = self.shoff,
         .e_flags = if (self.options.cpu_arch.? == .riscv64) try self.getRiscvEFlags() else 0,
@@ -2662,7 +2347,7 @@ pub fn addSection(self: *Elf, opts: AddSectionOpts) !u32 {
     const index = @as(u32, @intCast(try self.sections.addOne(gpa)));
     self.sections.set(index, .{
         .shdr = .{
-            .sh_name = try self.shstrtab.insert(gpa, opts.name),
+            .sh_name = try self.insertShString(opts.name),
             .sh_type = opts.type,
             .sh_flags = opts.flags,
             .sh_addr = 0,
@@ -2679,7 +2364,7 @@ pub fn addSection(self: *Elf, opts: AddSectionOpts) !u32 {
 
 pub fn getSectionByName(self: *Elf, name: [:0]const u8) ?u32 {
     for (self.sections.items(.shdr), 0..) |shdr, i| {
-        const this_name = self.shstrtab.getAssumeExists(shdr.sh_name);
+        const this_name = self.getShString(shdr.sh_name);
         if (mem.eql(u8, this_name, name)) return @intCast(i);
     } else return null;
 }
@@ -2715,6 +2400,11 @@ pub fn getFile(self: *Elf, index: File.Index) ?File {
         .object => .{ .object = &self.files.items(.data)[index].object },
         .shared => .{ .shared = &self.files.items(.data)[index].shared },
     };
+}
+
+pub fn getInternalObject(self: *Elf) ?*InternalObject {
+    const index = self.internal_object_index orelse return null;
+    return self.getFile(index).?.internal;
 }
 
 pub fn addFileHandle(self: *Elf, file: std.fs.File) !File.HandleIndex {
@@ -2794,7 +2484,7 @@ fn createThunks(self: *Elf, shndx: u32) !void {
             log.debug("atom({}) {s}", .{ ref, atom.getName(self) });
             for (atom.getRelocs(self)) |rel| {
                 if (Thunk.isReachable(atom, rel, self)) continue;
-                const target = object.symbols.items[rel.r_sym()];
+                const target = object.resolveSymbol(rel.r_sym(), self);
                 try thunk.symbols.put(gpa, target, {});
             }
             atom.addExtra(.{ .thunk = thunk_index }, self);
@@ -2805,94 +2495,6 @@ fn createThunks(self: *Elf, shndx: u32) !void {
 
         log.debug("thunk({d}) : {}", .{ thunk_index, thunk.fmt(self) });
     }
-}
-
-pub fn addSymbol(self: *Elf) !Symbol.Index {
-    const index = @as(Symbol.Index, @intCast(self.symbols.items.len));
-    const symbol = try self.symbols.addOne(self.base.allocator);
-    symbol.* = .{};
-    return index;
-}
-
-pub fn getSymbol(self: *Elf, index: Symbol.Index) *Symbol {
-    assert(index < self.symbols.items.len);
-    return &self.symbols.items[index];
-}
-
-pub fn addSymbolExtra(self: *Elf, extra: Symbol.Extra) !u32 {
-    const fields = @typeInfo(Symbol.Extra).@"struct".fields;
-    try self.symbols_extra.ensureUnusedCapacity(self.base.allocator, fields.len);
-    return self.addSymbolExtraAssumeCapacity(extra);
-}
-
-pub fn addSymbolExtraAssumeCapacity(self: *Elf, extra: Symbol.Extra) u32 {
-    const index = @as(u32, @intCast(self.symbols_extra.items.len));
-    const fields = @typeInfo(Symbol.Extra).@"struct".fields;
-    inline for (fields) |field| {
-        self.symbols_extra.appendAssumeCapacity(switch (field.type) {
-            u32 => @field(extra, field.name),
-            else => @compileError("bad field type"),
-        });
-    }
-    return index;
-}
-
-pub fn getSymbolExtra(self: *Elf, index: u32) ?Symbol.Extra {
-    if (index == 0) return null;
-    const fields = @typeInfo(Symbol.Extra).@"struct".fields;
-    var i: usize = index;
-    var result: Symbol.Extra = undefined;
-    inline for (fields) |field| {
-        @field(result, field.name) = switch (field.type) {
-            u32 => self.symbols_extra.items[i],
-            else => @compileError("bad field type"),
-        };
-        i += 1;
-    }
-    return result;
-}
-
-pub fn setSymbolExtra(self: *Elf, index: u32, extra: Symbol.Extra) void {
-    assert(index > 0);
-    const fields = @typeInfo(Symbol.Extra).@"struct".fields;
-    inline for (fields, 0..) |field, i| {
-        self.symbols_extra.items[index + i] = switch (field.type) {
-            u32 => @field(extra, field.name),
-            else => @compileError("bad field type"),
-        };
-    }
-}
-
-pub fn internString(self: *Elf, comptime format: []const u8, args: anytype) !u32 {
-    const gpa = self.base.allocator;
-    const string = try std.fmt.allocPrintZ(gpa, format, args);
-    defer gpa.free(string);
-    return self.string_intern.insert(gpa, string);
-}
-
-const GetOrCreateGlobalResult = struct {
-    found_existing: bool,
-    index: u32,
-};
-
-pub fn getOrCreateGlobal(self: *Elf, off: u32) !GetOrCreateGlobalResult {
-    const gpa = self.base.allocator;
-    const gop = try self.globals.getOrPut(gpa, off);
-    if (!gop.found_existing) {
-        const index = try self.addSymbol();
-        const global = self.getSymbol(index);
-        global.name = off;
-        gop.value_ptr.* = index;
-    }
-    return .{
-        .found_existing = gop.found_existing,
-        .index = gop.value_ptr.*,
-    };
-}
-
-pub fn getGlobalByName(self: *Elf, name: []const u8) ?u32 {
-    const off = self.string_intern.getOffset(name) orelse return null;
-    return self.globals.get(off);
 }
 
 pub fn addMergeSubsection(self: *Elf) !MergeSubsection.Index {
@@ -2915,11 +2517,11 @@ pub fn getOrCreateMergeSection(self: *Elf, name: [:0]const u8, flags: u64, @"typ
             break :name if (flags & elf.SHF_STRINGS != 0) ".rodata.str" else ".rodata.cst";
         break :name name;
     };
-    const out_off = try self.string_intern.insert(gpa, out_name);
-    const out_flags = flags & ~@as(u64, elf.SHF_COMPRESSED | elf.SHF_GROUP);
     for (self.merge_sections.items, 0..) |msec, index| {
-        if (msec.name == out_off) return @intCast(index);
+        if (mem.eql(u8, msec.getName(self), out_name)) return @intCast(index);
     }
+    const out_off = try self.insertShString(out_name);
+    const out_flags = flags & ~@as(u64, elf.SHF_COMPRESSED | elf.SHF_GROUP);
     const index = @as(MergeSection.Index, @intCast(self.merge_sections.items.len));
     const msec = try self.merge_sections.addOne(gpa);
     msec.* = .{
@@ -2938,6 +2540,11 @@ pub fn getMergeSection(self: *Elf, index: MergeSection.Index) *MergeSection {
 pub fn getAtom(self: *Elf, ref: Ref) ?*Atom {
     const file = self.getFile(ref.file) orelse return null;
     return file.getAtom(ref.index);
+}
+
+pub fn getSymbol(self: *Elf, ref: Ref) ?*Symbol {
+    const file = self.getFile(ref.file) orelse return null;
+    return file.getSymbol(ref.index);
 }
 
 pub fn getComdatGroup(self: *Elf, ref: Ref) *ComdatGroup {
@@ -3010,8 +2617,8 @@ pub fn isCIdentifier(name: []const u8) bool {
     return true;
 }
 
-fn getStartStopBasename(self: *Elf, shdr: elf.Elf64_Shdr) ?[]const u8 {
-    const name = self.shstrtab.get(shdr.sh_name) orelse return null;
+pub fn getStartStopBasename(self: *Elf, shdr: elf.Elf64_Shdr) ?[]const u8 {
+    const name = self.getShString(shdr.sh_name);
     if (shdr.sh_flags & elf.SHF_ALLOC != 0 and name.len > 0) {
         if (isCIdentifier(name)) return name;
     }
@@ -3058,6 +2665,37 @@ fn requiresThunks(self: Elf) bool {
     };
 }
 
+pub fn getEntryName(self: Elf) ?[]const u8 {
+    if (self.options.shared) return null;
+    return self.options.entry orelse "_start";
+}
+
+pub fn getShString(self: Elf, off: u32) [:0]const u8 {
+    assert(off < self.shstrtab.items.len);
+    return mem.sliceTo(@as([*:0]const u8, @ptrCast(self.shstrtab.items.ptr + off)), 0);
+}
+
+pub fn insertShString(self: *Elf, name: [:0]const u8) error{OutOfMemory}!u32 {
+    const gpa = self.base.allocator;
+    const off = @as(u32, @intCast(self.shstrtab.items.len));
+    try self.shstrtab.ensureUnusedCapacity(gpa, name.len + 1);
+    self.shstrtab.writer(gpa).print("{s}\x00", .{name}) catch unreachable;
+    return off;
+}
+
+pub fn getDynString(self: Elf, off: u32) [:0]const u8 {
+    assert(off < self.dynstrtab.items.len);
+    return mem.sliceTo(@as([*:0]const u8, @ptrCast(self.dynstrtab.items.ptr + off)), 0);
+}
+
+pub fn insertDynString(self: *Elf, name: []const u8) error{OutOfMemory}!u32 {
+    const gpa = self.base.allocator;
+    const off = @as(u32, @intCast(self.dynstrtab.items.len));
+    try self.dynstrtab.ensureUnusedCapacity(gpa, name.len + 1);
+    self.dynstrtab.writer(gpa).print("{s}\x00", .{name}) catch unreachable;
+    return off;
+}
+
 /// Caller owns the memory.
 pub fn preadAllAlloc(allocator: Allocator, file: std.fs.File, offset: usize, size: usize) ![]u8 {
     const buffer = try allocator.alloc(u8, size);
@@ -3081,8 +2719,8 @@ fn formatSections(
     _ = unused_fmt_string;
     for (self.sections.items(.shdr), self.sections.items(.rela_shndx), 0..) |shdr, rela_shndx, i| {
         try writer.print("sect({d}) : {s} : @{x} ({x}) : align({x}) : size({x}) : rela({d})\n", .{
-            i,                 self.shstrtab.getAssumeExists(shdr.sh_name), shdr.sh_offset, shdr.sh_addr,
-            shdr.sh_addralign, shdr.sh_size,                                rela_shndx,
+            i,                 self.getShString(shdr.sh_name), shdr.sh_offset, shdr.sh_addr,
+            shdr.sh_addralign, shdr.sh_size,                   rela_shndx,
         });
     }
 }
@@ -3158,22 +2796,22 @@ fn fmtDumpState(
     }
     try writer.print("GOT\n{}\n", .{self.got.fmt(self)});
     try writer.writeAll("PLT\n");
-    for (self.plt.symbols.items, 0..) |sym_index, i| {
-        try writer.print("  {d} => {d} '{s}'\n", .{ i, sym_index, self.getSymbol(sym_index).getName(self) });
+    for (self.plt.symbols.items, 0..) |ref, i| {
+        try writer.print("  {d} => {} '{s}'\n", .{ i, ref, self.getSymbol(ref).?.getName(self) });
     }
     try writer.writeByte('\n');
     try writer.writeAll("PLTGOT\n");
-    for (self.plt_got.symbols.items, 0..) |sym_index, i| {
-        try writer.print("  {d} => {d} '{s}'\n", .{ i, sym_index, self.getSymbol(sym_index).getName(self) });
+    for (self.plt_got.symbols.items, 0..) |ref, i| {
+        try writer.print("  {d} => {} '{s}'\n", .{ i, ref, self.getSymbol(ref).?.getName(self) });
     }
     try writer.writeByte('\n');
     try writer.writeAll("COPYREL\n");
-    for (self.copy_rel.symbols.items, 0..) |sym_index, i| {
-        const symbol = self.getSymbol(sym_index);
-        try writer.print("  {d}@{x} => {d} '{s}'\n", .{
+    for (self.copy_rel.symbols.items, 0..) |ref, i| {
+        const symbol = self.getSymbol(ref).?;
+        try writer.print("  {d}@{x} => {} '{s}'\n", .{
             i,
             symbol.getAddress(.{}, self),
-            sym_index,
+            ref,
             symbol.getName(self),
         });
     }
@@ -3225,6 +2863,96 @@ pub const Ref = struct {
         _ = options;
         try writer.print("ref({},{})", .{ ref.index, ref.file });
     }
+};
+
+pub const SymbolResolver = struct {
+    keys: std.ArrayListUnmanaged(Key) = .{},
+    values: std.ArrayListUnmanaged(Ref) = .{},
+    table: std.AutoArrayHashMapUnmanaged(void, void) = .{},
+
+    const Result = struct {
+        found_existing: bool,
+        index: Index,
+        ref: *Ref,
+    };
+
+    pub fn deinit(resolver: *SymbolResolver, allocator: Allocator) void {
+        resolver.keys.deinit(allocator);
+        resolver.values.deinit(allocator);
+        resolver.table.deinit(allocator);
+    }
+
+    pub fn getOrPut(
+        resolver: *SymbolResolver,
+        allocator: Allocator,
+        ref: Ref,
+        elf_file: *Elf,
+    ) !Result {
+        const adapter = Adapter{ .keys = resolver.keys.items, .elf_file = elf_file };
+        const key = Key{ .index = ref.index, .file_index = ref.file };
+        const gop = try resolver.table.getOrPutAdapted(allocator, key, adapter);
+        if (!gop.found_existing) {
+            try resolver.keys.append(allocator, key);
+            _ = try resolver.values.addOne(allocator);
+        }
+        return .{
+            .found_existing = gop.found_existing,
+            .index = @intCast(gop.index + 1),
+            .ref = &resolver.values.items[gop.index],
+        };
+    }
+
+    pub fn get(resolver: SymbolResolver, index: Index) ?Ref {
+        if (index == 0) return null;
+        return resolver.values.items[index - 1];
+    }
+
+    pub fn reset(resolver: *SymbolResolver) void {
+        resolver.keys.clearRetainingCapacity();
+        resolver.values.clearRetainingCapacity();
+        resolver.table.clearRetainingCapacity();
+    }
+
+    const Key = struct {
+        index: Symbol.Index,
+        file_index: File.Index,
+
+        fn getName(key: Key, elf_file: *Elf) [:0]const u8 {
+            const ref = Ref{ .index = key.index, .file = key.file_index };
+            return elf_file.getSymbol(ref).?.getName(elf_file);
+        }
+
+        fn getFile(key: Key, elf_file: *Elf) ?File {
+            return elf_file.getFile(key.file_index);
+        }
+
+        fn eql(key: Key, other: Key, elf_file: *Elf) bool {
+            const key_name = key.getName(elf_file);
+            const other_name = other.getName(elf_file);
+            return mem.eql(u8, key_name, other_name);
+        }
+
+        fn hash(key: Key, elf_file: *Elf) u32 {
+            return @truncate(Hash.hash(0, key.getName(elf_file)));
+        }
+    };
+
+    const Adapter = struct {
+        keys: []const Key,
+        elf_file: *Elf,
+
+        pub fn eql(ctx: @This(), key: Key, b_void: void, b_map_index: usize) bool {
+            _ = b_void;
+            const other = ctx.keys[b_map_index];
+            return key.eql(other, ctx.elf_file);
+        }
+
+        pub fn hash(ctx: @This(), key: Key) u32 {
+            return key.hash(ctx.elf_file);
+        }
+    };
+
+    pub const Index = u32;
 };
 
 pub const ComdatGroup = struct {
@@ -3301,6 +3029,7 @@ const File = @import("Elf/file.zig").File;
 const GnuHashSection = synthetic.GnuHashSection;
 const GotSection = synthetic.GotSection;
 const GotPltSection = synthetic.GotPltSection;
+const Hash = std.hash.Wyhash;
 const HashSection = synthetic.HashSection;
 const InputMergeSection = merge_section.InputMergeSection;
 const InternalObject = @import("Elf/InternalObject.zig");
