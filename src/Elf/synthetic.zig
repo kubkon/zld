@@ -1084,6 +1084,36 @@ pub const PltSection = struct {
         }
     }
 
+    const FormatCtx = struct {
+        plt: PltSection,
+        elf_file: *Elf,
+    };
+
+    pub fn fmt(plt: PltSection, elf_file: *Elf) std.fmt.Formatter(format2) {
+        return .{ .data = .{ .plt = plt, .elf_file = elf_file } };
+    }
+
+    pub fn format2(
+        ctx: FormatCtx,
+        comptime unused_fmt_string: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = options;
+        _ = unused_fmt_string;
+        const plt = ctx.plt;
+        const elf_file = ctx.elf_file;
+        for (plt.symbols.items, 0..) |ref, i| {
+            const symbol = elf_file.getSymbol(ref).?;
+            try writer.print("  {d}@0x{x} => {} ({s})\n", .{
+                i,
+                symbol.getAddress(.{}, elf_file),
+                ref,
+                symbol.getName(elf_file),
+            });
+        }
+    }
+
     const x86_64 = struct {
         fn write(plt: PltSection, elf_file: *Elf, writer: anytype) !void {
             const plt_addr = elf_file.sections.items(.shdr)[elf_file.plt_sect_index.?].sh_addr;

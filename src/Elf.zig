@@ -2794,11 +2794,7 @@ fn fmtDumpState(
         try writer.print("thunk({d}) : {}\n", .{ index, thunk.fmt(self) });
     }
     try writer.print("GOT\n{}\n", .{self.got.fmt(self)});
-    try writer.writeAll("PLT\n");
-    for (self.plt.symbols.items, 0..) |ref, i| {
-        try writer.print("  {d} => {} '{s}'\n", .{ i, ref, self.getSymbol(ref).?.getName(self) });
-    }
-    try writer.writeByte('\n');
+    try writer.print("PLT\n{}\n", .{self.plt.fmt(self)});
     try writer.writeAll("PLTGOT\n");
     for (self.plt_got.symbols.items, 0..) |ref, i| {
         try writer.print("  {d} => {} '{s}'\n", .{ i, ref, self.getSymbol(ref).?.getName(self) });

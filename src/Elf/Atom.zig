@@ -146,7 +146,8 @@ pub fn writeRelocs(self: Atom, elf_file: *Elf, out_relocs: *std.ArrayList(elf.El
     const cpu_arch = elf_file.options.cpu_arch.?;
     const object = self.getObject(elf_file);
     for (self.getRelocs(elf_file)) |rel| {
-        const target = object.symbols.items[rel.r_sym()];
+        const target_ref = object.resolveSymbol(rel.r_sym(), elf_file);
+        const target = elf_file.getSymbol(target_ref).?;
         const r_type = rel.r_type();
         const r_offset: u64 = @intCast(self.value + @as(i64, @intCast(rel.r_offset)));
         var r_addend = rel.r_addend;
@@ -475,7 +476,8 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
         const r_kind = relocation.decode(rel.r_type(), cpu_arch);
         if (r_kind == .none) continue;
 
-        const target = object.symbols.items[rel.r_sym()];
+        const target_ref = object.resolveSymbol(rel.r_sym(), elf_file);
+        const target = elf_file.getSymbol(target_ref).?;
 
         // We will use equation format to resolve relocations:
         // https://intezer.com/blog/malware-analysis/executable-and-linkable-format-101-part-3-relocations/
@@ -509,15 +511,15 @@ pub fn resolveRelocsAlloc(self: Atom, elf_file: *Elf, writer: anytype) !void {
         const args = ResolveArgs{ P, A, S, GOT, G, TP, DTP };
 
         switch (cpu_arch) {
-            .x86_64 => x86_64.resolveRelocAlloc(self, elf_file, rel, target, args, &it, code, &stream) catch |err| switch (err) {
+            .x86_64 => x86_64.resolveRelocAlloc(self, elf_file, rel, target.*, args, &it, code, &stream) catch |err| switch (err) {
                 error.RelocError => has_reloc_errors = true,
                 else => |e| return e,
             },
-            .aarch64 => aarch64.resolveRelocAlloc(self, elf_file, rel, target, args, &it, code, &stream) catch |err| switch (err) {
+            .aarch64 => aarch64.resolveRelocAlloc(self, elf_file, rel, target.*, args, &it, code, &stream) catch |err| switch (err) {
                 error.RelocError => has_reloc_errors = true,
                 else => |e| return e,
             },
-            .riscv64 => riscv.resolveRelocAlloc(self, elf_file, rel, target, args, &it, code, &stream) catch |err| switch (err) {
+            .riscv64 => riscv.resolveRelocAlloc(self, elf_file, rel, target.*, args, &it, code, &stream) catch |err| switch (err) {
                 error.RelocError => has_reloc_errors = true,
                 else => |e| return e,
             },
@@ -1759,7 +1761,8 @@ const riscv = struct {
                     return error.RelocError;
                 };
                 it.pos = pos;
-                const target_ = object.symbols.items[pair.r_sym()];
+                const target_ref_ = object.resolveSymbol(pair.r_sym(), elf_file);
+                const target_ = elf_file.getSymbol(target_ref_).?;
                 const S_ = target_.getAddress(.{}, elf_file);
                 const A_ = pair.r_addend;
                 const P_ = atom_addr + @as(i64, @intCast(pair.r_offset));
