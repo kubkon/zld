@@ -32,7 +32,7 @@ extra: u32 = 0,
 pub fn isAbs(symbol: Symbol, elf_file: *Elf) bool {
     const file = symbol.getFile(elf_file).?;
     if (file == .shared) return symbol.getElfSym(elf_file).st_shndx == elf.SHN_ABS;
-    return !symbol.flags.import and symbol.getAtom(elf_file) == null and symbol.getMergeSubsection(elf_file) == null and symbol.getShndx(elf_file) == 0 and file != .internal;
+    return !symbol.flags.import and symbol.getAtom(elf_file) == null and symbol.getMergeSubsection(elf_file) == null and symbol.getShndx(elf_file) == null and file != .internal;
 }
 
 pub fn isLocal(symbol: Symbol, elf_file: *Elf) bool {
