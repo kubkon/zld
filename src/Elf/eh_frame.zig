@@ -147,14 +147,15 @@ pub const Cie = struct {
         const other_relocs = other.getRelocs(elf_file);
         if (cie_relocs.len != other_relocs.len) return false;
 
+        const cie_object = elf_file.getFile(cie.file).?.object;
+        const other_object = elf_file.getFile(other.file).?.object;
+
         for (cie_relocs, other_relocs) |cie_rel, other_rel| {
             if (cie_rel.r_offset - cie.offset != other_rel.r_offset - other.offset) return false;
             if (cie_rel.r_type() != other_rel.r_type()) return false;
             if (cie_rel.r_addend != other_rel.r_addend) return false;
 
-            const cie_object = elf_file.getFile(cie.file).?.object;
             const cie_ref = cie_object.resolveSymbol(cie_rel.r_sym(), elf_file);
-            const other_object = elf_file.getFile(other.file).?.object;
             const other_ref = other_object.resolveSymbol(other_rel.r_sym(), elf_file);
             if (!cie_ref.eql(other_ref)) return false;
         }

@@ -486,12 +486,6 @@ pub fn resolveSymbols(self: *Object, elf_file: *Elf) !void {
     const first_global = self.first_global orelse return;
     for (self.getGlobals(), first_global..) |_, i| {
         const esym = self.symtab.items[i];
-        if (esym.st_shndx != elf.SHN_ABS and esym.st_shndx != elf.SHN_COMMON and esym.st_shndx != elf.SHN_UNDEF) {
-            const atom_index = self.atoms_indexes.items[esym.st_shndx];
-            const atom_ptr = self.getAtom(atom_index) orelse continue;
-            if (!atom_ptr.flags.alive) continue;
-        }
-
         const resolv = &self.symbols_resolver.items[i - first_global];
         const gop = try elf_file.resolver.getOrPut(gpa, .{
             .index = @intCast(i),
@@ -503,6 +497,11 @@ pub fn resolveSymbols(self: *Object, elf_file: *Elf) !void {
         resolv.* = gop.index;
 
         if (esym.st_shndx == elf.SHN_UNDEF) continue;
+        if (esym.st_shndx != elf.SHN_ABS and esym.st_shndx != elf.SHN_COMMON) {
+            const atom_index = self.atoms_indexes.items[esym.st_shndx];
+            const atom_ptr = self.getAtom(atom_index) orelse continue;
+            if (!atom_ptr.flags.alive) continue;
+        }
         if (elf_file.getSymbol(gop.ref.*) == null) {
             gop.ref.* = .{ .index = @intCast(i), .file = self.index };
             continue;
