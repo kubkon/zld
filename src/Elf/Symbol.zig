@@ -73,8 +73,8 @@ pub fn getAtom(symbol: Symbol, elf_file: *Elf) ?*Atom {
 
 pub fn getMergeSubsection(symbol: Symbol, elf_file: *Elf) ?*MergeSubsection {
     if (!symbol.flags.merge_subsection) return null;
-    const extra = symbol.getExtra(elf_file);
-    return elf_file.getMergeSubsection(extra.subsection);
+    const msec = elf_file.getMergeSection(symbol.ref.file);
+    return msec.getMergeSubsection(symbol.ref.index);
 }
 
 pub fn getFile(symbol: Symbol, elf_file: *Elf) ?File {
@@ -238,7 +238,6 @@ const AddExtraOpts = struct {
     tlsgd: ?u32 = null,
     gottp: ?u32 = null,
     tlsdesc: ?u32 = null,
-    subsection: ?u32 = null,
 };
 
 pub fn addExtra(symbol: *Symbol, opts: AddExtraOpts, elf_file: *Elf) void {
@@ -436,7 +435,6 @@ pub const Extra = struct {
     tlsgd: u32 = 0,
     gottp: u32 = 0,
     tlsdesc: u32 = 0,
-    subsection: u32 = 0,
 };
 
 pub const Index = u32;

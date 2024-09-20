@@ -1,4 +1,8 @@
 pub const MergeSection = struct {
+    value: u64 = 0,
+    size: u64 = 0,
+    alignment: u8 = 0,
+    entsize: u32 = 0,
     name: u32 = 0,
     type: u32 = 0,
     flags: u64 = 0,
@@ -10,12 +14,14 @@ pub const MergeSection = struct {
         IndexContext,
         std.hash_map.default_max_load_percentage,
     ) = .{},
-    subsections: std.ArrayListUnmanaged(MergeSubsection.Index) = .{},
+    subsections: std.ArrayListUnmanaged(MergeSubsection) = .empty,
+    finalized_subsections: std.ArrayListUnmanaged(MergeSubsection.Index) = .empty,
 
     pub fn deinit(msec: *MergeSection, allocator: Allocator) void {
         msec.bytes.deinit(allocator);
         msec.table.deinit(allocator);
         msec.subsections.deinit(allocator);
+        msec.finalized_subsections.deinit(allocator);
     }
 
     pub fn getName(msec: MergeSection, elf_file: *Elf) [:0]const u8 {
@@ -24,7 +30,7 @@ pub const MergeSection = struct {
 
     pub fn getAddress(msec: MergeSection, elf_file: *Elf) i64 {
         const shdr = elf_file.sections.items(.shdr)[msec.out_shndx];
-        return @intCast(shdr.sh_addr);
+        return @intCast(shdr.sh_addr + msec.value);
     }
 
     const InsertResult = struct {
@@ -58,20 +64,19 @@ pub const MergeSection = struct {
 
     /// Finalizes the merge section and clears hash table.
     /// Sorts all owned subsections.
-    pub fn finalize(msec: *MergeSection, elf_file: *Elf) !void {
-        const gpa = elf_file.base.allocator;
-        try msec.subsections.ensureTotalCapacityPrecise(gpa, msec.table.count());
+    pub fn finalize(msec: *MergeSection, allocator: Allocator) !void {
+        try msec.finalized_subsections.ensureTotalCapacityPrecise(allocator, msec.subsections.items.len);
 
         var it = msec.table.iterator();
         while (it.next()) |entry| {
-            const msub = elf_file.getMergeSubsection(entry.value_ptr.*);
+            const msub = msec.getMergeSubsection(entry.value_ptr.*);
             if (!msub.alive) continue;
-            msec.subsections.appendAssumeCapacity(entry.value_ptr.*);
+            msec.finalized_subsections.appendAssumeCapacity(entry.value_ptr.*);
         }
-        msec.table.clearAndFree(gpa);
+        msec.table.clearAndFree(allocator);
 
         const sortFn = struct {
-            pub fn sortFn(ctx: *Elf, lhs: MergeSubsection.Index, rhs: MergeSubsection.Index) bool {
+            pub fn sortFn(ctx: *MergeSection, lhs: MergeSubsection.Index, rhs: MergeSubsection.Index) bool {
                 const lhs_msub = ctx.getMergeSubsection(lhs);
                 const rhs_msub = ctx.getMergeSubsection(rhs);
                 if (lhs_msub.alignment == rhs_msub.alignment) {
@@ -84,7 +89,41 @@ pub const MergeSection = struct {
             }
         }.sortFn;
 
-        std.mem.sort(MergeSubsection.Index, msec.subsections.items, elf_file, sortFn);
+        std.mem.sort(MergeSubsection.Index, msec.finalized_subsections.items, msec, sortFn);
+    }
+
+    pub fn calcSize(msec: *MergeSection) !void {
+        for (msec.finalized_subsections.items) |msub_index| {
+            const msub = msec.getMergeSubsection(msub_index);
+            assert(msub.alive);
+            const alignment = try std.math.powi(u64, 2, msub.alignment);
+            const offset = mem.alignForward(u64, msec.size, alignment);
+            const padding = offset - msec.size;
+            msub.value = @intCast(offset);
+            msec.size += padding + msub.size;
+            msec.alignment = @max(msec.alignment, msub.alignment);
+            msec.entsize = if (msec.entsize == 0) msub.entsize else @min(msec.entsize, msub.entsize);
+        }
+    }
+
+    pub fn initOutputSection(msec: *MergeSection, elf_file: *Elf) !void {
+        msec.out_shndx = elf_file.getSectionByName(msec.getName(elf_file)) orelse try elf_file.addSection(.{
+            .name = msec.name,
+            .type = msec.type,
+            .flags = msec.flags,
+        });
+    }
+
+    pub fn addMergeSubsection(msec: *MergeSection, allocator: Allocator) !MergeSubsection.Index {
+        const index: MergeSubsection.Index = @intCast(msec.subsections.items.len);
+        const msub = try msec.subsections.addOne(allocator);
+        msub.* = .{};
+        return index;
+    }
+
+    pub fn getMergeSubsection(msec: *MergeSection, index: MergeSubsection.Index) *MergeSubsection {
+        assert(index < msec.subsections.items.len);
+        return &msec.subsections.items[index];
     }
 
     pub const IndexContext = struct {
@@ -148,15 +187,17 @@ pub const MergeSection = struct {
         _ = unused_fmt_string;
         const msec = ctx.msec;
         const elf_file = ctx.elf_file;
-        try writer.print("{s} : @{x} : sect({d}) : type({x}) : flags({x})\n", .{
+        try writer.print("{s} : @{x} : size({x}) : align({x}) : entsize({x}) : type({x}) : flags({x})\n", .{
             msec.getName(elf_file),
             msec.getAddress(elf_file),
-            msec.out_shndx,
+            msec.size,
+            msec.alignment,
+            msec.entsize,
             msec.type,
             msec.flags,
         });
-        for (msec.subsections.items) |index| {
-            try writer.print("   subsection({d}) : {}\n", .{ index, elf_file.getMergeSubsection(index).fmt(elf_file) });
+        for (msec.subsections.items) |msub| {
+            try writer.print("   {}\n", .{msub.fmt(elf_file)});
         }
     }
 
@@ -180,8 +221,7 @@ pub const MergeSubsection = struct {
         return elf_file.getMergeSection(msub.merge_section);
     }
 
-    pub fn getString(msub: MergeSubsection, elf_file: *Elf) []const u8 {
-        const msec = msub.getMergeSection(elf_file);
+    pub fn getString(msub: MergeSubsection, msec: *MergeSection) []const u8 {
         return msec.bytes.items[msub.string_index..][0..msub.size];
     }
 
@@ -220,9 +260,8 @@ pub const MergeSubsection = struct {
         _ = unused_fmt_string;
         const msub = ctx.msub;
         const elf_file = ctx.elf_file;
-        try writer.print("@{x} : merge_sect({d}) : align({x}) : size({x})", .{
+        try writer.print("@{x} : align({x}) : size({x})", .{
             msub.getAddress(elf_file),
-            msub.merge_section,
             msub.alignment,
             msub.size,
         });

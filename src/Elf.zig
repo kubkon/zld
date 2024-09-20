@@ -64,7 +64,6 @@ comdat_group_sections: std.ArrayListUnmanaged(ComdatGroupSection) = .{},
 thunks: std.ArrayListUnmanaged(Thunk) = .{},
 
 merge_sections: std.ArrayListUnmanaged(MergeSection) = .{},
-merge_subsections: std.ArrayListUnmanaged(MergeSubsection) = .{},
 
 has_text_reloc: bool = false,
 num_ifunc_dynrelocs: usize = 0,
@@ -121,7 +120,6 @@ pub fn deinit(self: *Elf) void {
         sect.deinit(gpa);
     }
     self.merge_sections.deinit(gpa);
-    self.merge_subsections.deinit(gpa);
     self.resolver.deinit(gpa);
     self.got.deinit(gpa);
     self.plt.deinit(gpa);
@@ -364,7 +362,6 @@ pub fn flush(self: *Elf) !void {
 
     try self.initSyntheticSections();
     try self.sortSections();
-    try self.addAtomsToSections();
     try self.sortInitFini();
     try self.setDynamic();
     self.setDynsym();
@@ -473,32 +470,12 @@ fn sortInitFini(self: *Elf) !void {
 
 fn initOutputSections(self: *Elf) !void {
     for (self.objects.items) |index| {
-        const object = self.getFile(index).?.object;
-        for (object.atoms_indexes.items) |atom_index| {
-            const atom = object.getAtom(atom_index) orelse continue;
-            if (!atom.flags.alive) continue;
-            atom.out_shndx = try object.initOutputSection(self, atom.getInputShdr(self));
-        }
+        try self.getFile(index).?.object.initOutputSections(self);
     }
-
     for (self.merge_sections.items) |*msec| {
-        if (msec.subsections.items.len == 0) continue;
-        const shndx = self.getSectionByName(msec.getName(self)) orelse try self.addSection(.{
-            .name = msec.name,
-            .type = msec.type,
-            .flags = msec.flags,
-        });
-        msec.out_shndx = shndx;
-
-        var entsize = self.getMergeSubsection(msec.subsections.items[0]).entsize;
-        for (msec.subsections.items) |index| {
-            const msub = self.getMergeSubsection(index);
-            entsize = @min(entsize, msub.entsize);
-        }
-        const shdr = &self.sections.items(.shdr)[shndx];
-        shdr.sh_entsize = entsize;
+        if (msec.finalized_subsections.items.len == 0) continue;
+        try msec.initOutputSection(self);
     }
-
     self.text_sect_index = self.getSectionByName(".text");
 }
 
@@ -697,28 +674,13 @@ pub fn initShStrtab(self: *Elf) !void {
     });
 }
 
-pub fn addAtomsToSections(self: *Elf) !void {
-    for (self.objects.items) |index| {
-        const object = self.getFile(index).?.object;
-        for (object.atoms_indexes.items) |atom_index| {
-            const atom = object.getAtom(atom_index) orelse continue;
-            if (!atom.flags.alive) continue;
-            const atoms = &self.sections.items(.atoms)[atom.out_shndx];
-            try atoms.append(self.base.allocator, .{
-                .index = atom_index,
-                .file = index,
-            });
-        }
-    }
-}
-
 pub fn addCommentString(self: *Elf) !void {
     const msec_index = try self.getOrCreateMergeSection(".comment", elf.SHF_MERGE | elf.SHF_STRINGS, elf.SHT_PROGBITS);
     const msec = self.getMergeSection(msec_index);
     const res = try msec.insertZ(self.base.allocator, Options.version);
     if (res.found_existing) return;
-    const msub_index = try self.addMergeSubsection();
-    const msub = self.getMergeSubsection(msub_index);
+    const msub_index = try msec.addMergeSubsection(self.base.allocator);
+    const msub = msec.getMergeSubsection(msub_index);
     msub.merge_section = msec_index;
     msub.string_index = res.key.pos;
     msub.alignment = 0;
@@ -730,23 +692,23 @@ pub fn addCommentString(self: *Elf) !void {
 
 pub fn finalizeMergeSections(self: *Elf) !void {
     for (self.merge_sections.items) |*msec| {
-        try msec.finalize(self);
+        try msec.finalize(self.base.allocator);
     }
 }
 
 pub fn calcMergeSectionSizes(self: *Elf) !void {
     for (self.merge_sections.items) |*msec| {
+        try msec.calcSize();
+    }
+    for (self.merge_sections.items) |*msec| {
         const shdr = &self.sections.items(.shdr)[msec.out_shndx];
-        for (msec.subsections.items) |msub_index| {
-            const msub = self.getMergeSubsection(msub_index);
-            assert(msub.alive);
-            const alignment = try math.powi(u64, 2, msub.alignment);
-            const offset = mem.alignForward(u64, shdr.sh_size, alignment);
-            const padding = offset - shdr.sh_size;
-            msub.value = @intCast(offset);
-            shdr.sh_size += padding + msub.size;
-            shdr.sh_addralign = @max(shdr.sh_addralign, alignment);
-        }
+        const alignment = try math.powi(u64, 2, msec.alignment);
+        const offset = mem.alignForward(u64, shdr.sh_size, alignment);
+        const padding = offset - shdr.sh_size;
+        msec.value = @intCast(offset);
+        shdr.sh_size += padding + msec.size;
+        shdr.sh_addralign = @max(shdr.sh_addralign, alignment);
+        shdr.sh_entsize = if (shdr.sh_entsize == 0) msec.entsize else @min(shdr.sh_entsize, msec.entsize);
     }
 }
 
@@ -2118,21 +2080,22 @@ pub fn writeMergeSections(self: *Elf) !void {
     var buffer = std.ArrayList(u8).init(gpa);
     defer buffer.deinit();
 
-    for (self.merge_sections.items) |msec| {
+    for (self.merge_sections.items) |*msec| {
         const shdr = self.sections.items(.shdr)[msec.out_shndx];
+        const fileoff = msec.value + shdr.sh_offset;
 
-        try buffer.ensureTotalCapacity(shdr.sh_size);
-        buffer.appendNTimesAssumeCapacity(0, shdr.sh_size);
+        try buffer.ensureTotalCapacity(msec.size);
+        buffer.appendNTimesAssumeCapacity(0, msec.size);
 
-        for (msec.subsections.items) |msub_index| {
-            const msub = self.getMergeSubsection(msub_index);
+        for (msec.finalized_subsections.items) |msub_index| {
+            const msub = msec.getMergeSubsection(msub_index);
             assert(msub.alive);
-            const string = msub.getString(self);
+            const string = msub.getString(msec);
             const off: u64 = @intCast(msub.value);
             @memcpy(buffer.items[off..][0..string.len], string);
         }
 
-        try self.base.file.pwriteAll(buffer.items, shdr.sh_offset);
+        try self.base.file.pwriteAll(buffer.items, fileoff);
         buffer.clearRetainingCapacity();
     }
 }
@@ -2496,16 +2459,57 @@ fn createThunks(self: *Elf, shndx: u32) !void {
     }
 }
 
-pub fn addMergeSubsection(self: *Elf) !MergeSubsection.Index {
-    const index: MergeSubsection.Index = @intCast(self.merge_subsections.items.len);
-    const msec = try self.merge_subsections.addOne(self.base.allocator);
-    msec.* = .{};
-    return index;
-}
-
-pub fn getMergeSubsection(self: *Elf, index: MergeSubsection.Index) *MergeSubsection {
-    assert(index < self.merge_subsections.items.len);
-    return &self.merge_subsections.items[index];
+pub fn initOutputSection(self: *Elf, args: struct {
+    name: [:0]const u8,
+    flags: u64,
+    type: u32,
+}) error{OutOfMemory}!u32 {
+    const name = blk: {
+        if (self.options.relocatable) break :blk args.name;
+        if (args.flags & elf.SHF_MERGE != 0) break :blk args.name;
+        const name_prefixes: []const [:0]const u8 = &.{
+            ".text",       ".data.rel.ro", ".data", ".rodata", ".bss.rel.ro",       ".bss",
+            ".init_array", ".fini_array",  ".tbss", ".tdata",  ".gcc_except_table", ".ctors",
+            ".dtors",      ".gnu.warning",
+        };
+        inline for (name_prefixes) |prefix| {
+            if (std.mem.eql(u8, args.name, prefix) or std.mem.startsWith(u8, args.name, prefix ++ ".")) {
+                break :blk prefix;
+            }
+        }
+        break :blk args.name;
+    };
+    const @"type" = tt: {
+        if (self.options.cpu_arch.? == .x86_64 and args.type == elf.SHT_X86_64_UNWIND)
+            break :tt elf.SHT_PROGBITS;
+        switch (args.type) {
+            elf.SHT_NULL => unreachable,
+            elf.SHT_PROGBITS => {
+                if (std.mem.eql(u8, args.name, ".init_array") or std.mem.startsWith(u8, args.name, ".init_array."))
+                    break :tt elf.SHT_INIT_ARRAY;
+                if (std.mem.eql(u8, args.name, ".fini_array") or std.mem.startsWith(u8, args.name, ".fini_array."))
+                    break :tt elf.SHT_FINI_ARRAY;
+                break :tt args.type;
+            },
+            else => break :tt args.type,
+        }
+    };
+    const flags = blk: {
+        var flags = args.flags;
+        if (!self.options.relocatable) {
+            flags &= ~@as(u64, elf.SHF_COMPRESSED | elf.SHF_GROUP | elf.SHF_GNU_RETAIN);
+        }
+        break :blk switch (@"type") {
+            elf.SHT_INIT_ARRAY, elf.SHT_FINI_ARRAY => flags | elf.SHF_WRITE,
+            else => flags,
+        };
+    };
+    const out_shndx = self.getSectionByName(name) orelse try self.addSection(.{
+        .type = @"type",
+        .flags = flags,
+        .name = try self.insertShString(name),
+    });
+    return out_shndx;
 }
 
 pub fn getOrCreateMergeSection(self: *Elf, name: [:0]const u8, flags: u64, @"type": u32) !MergeSection.Index {

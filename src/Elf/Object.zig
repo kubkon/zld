@@ -308,56 +308,6 @@ fn initSymbols(self: *Object, allocator: Allocator, elf_file: *Elf) !void {
     }
 }
 
-pub fn initOutputSection(self: Object, elf_file: *Elf, shdr: elf.Elf64_Shdr) !u32 {
-    const name = blk: {
-        const name = self.getString(shdr.sh_name);
-        if (elf_file.options.relocatable) break :blk name;
-        if (shdr.sh_flags & elf.SHF_MERGE != 0) break :blk name;
-        const sh_name_prefixes: []const [:0]const u8 = &.{
-            ".text",       ".data.rel.ro", ".data", ".rodata", ".bss.rel.ro",       ".bss",
-            ".init_array", ".fini_array",  ".tbss", ".tdata",  ".gcc_except_table", ".ctors",
-            ".dtors",      ".gnu.warning",
-        };
-        inline for (sh_name_prefixes) |prefix| {
-            if (std.mem.eql(u8, name, prefix) or std.mem.startsWith(u8, name, prefix ++ ".")) {
-                break :blk prefix;
-            }
-        }
-        break :blk name;
-    };
-    const @"type" = tt: {
-        if (elf_file.options.cpu_arch.? == .x86_64 and shdr.sh_type == elf.SHT_X86_64_UNWIND) break :tt elf.SHT_PROGBITS;
-
-        const @"type" = switch (shdr.sh_type) {
-            elf.SHT_NULL => unreachable,
-            elf.SHT_PROGBITS => blk: {
-                if (std.mem.eql(u8, name, ".init_array") or std.mem.startsWith(u8, name, ".init_array."))
-                    break :blk elf.SHT_INIT_ARRAY;
-                if (std.mem.eql(u8, name, ".fini_array") or std.mem.startsWith(u8, name, ".fini_array."))
-                    break :blk elf.SHT_FINI_ARRAY;
-                break :blk shdr.sh_type;
-            },
-            else => shdr.sh_type,
-        };
-        break :tt @"type";
-    };
-    const flags = blk: {
-        var flags = shdr.sh_flags;
-        if (!elf_file.options.relocatable) {
-            flags &= ~@as(u64, elf.SHF_COMPRESSED | elf.SHF_GROUP | elf.SHF_GNU_RETAIN);
-        }
-        break :blk switch (@"type") {
-            elf.SHT_INIT_ARRAY, elf.SHT_FINI_ARRAY => flags | elf.SHF_WRITE,
-            else => flags,
-        };
-    };
-    return elf_file.getSectionByName(name) orelse try elf_file.addSection(.{
-        .type = @"type",
-        .flags = flags,
-        .name = try elf_file.insertShString(name),
-    });
-}
-
 fn parseEhFrame(self: *Object, allocator: Allocator, file: std.fs.File, shndx: u32, elf_file: *Elf) !void {
     const tracy = trace(@src());
     defer tracy.end();
@@ -754,6 +704,42 @@ pub fn initMergeSections(self: *Object, elf_file: *Elf) !void {
     }
 }
 
+pub fn initOutputSections(self: *Object, elf_file: *Elf) !void {
+    for (self.atoms_indexes.items) |atom_index| {
+        const atom_ptr = self.getAtom(atom_index) orelse continue;
+        if (!atom_ptr.flags.alive) continue;
+        const shdr = atom_ptr.getInputShdr(elf_file);
+        const osec = try elf_file.initOutputSection(.{
+            .name = self.getString(shdr.sh_name),
+            .flags = shdr.sh_flags,
+            .type = shdr.sh_type,
+        });
+        atom_ptr.out_shndx = osec;
+        const atoms = &elf_file.sections.items(.atoms)[osec];
+        try atoms.append(elf_file.base.allocator, atom_ptr.getRef());
+    }
+}
+
+pub fn initRelaSections(self: *Object, elf_file: *Elf) !void {
+    for (self.atoms_indexes.items) |atom_index| {
+        const atom_ptr = self.getAtom(atom_index) orelse continue;
+        if (!atom_ptr.flags.alive) continue;
+        if (atom_ptr.getRelocs(elf_file).len == 0) continue;
+        const shdr = self.shdrs.items[atom_ptr.relocs_shndx];
+        const out_shndx = try elf_file.initOutputSection(.{
+            .name = self.getString(shdr.sh_name),
+            .flags = shdr.sh_flags,
+            .type = shdr.sh_type,
+        });
+        const out_shdr = &elf_file.sections.items(.shdr)[out_shndx];
+        out_shdr.sh_type = elf.SHT_RELA;
+        out_shdr.sh_addralign = @alignOf(elf.Elf64_Rela);
+        out_shdr.sh_entsize = @sizeOf(elf.Elf64_Rela);
+        out_shdr.sh_flags |= elf.SHF_INFO_LINK;
+        elf_file.sections.items(.rela_shndx)[atom_ptr.out_shndx] = out_shndx;
+    }
+}
+
 pub fn resolveMergeSubsections(self: *Object, elf_file: *Elf) !void {
     const gpa = elf_file.base.allocator;
 
@@ -770,8 +756,8 @@ pub fn resolveMergeSubsections(self: *Object, elf_file: *Elf) !void {
             const string = imsec.bytes.items[str.pos..][0..str.len];
             const res = try msec.insert(gpa, string);
             if (!res.found_existing) {
-                const msub_index = try elf_file.addMergeSubsection();
-                const msub = elf_file.getMergeSubsection(msub_index);
+                const msub_index = try msec.addMergeSubsection(gpa);
+                const msub = msec.getMergeSubsection(msub_index);
                 msub.merge_section = imsec.merge_section;
                 msub.string_index = res.key.pos;
                 msub.entsize = @intCast(isec.sh_entsize);
@@ -820,6 +806,7 @@ pub fn resolveMergeSubsections(self: *Object, elf_file: *Elf) !void {
             const imsec_index = self.merge_sections_indexes.items[esym.st_shndx];
             const imsec = self.getInputMergeSection(imsec_index) orelse continue;
             if (imsec.offsets.items.len == 0) continue;
+            const msec = elf_file.getMergeSection(imsec.merge_section);
             const msub_index, const offset = imsec.findSubsection(@intCast(@as(i64, @intCast(esym.st_value)) + rel.r_addend)) orelse {
                 elf_file.base.fatal("{}: {s}: invalid relocation at offset 0x{x}", .{
                     self.fmtPath(),
@@ -828,18 +815,14 @@ pub fn resolveMergeSubsections(self: *Object, elf_file: *Elf) !void {
                 });
                 return error.ParseFailed;
             };
-            const msub = elf_file.getMergeSubsection(msub_index);
-            const msec = msub.getMergeSection(elf_file);
 
-            const out_sym_idx: u64 = @intCast(self.symbols.items.len);
-            try self.symbols.ensureUnusedCapacity(gpa, 1);
+            const sym_index = try self.addSymbol(gpa);
+            const sym = &self.symbols.items[sym_index];
             const name = try std.fmt.allocPrint(gpa, "{s}$subsection{d}", .{
                 msec.getName(elf_file),
                 msub_index,
             });
             defer gpa.free(name);
-            const sym_index = try self.addSymbol(gpa);
-            const sym = &self.symbols.items[sym_index];
             sym.* = .{
                 .value = @bitCast(@as(i64, @intCast(offset)) - rel.r_addend),
                 .name = try self.addString(gpa, name),
@@ -849,7 +832,7 @@ pub fn resolveMergeSubsections(self: *Object, elf_file: *Elf) !void {
             };
             sym.ref = .{ .index = msub_index, .file = imsec.merge_section };
             sym.flags.merge_subsection = true;
-            rel.r_info = (out_sym_idx << 32) | rel.r_type();
+            rel.r_info = (@as(u64, @intCast(sym_index)) << 32) | rel.r_type();
         }
     }
 }

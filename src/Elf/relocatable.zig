@@ -7,7 +7,6 @@ pub fn flush(elf_file: *Elf) !void {
     try elf_file.finalizeMergeSections();
     try initSections(elf_file);
     try elf_file.sortSections();
-    try elf_file.addAtomsToSections();
     try elf_file.calcMergeSectionSizes();
     try calcSectionSizes(elf_file);
 
@@ -43,40 +42,13 @@ fn initSections(elf_file: *Elf) !void {
 
     for (elf_file.objects.items) |index| {
         const object = elf_file.getFile(index).?.object;
-
-        for (object.atoms_indexes.items) |atom_index| {
-            const atom = object.getAtom(atom_index) orelse continue;
-            if (!atom.flags.alive) continue;
-            atom.out_shndx = try object.initOutputSection(elf_file, atom.getInputShdr(elf_file));
-
-            if (atom.getRelocs(elf_file).len > 0) {
-                const rela_shdr = object.getShdrs()[atom.relocs_shndx];
-                const out_rela_shndx = try object.initOutputSection(elf_file, rela_shdr);
-                const out_rela_shdr = &elf_file.sections.items(.shdr)[out_rela_shndx];
-                out_rela_shdr.sh_flags |= elf.SHF_INFO_LINK;
-                out_rela_shdr.sh_addralign = @alignOf(elf.Elf64_Rela);
-                out_rela_shdr.sh_entsize = @sizeOf(elf.Elf64_Rela);
-                elf_file.sections.items(.rela_shndx)[atom.out_shndx] = out_rela_shndx;
-            }
-        }
+        try object.initOutputSections(elf_file);
+        try object.initRelaSections(elf_file);
     }
 
     for (elf_file.merge_sections.items) |*msec| {
-        if (msec.subsections.items.len == 0) continue;
-        const shndx = elf_file.getSectionByName(msec.getName(elf_file)) orelse try elf_file.addSection(.{
-            .name = msec.name,
-            .type = msec.type,
-            .flags = msec.flags,
-        });
-        msec.out_shndx = shndx;
-
-        var entsize = elf_file.getMergeSubsection(msec.subsections.items[0]).entsize;
-        for (msec.subsections.items) |index| {
-            const msub = elf_file.getMergeSubsection(index);
-            entsize = @min(entsize, msub.entsize);
-        }
-        const shdr = &elf_file.sections.items(.shdr)[shndx];
-        shdr.sh_entsize = entsize;
+        if (msec.finalized_subsections.items.len == 0) continue;
+        try msec.initOutputSection(elf_file);
     }
 
     const needs_eh_frame = for (elf_file.objects.items) |index| {

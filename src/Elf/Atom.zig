@@ -38,6 +38,10 @@ pub fn getAddress(self: Atom, elf_file: *Elf) i64 {
     return @as(i64, @intCast(shdr.sh_addr)) + self.value;
 }
 
+pub fn getRef(self: Atom) Elf.Ref {
+    return .{ .index = self.atom_index, .file = self.file };
+}
+
 pub fn getDebugTombstoneValue(self: Atom, target: Symbol, elf_file: *Elf) ?u64 {
     if (target.getMergeSubsection(elf_file)) |msub| {
         if (msub.alive) return null;
