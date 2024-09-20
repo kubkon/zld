@@ -63,9 +63,8 @@ fn initSections(elf_file: *Elf) !void {
 
     for (elf_file.merge_sections.items) |*msec| {
         if (msec.subsections.items.len == 0) continue;
-        const name = msec.getName(elf_file);
-        const shndx = elf_file.getSectionByName(name) orelse try elf_file.addSection(.{
-            .name = name,
+        const shndx = elf_file.getSectionByName(msec.getName(elf_file)) orelse try elf_file.addSection(.{
+            .name = msec.name,
             .type = msec.type,
             .flags = msec.flags,
         });
@@ -85,13 +84,13 @@ fn initSections(elf_file: *Elf) !void {
     } else false;
     if (needs_eh_frame) {
         elf_file.eh_frame_sect_index = try elf_file.addSection(.{
-            .name = ".eh_frame",
+            .name = try elf_file.insertShString(".eh_frame"),
             .flags = elf.SHF_ALLOC,
             .type = elf.SHT_PROGBITS,
             .addralign = @alignOf(u64),
         });
         const rela_shndx = try elf_file.addSection(.{
-            .name = ".rela.eh_frame",
+            .name = try elf_file.insertShString(".rela.eh_frame"),
             .type = elf.SHT_RELA,
             .flags = elf.SHF_INFO_LINK,
             .entsize = @sizeOf(elf.Elf64_Rela),
@@ -115,7 +114,7 @@ fn initComdatGroups(elf_file: *Elf) !void {
             const cg_sec = try elf_file.comdat_group_sections.addOne(gpa);
             cg_sec.* = .{
                 .shndx = try elf_file.addSection(.{
-                    .name = ".group",
+                    .name = try elf_file.insertShString(".group"),
                     .type = elf.SHT_GROUP,
                     .entsize = @sizeOf(u32),
                     .addralign = @alignOf(u32),

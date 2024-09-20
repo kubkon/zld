@@ -243,7 +243,7 @@ pub fn flush(self: *Elf) !void {
     try self.strtab.append(gpa, 0);
     try self.dynstrtab.append(gpa, 0);
     // Append null section.
-    _ = try self.addSection(.{ .name = "" });
+    _ = try self.addSection(.{});
     // Append null symbol.
     try self.symtab.append(gpa, null_sym);
     // Append null file.
@@ -483,9 +483,8 @@ fn initOutputSections(self: *Elf) !void {
 
     for (self.merge_sections.items) |*msec| {
         if (msec.subsections.items.len == 0) continue;
-        const name = msec.getName(self);
-        const shndx = self.getSectionByName(name) orelse try self.addSection(.{
-            .name = name,
+        const shndx = self.getSectionByName(msec.getName(self)) orelse try self.addSection(.{
+            .name = msec.name,
             .type = msec.type,
             .flags = msec.flags,
         });
@@ -509,7 +508,7 @@ fn initSyntheticSections(self: *Elf) !void {
     } else false;
     if (needs_eh_frame) {
         self.eh_frame_sect_index = try self.addSection(.{
-            .name = ".eh_frame",
+            .name = try self.insertShString(".eh_frame"),
             .type = elf.SHT_PROGBITS,
             .flags = elf.SHF_ALLOC,
             .addralign = @alignOf(u64),
@@ -517,7 +516,7 @@ fn initSyntheticSections(self: *Elf) !void {
 
         if (self.options.eh_frame_hdr) {
             self.eh_frame_hdr_sect_index = try self.addSection(.{
-                .name = ".eh_frame_hdr",
+                .name = try self.insertShString(".eh_frame_hdr"),
                 .type = elf.SHT_PROGBITS,
                 .flags = elf.SHF_ALLOC,
                 .addralign = @alignOf(u32),
@@ -527,7 +526,7 @@ fn initSyntheticSections(self: *Elf) !void {
 
     if (self.got.entries.items.len > 0) {
         self.got_sect_index = try self.addSection(.{
-            .name = ".got",
+            .name = try self.insertShString(".got"),
             .type = elf.SHT_PROGBITS,
             .flags = elf.SHF_ALLOC | elf.SHF_WRITE,
             .addralign = @alignOf(u64),
@@ -535,7 +534,7 @@ fn initSyntheticSections(self: *Elf) !void {
     }
 
     self.got_plt_sect_index = try self.addSection(.{
-        .name = ".got.plt",
+        .name = try self.insertShString(".got.plt"),
         .type = elf.SHT_PROGBITS,
         .flags = elf.SHF_ALLOC | elf.SHF_WRITE,
         .addralign = @alignOf(u64),
@@ -551,7 +550,7 @@ fn initSyntheticSections(self: *Elf) !void {
     };
     if (needs_rela_dyn) {
         self.rela_dyn_sect_index = try self.addSection(.{
-            .name = ".rela.dyn",
+            .name = try self.insertShString(".rela.dyn"),
             .type = elf.SHT_RELA,
             .flags = elf.SHF_ALLOC,
             .addralign = @alignOf(elf.Elf64_Rela),
@@ -561,13 +560,13 @@ fn initSyntheticSections(self: *Elf) !void {
 
     if (self.plt.symbols.items.len > 0) {
         self.plt_sect_index = try self.addSection(.{
-            .name = ".plt",
+            .name = try self.insertShString(".plt"),
             .type = elf.SHT_PROGBITS,
             .flags = elf.SHF_ALLOC | elf.SHF_EXECINSTR,
             .addralign = 16,
         });
         self.rela_plt_sect_index = try self.addSection(.{
-            .name = ".rela.plt",
+            .name = try self.insertShString(".rela.plt"),
             .type = elf.SHT_RELA,
             .flags = elf.SHF_ALLOC,
             .addralign = @alignOf(elf.Elf64_Rela),
@@ -577,7 +576,7 @@ fn initSyntheticSections(self: *Elf) !void {
 
     if (self.plt_got.symbols.items.len > 0) {
         self.plt_got_sect_index = try self.addSection(.{
-            .name = ".plt.got",
+            .name = try self.insertShString(".plt.got"),
             .type = elf.SHT_PROGBITS,
             .flags = elf.SHF_ALLOC | elf.SHF_EXECINSTR,
             .addralign = 16,
@@ -586,7 +585,7 @@ fn initSyntheticSections(self: *Elf) !void {
 
     if (self.copy_rel.symbols.items.len > 0) {
         self.copy_rel_sect_index = try self.addSection(.{
-            .name = ".copyrel",
+            .name = try self.insertShString(".copyrel"),
             .type = elf.SHT_NOBITS,
             .flags = elf.SHF_ALLOC | elf.SHF_WRITE,
         });
@@ -609,7 +608,7 @@ fn initSyntheticSections(self: *Elf) !void {
     };
     if (needs_interp) {
         self.interp_sect_index = try self.addSection(.{
-            .name = ".interp",
+            .name = try self.insertShString(".interp"),
             .type = elf.SHT_PROGBITS,
             .flags = elf.SHF_ALLOC,
             .addralign = 1,
@@ -618,35 +617,35 @@ fn initSyntheticSections(self: *Elf) !void {
 
     if (self.options.shared or self.shared_objects.items.len > 0 or self.options.pie) {
         self.dynstrtab_sect_index = try self.addSection(.{
-            .name = ".dynstr",
+            .name = try self.insertShString(".dynstr"),
             .flags = elf.SHF_ALLOC,
             .type = elf.SHT_STRTAB,
             .entsize = 1,
             .addralign = 1,
         });
         self.dynamic_sect_index = try self.addSection(.{
-            .name = ".dynamic",
+            .name = try self.insertShString(".dynamic"),
             .flags = elf.SHF_ALLOC | elf.SHF_WRITE,
             .type = elf.SHT_DYNAMIC,
             .entsize = @sizeOf(elf.Elf64_Dyn),
             .addralign = @alignOf(elf.Elf64_Dyn),
         });
         self.dynsymtab_sect_index = try self.addSection(.{
-            .name = ".dynsym",
+            .name = try self.insertShString(".dynsym"),
             .flags = elf.SHF_ALLOC,
             .type = elf.SHT_DYNSYM,
             .addralign = @alignOf(elf.Elf64_Sym),
             .entsize = @sizeOf(elf.Elf64_Sym),
         });
         self.hash_sect_index = try self.addSection(.{
-            .name = ".hash",
+            .name = try self.insertShString(".hash"),
             .flags = elf.SHF_ALLOC,
             .type = elf.SHT_HASH,
             .addralign = 4,
             .entsize = 4,
         });
         self.gnu_hash_sect_index = try self.addSection(.{
-            .name = ".gnu.hash",
+            .name = try self.insertShString(".gnu.hash"),
             .flags = elf.SHF_ALLOC,
             .type = elf.SHT_GNU_HASH,
             .addralign = 8,
@@ -658,14 +657,14 @@ fn initSyntheticSections(self: *Elf) !void {
         } else false;
         if (needs_versions) {
             self.versym_sect_index = try self.addSection(.{
-                .name = ".gnu.version",
+                .name = try self.insertShString(".gnu.version"),
                 .flags = elf.SHF_ALLOC,
                 .type = elf.SHT_GNU_VERSYM,
                 .addralign = @alignOf(elf.Elf64_Versym),
                 .entsize = @sizeOf(elf.Elf64_Versym),
             });
             self.verneed_sect_index = try self.addSection(.{
-                .name = ".gnu.version_r",
+                .name = try self.insertShString(".gnu.version_r"),
                 .flags = elf.SHF_ALLOC,
                 .type = elf.SHT_GNU_VERNEED,
                 .addralign = @alignOf(elf.Elf64_Verneed),
@@ -676,13 +675,13 @@ fn initSyntheticSections(self: *Elf) !void {
 
 pub fn initSymtab(self: *Elf) !void {
     self.strtab_sect_index = try self.addSection(.{
-        .name = ".strtab",
+        .name = try self.insertShString(".strtab"),
         .type = elf.SHT_STRTAB,
         .entsize = 1,
         .addralign = 1,
     });
     self.symtab_sect_index = try self.addSection(.{
-        .name = ".symtab",
+        .name = try self.insertShString(".symtab"),
         .type = elf.SHT_SYMTAB,
         .addralign = @alignOf(elf.Elf64_Sym),
         .entsize = @sizeOf(elf.Elf64_Sym),
@@ -691,7 +690,7 @@ pub fn initSymtab(self: *Elf) !void {
 
 pub fn initShStrtab(self: *Elf) !void {
     self.shstrtab_sect_index = try self.addSection(.{
-        .name = ".shstrtab",
+        .name = try self.insertShString(".shstrtab"),
         .type = elf.SHT_STRTAB,
         .entsize = 1,
         .addralign = 1,
@@ -2332,7 +2331,7 @@ fn writeHeader(self: *Elf) !void {
 }
 
 pub const AddSectionOpts = struct {
-    name: [:0]const u8,
+    name: u32 = 0,
     type: u32 = elf.SHT_NULL,
     flags: u64 = 0,
     link: u32 = 0,
@@ -2347,7 +2346,7 @@ pub fn addSection(self: *Elf, opts: AddSectionOpts) !u32 {
     const index = @as(u32, @intCast(try self.sections.addOne(gpa)));
     self.sections.set(index, .{
         .shdr = .{
-            .sh_name = try self.insertShString(opts.name),
+            .sh_name = opts.name,
             .sh_type = opts.type,
             .sh_flags = opts.flags,
             .sh_addr = 0,

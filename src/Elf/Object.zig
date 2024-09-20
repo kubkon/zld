@@ -354,7 +354,7 @@ pub fn initOutputSection(self: Object, elf_file: *Elf, shdr: elf.Elf64_Shdr) !u3
     return elf_file.getSectionByName(name) orelse try elf_file.addSection(.{
         .type = @"type",
         .flags = flags,
-        .name = name,
+        .name = try elf_file.insertShString(name),
     });
 }
 
