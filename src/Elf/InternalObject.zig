@@ -160,7 +160,6 @@ pub fn initStartStopSymbols(self: *InternalObject, elf_file: *Elf) !void {
                     .index = index,
                     .file = self.index,
                 }, elf_file);
-                assert(!gop.found_existing);
                 gop.ref.* = .{ .index = index, .file = self.index };
                 self.symbols_resolver.appendAssumeCapacity(gop.index);
             }
