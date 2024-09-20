@@ -347,6 +347,9 @@ pub fn flush(self: *Elf) !void {
     try self.addCommentString();
     try self.finalizeMergeSections();
     try self.initOutputSections();
+    if (self.getInternalObject()) |obj| {
+        try obj.initStartStopSymbols(self);
+    }
 
     if (self.options.z_execstack_if_needed) {
         for (self.objects.items) |index| {
