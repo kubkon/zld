@@ -873,7 +873,7 @@ const x86_64 = struct {
             .GOTTPOFF => {
                 const should_relax = blk: {
                     if (!elf_file.options.relax or is_shared or symbol.flags.import) break :blk false;
-                    relaxGotTpOff(code[rel.r_offset - 3 ..]) catch break :blk false;
+                    relaxGotTpOff(code[rel.r_offset - 3 ..], false) catch break :blk false;
                     break :blk true;
                 };
                 if (!should_relax) {
@@ -984,7 +984,7 @@ const x86_64 = struct {
                     const S_ = target.getGotTpAddress(elf_file);
                     try cwriter.writeInt(i32, @as(i32, @intCast(S_ + A - P)), .little);
                 } else {
-                    try relaxGotTpOff(code[rel.r_offset - 3 ..]);
+                    try relaxGotTpOff(code[rel.r_offset - 3 ..], true);
                     try cwriter.writeInt(i32, @as(i32, @intCast(S - TP)), .little);
                 }
             },
@@ -1228,7 +1228,7 @@ const x86_64 = struct {
         }
     }
 
-    fn relaxGotTpOff(code: []u8) !void {
+    fn relaxGotTpOff(code: []u8, comptime should_log: bool) !void {
         const old_inst = disassemble(code) orelse return error.RelaxFail;
         switch (old_inst.encoding.mnemonic) {
             .mov => {
@@ -1237,7 +1237,7 @@ const x86_64 = struct {
                     // TODO: hack to force imm32s in the assembler
                     .{ .imm = Immediate.s(-129) },
                 });
-                relocs_log.debug("    relaxing {} => {}", .{ old_inst.encoding, inst.encoding });
+                if (should_log) relocs_log.debug("    relaxing {} => {}", .{ old_inst.encoding, inst.encoding });
                 encode(&.{inst}, code) catch return error.RelaxFail;
             },
             else => return error.RelaxFail,
