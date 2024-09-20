@@ -152,9 +152,11 @@ pub const Cie = struct {
             if (cie_rel.r_type() != other_rel.r_type()) return false;
             if (cie_rel.r_addend != other_rel.r_addend) return false;
 
-            const cie_sym = cie.getObject(elf_file).symbols.items[cie_rel.r_sym()];
-            const other_sym = other.getObject(elf_file).symbols.items[other_rel.r_sym()];
-            if (!std.mem.eql(u8, std.mem.asBytes(&cie_sym), std.mem.asBytes(&other_sym))) return false;
+            const cie_object = elf_file.getFile(cie.file).?.object;
+            const cie_ref = cie_object.resolveSymbol(cie_rel.r_sym(), elf_file);
+            const other_object = elf_file.getFile(other.file).?.object;
+            const other_ref = other_object.resolveSymbol(other_rel.r_sym(), elf_file);
+            if (!cie_ref.eql(other_ref)) return false;
         }
         return true;
     }
@@ -485,8 +487,9 @@ pub fn writeEhFrameRelocs(elf_file: *Elf, writer: anytype) !void {
         for (object.cies.items) |cie| {
             if (!cie.alive) continue;
             for (cie.getRelocs(elf_file)) |rel| {
-                const sym = object.symbols.items[rel.r_sym()];
-                const out_rel = emitReloc(elf_file, cie, sym, rel);
+                const sym_ref = object.resolveSymbol(rel.r_sym(), elf_file);
+                const sym = elf_file.getSymbol(sym_ref).?;
+                const out_rel = emitReloc(elf_file, cie, sym.*, rel);
                 try writer.writeStruct(out_rel);
             }
         }
@@ -494,8 +497,9 @@ pub fn writeEhFrameRelocs(elf_file: *Elf, writer: anytype) !void {
         for (object.fdes.items) |fde| {
             if (!fde.alive) continue;
             for (fde.getRelocs(elf_file)) |rel| {
-                const sym = object.symbols.items[rel.r_sym()];
-                const out_rel = emitReloc(elf_file, fde, sym, rel);
+                const sym_ref = object.resolveSymbol(rel.r_sym(), elf_file);
+                const sym = elf_file.getSymbol(sym_ref).?;
+                const out_rel = emitReloc(elf_file, fde, sym.*, rel);
                 try writer.writeStruct(out_rel);
             }
         }
