@@ -198,20 +198,20 @@ pub fn allocateSymbols(self: *InternalObject, elf_file: *Elf) void {
 
     const allocSymbol = struct {
         fn allocSymbol(int: *InternalObject, index: Symbol.Index, value: u64, osec: u32, ef: *Elf) void {
-            const sym = ef.symbol(int.resolveSymbol(index, ef)).?;
+            const sym = ef.getSymbol(int.resolveSymbol(index, ef)).?;
             sym.value = @intCast(value);
-            sym.output_section_index = osec;
+            sym.shndx = osec;
         }
     }.allocSymbol;
 
     // _DYNAMIC
-    if (elf_file.dynamic_section_index) |shndx| {
+    if (elf_file.dynamic_sect_index) |shndx| {
         const shdr = shdrs[shndx];
         allocSymbol(self, self.dynamic_index.?, shdr.sh_addr, shndx, elf_file);
     }
 
     // __ehdr_start
-    allocSymbol(self, self.ehdr_start_index.?, elf_file.image_base, 1, elf_file);
+    allocSymbol(self, self.ehdr_start_index.?, elf_file.options.image_base, 1, elf_file);
 
     // __init_array_start, __init_array_end
     if (elf_file.getSectionByName(".init_array")) |shndx| {
@@ -236,19 +236,19 @@ pub fn allocateSymbols(self: *InternalObject, elf_file: *Elf) void {
 
     // _GLOBAL_OFFSET_TABLE_
     if (elf_file.options.cpu_arch.? == .x86_64) {
-        if (elf_file.got_plt_section_index) |shndx| {
+        if (elf_file.got_plt_sect_index) |shndx| {
             const shdr = shdrs[shndx];
             allocSymbol(self, self.got_index.?, shdr.sh_addr, shndx, elf_file);
         }
     } else {
-        if (elf_file.got_section_index) |shndx| {
+        if (elf_file.got_sect_index) |shndx| {
             const shdr = shdrs[shndx];
             allocSymbol(self, self.got_index.?, shdr.sh_addr, shndx, elf_file);
         }
     }
 
     // _PROCEDURE_LINKAGE_TABLE_
-    if (elf_file.plt_section_index) |shndx| {
+    if (elf_file.plt_sect_index) |shndx| {
         const shdr = shdrs[shndx];
         allocSymbol(self, self.plt_index.?, shdr.sh_addr, shndx, elf_file);
     }
@@ -260,17 +260,17 @@ pub fn allocateSymbols(self: *InternalObject, elf_file: *Elf) void {
     }
 
     // __GNU_EH_FRAME_HDR
-    if (elf_file.eh_frame_hdr_section_index) |shndx| {
+    if (elf_file.eh_frame_hdr_sect_index) |shndx| {
         const shdr = shdrs[shndx];
         allocSymbol(self, self.gnu_eh_frame_hdr_index.?, shdr.sh_addr, shndx, elf_file);
     }
 
     // __rela_iplt_start, __rela_iplt_end
-    if (elf_file.rela_dyn_section_index) |shndx| blk: {
+    if (elf_file.rela_dyn_sect_index) |shndx| blk: {
         if (!elf_file.options.static or elf_file.options.pie) break :blk;
         const shdr = shdrs[shndx];
         const end_addr = shdr.sh_addr + shdr.sh_size;
-        const start_addr = end_addr - elf_file.calcNumIRelativeRelocs() * @sizeOf(elf.Elf64_Rela);
+        const start_addr = end_addr - elf_file.getNumIRelativeRelocs() * @sizeOf(elf.Elf64_Rela);
         allocSymbol(self, self.rela_iplt_start_index.?, start_addr, shndx, elf_file);
         allocSymbol(self, self.rela_iplt_end_index.?, end_addr, shndx, elf_file);
     }
@@ -303,15 +303,15 @@ pub fn allocateSymbols(self: *InternalObject, elf_file: *Elf) void {
         while (index < self.start_stop_indexes.items.len) : (index += 2) {
             const start_ref = self.resolveSymbol(self.start_stop_indexes.items[index], elf_file);
             const start = elf_file.getSymbol(start_ref).?;
-            const name = start.name(elf_file);
+            const name = start.getName(elf_file);
             const stop_ref = self.resolveSymbol(self.start_stop_indexes.items[index + 1], elf_file);
             const stop = elf_file.getSymbol(stop_ref).?;
             const shndx = elf_file.getSectionByName(name["__start_".len..]).?;
             const shdr = shdrs[shndx];
             start.value = @intCast(shdr.sh_addr);
-            start.output_section_index = shndx;
+            start.shndx = shndx;
             stop.value = @intCast(shdr.sh_addr + shdr.sh_size);
-            stop.output_section_index = shndx;
+            stop.shndx = shndx;
         }
     }
 }

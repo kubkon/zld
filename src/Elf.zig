@@ -371,6 +371,9 @@ pub fn flush(self: *Elf) !void {
     try self.calcSectionSizes();
 
     try self.allocateSections();
+    if (self.getInternalObject()) |obj| {
+        obj.allocateSymbols(self);
+    }
 
     self.shoff = blk: {
         const shdr = self.sections.items(.shdr)[self.sections.len - 1];
@@ -2598,12 +2601,12 @@ fn sortRelaDyn(self: *Elf) void {
     mem.sort(elf.Elf64_Rela, self.rela_dyn.items, self, Sort.lessThan);
 }
 
-fn getNumIRelativeRelocs(self: *Elf) usize {
+pub fn getNumIRelativeRelocs(self: *Elf) usize {
     var count: usize = self.num_ifunc_dynrelocs;
 
     for (self.got.entries.items) |entry| {
         if (entry.tag != .got) continue;
-        const symbol = self.getSymbol(entry.symbol_index);
+        const symbol = self.getSymbol(entry.ref).?;
         if (symbol.isIFunc(self)) count += 1;
     }
 
