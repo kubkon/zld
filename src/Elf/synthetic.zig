@@ -1247,8 +1247,6 @@ pub const PltGotSection = struct {
         const index = @as(u32, @intCast(plt_got.symbols.items.len));
         const symbol = elf_file.getSymbol(ref).?;
         symbol.addExtra(.{ .plt_got = index }, elf_file);
-        symbol.flags.plt = true;
-        symbol.flags.got = true;
         try plt_got.symbols.append(elf_file.base.allocator, ref);
     }
 
