@@ -1,6 +1,6 @@
 value: i64 = 0,
 out_shndx: u32 = 0,
-symbols: std.AutoArrayHashMapUnmanaged(Symbol.Index, void) = .{},
+symbols: std.AutoArrayHashMapUnmanaged(Elf.Ref, void) = .empty,
 output_symtab_ctx: Elf.SymtabCtx = .{},
 
 pub fn deinit(thunk: *Thunk, allocator: Allocator) void {
@@ -17,9 +17,9 @@ pub fn getAddress(thunk: Thunk, elf_file: *Elf) i64 {
     return @as(i64, @intCast(shdr.sh_addr)) + thunk.value;
 }
 
-pub fn getTargetAddress(thunk: Thunk, sym_index: Symbol.Index, elf_file: *Elf) i64 {
+pub fn getTargetAddress(thunk: Thunk, ref: Elf.Ref, elf_file: *Elf) i64 {
     const cpu_arch = elf_file.options.cpu_arch.?;
-    return thunk.getAddress(elf_file) + @as(i64, @intCast(thunk.symbols.getIndex(sym_index).? * trampolineSize(cpu_arch)));
+    return thunk.getAddress(elf_file) + @as(i64, @intCast(thunk.symbols.getIndex(ref).? * trampolineSize(cpu_arch)));
 }
 
 pub fn isReachable(atom: *const Atom, rel: elf.Elf64_Rela, elf_file: *Elf) bool {
@@ -52,8 +52,8 @@ pub fn calcSymtabSize(thunk: *Thunk, elf_file: *Elf) void {
     if (elf_file.options.strip_all) return;
 
     thunk.output_symtab_ctx.nlocals = @as(u32, @intCast(thunk.symbols.keys().len));
-    for (thunk.symbols.keys()) |sym_index| {
-        const sym = elf_file.getSymbol(sym_index);
+    for (thunk.symbols.keys()) |ref| {
+        const sym = elf_file.getSymbol(ref).?;
         thunk.output_symtab_ctx.strsize += @as(u32, @intCast(sym.getName(elf_file).len + "$thunk".len + 1));
     }
 }
@@ -62,8 +62,8 @@ pub fn writeSymtab(thunk: Thunk, elf_file: *Elf) void {
     if (elf_file.options.strip_all) return;
     const cpu_arch = elf_file.options.cpu_arch.?;
 
-    for (thunk.symbols.keys(), thunk.output_symtab_ctx.ilocal..) |sym_index, ilocal| {
-        const sym = elf_file.getSymbol(sym_index);
+    for (thunk.symbols.keys(), thunk.output_symtab_ctx.ilocal..) |ref, ilocal| {
+        const sym = elf_file.getSymbol(ref).?;
         const st_name = @as(u32, @intCast(elf_file.strtab.items.len));
         elf_file.strtab.appendSliceAssumeCapacity(sym.getName(elf_file));
         elf_file.strtab.appendSliceAssumeCapacity("$thunk");
@@ -73,7 +73,7 @@ pub fn writeSymtab(thunk: Thunk, elf_file: *Elf) void {
             .st_info = elf.STT_FUNC,
             .st_other = 0,
             .st_shndx = @intCast(thunk.out_shndx),
-            .st_value = @intCast(thunk.getTargetAddress(sym_index, elf_file)),
+            .st_value = @intCast(thunk.getTargetAddress(ref, elf_file)),
             .st_size = trampolineSize(cpu_arch),
         };
     }
@@ -123,9 +123,9 @@ fn format2(
     const thunk = ctx.thunk;
     const elf_file = ctx.elf_file;
     try writer.print("@{x} : size({x})\n", .{ thunk.value, thunk.size(elf_file) });
-    for (thunk.symbols.keys()) |index| {
-        const sym = elf_file.getSymbol(index);
-        try writer.print("  %{d} : {s} : @{x}\n", .{ index, sym.getName(elf_file), sym.value });
+    for (thunk.symbols.keys()) |ref| {
+        const sym = elf_file.getSymbol(ref).?;
+        try writer.print("  {} : {s} : @{x}\n", .{ ref, sym.getName(elf_file), sym.value });
     }
 }
 
@@ -136,7 +136,8 @@ const aarch64 = struct {
         const r_type: elf.R_AARCH64 = @enumFromInt(rel.r_type());
         if (r_type != .CALL26 and r_type != .JUMP26) return true;
         const object = atom.getObject(elf_file);
-        const target = object.getSymbol(rel.r_sym(), elf_file);
+        const target_ref = object.resolveSymbol(rel.r_sym(), elf_file);
+        const target = elf_file.getSymbol(target_ref).?;
         if (target.flags.plt) return false;
         if (atom.out_shndx != target.shndx) return false;
         const target_atom = target.getAtom(elf_file).?;
@@ -148,8 +149,8 @@ const aarch64 = struct {
     }
 
     fn write(thunk: Thunk, elf_file: *Elf, writer: anytype) !void {
-        for (thunk.symbols.keys(), 0..) |sym_index, i| {
-            const sym = elf_file.getSymbol(sym_index);
+        for (thunk.symbols.keys(), 0..) |ref, i| {
+            const sym = elf_file.getSymbol(ref).?;
             const saddr = thunk.getAddress(elf_file) + @as(i64, @intCast(i * trampoline_size));
             const taddr = sym.getAddress(.{}, elf_file);
             const pages = try util.calcNumberOfPages(saddr, taddr);

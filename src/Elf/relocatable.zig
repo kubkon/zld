@@ -7,7 +7,6 @@ pub fn flush(elf_file: *Elf) !void {
     try elf_file.finalizeMergeSections();
     try initSections(elf_file);
     try elf_file.sortSections();
-    try elf_file.addAtomsToSections();
     try elf_file.calcMergeSectionSizes();
     try calcSectionSizes(elf_file);
 
@@ -33,23 +32,7 @@ fn claimUnresolved(elf_file: *Elf) void {
     defer tracy.end();
 
     for (elf_file.objects.items) |index| {
-        const object = elf_file.getFile(index).?.object;
-        const first_global = object.first_global orelse return;
-        for (object.getGlobals(), 0..) |global_index, i| {
-            const sym_idx = @as(u32, @intCast(first_global + i));
-            const sym = object.symtab.items[sym_idx];
-            if (sym.st_shndx != elf.SHN_UNDEF) continue;
-
-            const global = elf_file.getSymbol(global_index);
-            if (global.getFile(elf_file)) |_| {
-                if (global.getSourceSymbol(elf_file).st_shndx != elf.SHN_UNDEF) continue;
-            }
-
-            global.value = 0;
-            global.atom = 0;
-            global.sym_idx = sym_idx;
-            global.file = object.index;
-        }
+        elf_file.getFile(index).?.object.claimUnresolvedRelocatable(elf_file);
     }
 }
 
@@ -59,41 +42,13 @@ fn initSections(elf_file: *Elf) !void {
 
     for (elf_file.objects.items) |index| {
         const object = elf_file.getFile(index).?.object;
-
-        for (object.atoms.items) |atom_index| {
-            const atom = elf_file.getAtom(atom_index) orelse continue;
-            if (!atom.flags.alive) continue;
-            atom.out_shndx = try object.initOutputSection(elf_file, atom.getInputShdr(elf_file));
-
-            if (atom.getRelocs(elf_file).len > 0) {
-                const rela_shdr = object.getShdrs()[atom.relocs_shndx];
-                const out_rela_shndx = try object.initOutputSection(elf_file, rela_shdr);
-                const out_rela_shdr = &elf_file.sections.items(.shdr)[out_rela_shndx];
-                out_rela_shdr.sh_flags |= elf.SHF_INFO_LINK;
-                out_rela_shdr.sh_addralign = @alignOf(elf.Elf64_Rela);
-                out_rela_shdr.sh_entsize = @sizeOf(elf.Elf64_Rela);
-                elf_file.sections.items(.rela_shndx)[atom.out_shndx] = out_rela_shndx;
-            }
-        }
+        try object.initOutputSections(elf_file);
+        try object.initRelaSections(elf_file);
     }
 
     for (elf_file.merge_sections.items) |*msec| {
-        if (msec.subsections.items.len == 0) continue;
-        const name = msec.getName(elf_file);
-        const shndx = elf_file.getSectionByName(name) orelse try elf_file.addSection(.{
-            .name = name,
-            .type = msec.type,
-            .flags = msec.flags,
-        });
-        msec.out_shndx = shndx;
-
-        var entsize = elf_file.getMergeSubsection(msec.subsections.items[0]).entsize;
-        for (msec.subsections.items) |index| {
-            const msub = elf_file.getMergeSubsection(index);
-            entsize = @min(entsize, msub.entsize);
-        }
-        const shdr = &elf_file.sections.items(.shdr)[shndx];
-        shdr.sh_entsize = entsize;
+        if (msec.finalized_subsections.items.len == 0) continue;
+        try msec.initOutputSection(elf_file);
     }
 
     const needs_eh_frame = for (elf_file.objects.items) |index| {
@@ -101,13 +56,13 @@ fn initSections(elf_file: *Elf) !void {
     } else false;
     if (needs_eh_frame) {
         elf_file.eh_frame_sect_index = try elf_file.addSection(.{
-            .name = ".eh_frame",
+            .name = try elf_file.insertShString(".eh_frame"),
             .flags = elf.SHF_ALLOC,
             .type = elf.SHT_PROGBITS,
             .addralign = @alignOf(u64),
         });
         const rela_shndx = try elf_file.addSection(.{
-            .name = ".rela.eh_frame",
+            .name = try elf_file.insertShString(".rela.eh_frame"),
             .type = elf.SHT_RELA,
             .flags = elf.SHF_INFO_LINK,
             .entsize = @sizeOf(elf.Elf64_Rela),
@@ -122,28 +77,21 @@ fn initSections(elf_file: *Elf) !void {
 }
 
 fn initComdatGroups(elf_file: *Elf) !void {
-    const tracy = trace(@src());
-    defer tracy.end();
-
     const gpa = elf_file.base.allocator;
 
     for (elf_file.objects.items) |index| {
         const object = elf_file.getFile(index).?.object;
-
-        for (object.comdat_groups.items) |cg_index| {
-            const cg = elf_file.getComdatGroup(cg_index);
-            const cg_owner = elf_file.getComdatGroupOwner(cg.owner);
-            if (cg_owner.file != index) continue;
-
+        for (object.comdat_groups.items, 0..) |cg, cg_index| {
+            if (!cg.alive) continue;
             const cg_sec = try elf_file.comdat_group_sections.addOne(gpa);
             cg_sec.* = .{
                 .shndx = try elf_file.addSection(.{
-                    .name = ".group",
+                    .name = try elf_file.insertShString(".group"),
                     .type = elf.SHT_GROUP,
                     .entsize = @sizeOf(u32),
                     .addralign = @alignOf(u32),
                 }),
-                .cg_index = cg_index,
+                .cg_ref = .{ .index = @intCast(cg_index), .file = index },
             };
         }
     }
@@ -162,8 +110,8 @@ fn calcSectionSizes(elf_file: *Elf) !void {
 
         const rela_shdr = if (rela_shndx != 0) &elf_file.sections.items(.shdr)[rela_shndx] else null;
 
-        for (atoms.items) |atom_index| {
-            const atom = elf_file.getAtom(atom_index).?;
+        for (atoms.items) |ref| {
+            const atom = elf_file.getAtom(ref).?;
             const alignment = try math.powi(u64, 2, atom.alignment);
             const offset = mem.alignForward(u64, shdr.sh_size, alignment);
             const padding = offset - shdr.sh_size;
@@ -192,7 +140,7 @@ fn calcSectionSizes(elf_file: *Elf) !void {
 
     if (elf_file.shstrtab_sect_index) |index| {
         const shdr = &elf_file.sections.items(.shdr)[index];
-        shdr.sh_size = elf_file.shstrtab.buffer.items.len;
+        shdr.sh_size = elf_file.shstrtab.items.len;
     }
 }
 
@@ -205,9 +153,8 @@ fn calcComdatGroupsSizes(elf_file: *Elf) void {
         shdr.sh_size = cg.size(elf_file);
         shdr.sh_link = elf_file.symtab_sect_index.?;
 
-        const sym = elf_file.getSymbol(cg.getSymbol(elf_file));
-        shdr.sh_info = sym.getOutputSymtabIndex(elf_file) orelse
-            elf_file.sections.items(.sym_index)[sym.shndx];
+        const sym = cg.getSymbol(elf_file);
+        shdr.sh_info = sym.getOutputSymtabIndex(elf_file) orelse sym.getShndx(elf_file).?;
     }
 }
 
@@ -231,7 +178,7 @@ fn writeAtoms(elf_file: *Elf) !void {
         if (atoms.items.len == 0) continue;
         if (shdr.sh_type == elf.SHT_NOBITS) continue;
 
-        log.debug("writing atoms in '{s}' section", .{elf_file.shstrtab.getAssumeExists(shdr.sh_name)});
+        log.debug("writing atoms in '{s}' section", .{elf_file.getShString(shdr.sh_name)});
 
         var buffer = try gpa.alloc(u8, shdr.sh_size);
         defer gpa.free(buffer);
@@ -243,12 +190,12 @@ fn writeAtoms(elf_file: *Elf) !void {
             0;
         @memset(buffer, padding_byte);
 
-        for (atoms.items) |atom_index| {
-            const atom = elf_file.getAtom(atom_index).?;
+        for (atoms.items) |ref| {
+            const atom = elf_file.getAtom(ref).?;
             assert(atom.flags.alive);
             const off: u64 = @intCast(atom.value);
-            log.debug("writing ATOM(%{d},'{s}') at offset 0x{x}", .{
-                atom_index,
+            log.debug("writing ATOM({},'{s}') at offset 0x{x}", .{
+                ref,
                 atom.getName(elf_file),
                 shdr.sh_offset + off,
             });
@@ -280,8 +227,8 @@ fn writeSyntheticSections(elf_file: *Elf) !void {
         var relocs = try std.ArrayList(elf.Elf64_Rela).initCapacity(gpa, num_relocs);
         defer relocs.deinit();
 
-        for (atoms.items) |atom_index| {
-            const atom = elf_file.getAtom(atom_index) orelse continue;
+        for (atoms.items) |ref| {
+            const atom = elf_file.getAtom(ref) orelse continue;
             if (!atom.flags.alive) continue;
             try atom.writeRelocs(elf_file, &relocs);
         }
@@ -297,7 +244,7 @@ fn writeSyntheticSections(elf_file: *Elf) !void {
         mem.sort(elf.Elf64_Rela, relocs.items, {}, SortRelocs.lessThan);
 
         log.debug("writing {s} from 0x{x} to 0x{x}", .{
-            elf_file.shstrtab.getAssumeExists(shdr.sh_name),
+            elf_file.getShString(shdr.sh_name),
             shdr.sh_offset,
             shdr.sh_offset + shdr.sh_size,
         });
@@ -339,7 +286,7 @@ fn writeSyntheticSections(elf_file: *Elf) !void {
 
     if (elf_file.shstrtab_sect_index) |shndx| {
         const shdr = elf_file.sections.items(.shdr)[shndx];
-        try elf_file.base.file.pwriteAll(elf_file.shstrtab.buffer.items, shdr.sh_offset);
+        try elf_file.base.file.pwriteAll(elf_file.shstrtab.items, shdr.sh_offset);
     }
 }
 
