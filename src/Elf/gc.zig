@@ -60,7 +60,8 @@ fn collectRoots(roots: *std.ArrayList(*Atom), elf_file: *Elf) !void {
         // Mark every atom referenced by CIE as alive.
         for (object.cies.items) |cie| {
             for (cie.getRelocs(elf_file)) |rel| {
-                const sym = &object.symbols.items[rel.r_sym()];
+                const ref = object.resolveSymbol(rel.r_sym(), elf_file);
+                const sym = elf_file.getSymbol(ref) orelse continue;
                 try markSymbol(sym, roots, elf_file);
             }
         }
@@ -97,14 +98,16 @@ fn markLive(atom: *Atom, elf_file: *Elf) void {
 
     for (atom.getFdes(elf_file)) |fde| {
         for (fde.getRelocs(elf_file)[1..]) |rel| {
-            const target_sym = object.symbols.items[rel.r_sym()];
+            const target_ref = object.resolveSymbol(rel.r_sym(), elf_file);
+            const target_sym = elf_file.getSymbol(target_ref) orelse continue;
             const target_atom = target_sym.getAtom(elf_file) orelse continue;
             if (markAtom(target_atom)) markLive(target_atom, elf_file);
         }
     }
 
     for (atom.getRelocs(elf_file)) |rel| {
-        const target_sym = object.symbols.items[rel.r_sym()];
+        const target_ref = object.resolveSymbol(rel.r_sym(), elf_file);
+        const target_sym = elf_file.getSymbol(target_ref) orelse continue;
         if (target_sym.getMergeSubsection(elf_file)) |msub| {
             msub.alive = true;
             continue;
