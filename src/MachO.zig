@@ -3308,7 +3308,10 @@ pub const UndefRefs = union(enum) {
     refs: std.ArrayListUnmanaged(Ref),
 
     pub fn deinit(self: *UndefRefs, allocator: Allocator) void {
-        self.refs.deinit(allocator);
+        switch (self.*) {
+            .refs => |*refs| refs.deinit(allocator),
+            else => {},
+        }
     }
 };
 
