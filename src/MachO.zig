@@ -24,7 +24,7 @@ resolver: SymbolResolver = .{},
 
 /// This table will be populated after `scanRelocs` has run.
 /// Key is symbol index.
-undefs: std.AutoArrayHashMapUnmanaged(SymbolResolver.Index, std.ArrayListUnmanaged(Ref)) = .{},
+undefs: std.AutoArrayHashMapUnmanaged(SymbolResolver.Index, UndefRefs) = .{},
 undefs_mutex: std.Thread.Mutex = .{},
 
 dupes: std.AutoArrayHashMapUnmanaged(SymbolResolver.Index, std.ArrayListUnmanaged(File.Index)) = .{},
@@ -1227,6 +1227,9 @@ fn scanRelocs(self: *MachO) !void {
 
     if (self.has_errors.swap(false, .seq_cst)) return error.FlushFailed;
 
+    if (self.getInternalObject()) |obj| {
+        try obj.checkUndefs(self);
+    }
     try self.reportUndefs();
 
     for (self.objects.items) |index| {
@@ -1292,29 +1295,43 @@ fn reportUndefs(self: *MachO) !void {
         }
     }.lessThan;
 
-    for (self.undefs.values()) |*refs| {
-        mem.sort(Ref, refs.items, {}, refLessThan);
-    }
+    for (self.undefs.values()) |*undefs| switch (undefs.*) {
+        .refs => |refs| mem.sort(Ref, refs.items, {}, refLessThan),
+        else => {},
+    };
 
     for (keys.items) |key| {
         const undef_sym = self.resolver.keys.items[key - 1];
         const notes = self.undefs.get(key).?;
-        const nnotes = @min(notes.items.len, max_notes) + @intFromBool(notes.items.len > max_notes);
+        const nnotes = nnotes: {
+            const nnotes = switch (notes) {
+                .refs => |refs| refs.items.len,
+                else => 1,
+            };
+            break :nnotes @min(nnotes, max_notes) + @intFromBool(nnotes > max_notes);
+        };
 
         const err = try addFn(&self.base, nnotes);
         try err.addMsg("undefined symbol: {s}", .{undef_sym.getName(self)});
 
-        var inote: usize = 0;
-        while (inote < @min(notes.items.len, max_notes)) : (inote += 1) {
-            const note = notes.items[inote];
-            const file = self.getFile(note.file).?;
-            const atom = note.getAtom(self).?;
-            try err.addNote("referenced by {}:{s}", .{ file.fmtPath(), atom.getName(self) });
-        }
+        switch (notes) {
+            .force_undefined => try err.addNote("referenced with linker flag -u", .{}),
+            .entry => try err.addNote("referenced with linker flag -e", .{}),
+            .dyld_stub_binder, .objc_msgsend => try err.addNote("referenced implicitly", .{}),
+            .refs => |refs| {
+                var inote: usize = 0;
+                while (inote < @min(refs.items.len, max_notes)) : (inote += 1) {
+                    const ref = refs.items[inote];
+                    const file = self.getFile(ref.file).?;
+                    const atom = ref.getAtom(self).?;
+                    try err.addNote("referenced by {}:{s}", .{ file.fmtPath(), atom.getName(self) });
+                }
 
-        if (notes.items.len > max_notes) {
-            const remaining = notes.items.len - max_notes;
-            try err.addNote("referenced {d} more times", .{remaining});
+                if (refs.items.len > max_notes) {
+                    const remaining = refs.items.len - max_notes;
+                    try err.addNote("referenced {d} more times", .{remaining});
+                }
+            },
         }
     }
     return error.UndefinedSymbols;
@@ -3281,6 +3298,18 @@ pub const SymbolResolver = struct {
     };
 
     pub const Index = u32;
+};
+
+pub const UndefRefs = union(enum) {
+    force_undefined,
+    entry,
+    dyld_stub_binder,
+    objc_msgsend,
+    refs: std.ArrayListUnmanaged(Ref),
+
+    pub fn deinit(self: *UndefRefs, allocator: Allocator) void {
+        self.refs.deinit(allocator);
+    }
 };
 
 pub const String = struct {
