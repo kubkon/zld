@@ -308,9 +308,9 @@ fn reportUndefSymbol(self: Atom, rel: Relocation, macho_file: *MachO) !bool {
         const gpa = macho_file.base.allocator;
         const gop = try macho_file.undefs.getOrPut(gpa, file.getGlobals()[rel.target]);
         if (!gop.found_existing) {
-            gop.value_ptr.* = .{};
+            gop.value_ptr.* = .{ .refs = .{} };
         }
-        try gop.value_ptr.append(gpa, .{ .index = self.atom_index, .file = self.file });
+        try gop.value_ptr.refs.append(gpa, .{ .index = self.atom_index, .file = self.file });
         return true;
     }
 
