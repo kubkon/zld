@@ -1,6 +1,6 @@
 # zld
 
-Zig's ld drop-in replacement, called ZigLD or `zld` for short
+`zld` is a drop-in replacement for your system linker `ld` written in Zig.
 
 ## Quick start guide
 
