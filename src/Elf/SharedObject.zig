@@ -167,12 +167,8 @@ fn parseVersions(self: *SharedObject, elf_file: *Elf, file: std.fs.File, opts: s
         defer gpa.free(versyms_raw);
         const nversyms = @divExact(versyms_raw.len, @sizeOf(elf.Elf64_Versym));
         const versyms = @as([*]align(1) const elf.Elf64_Versym, @ptrCast(versyms_raw.ptr))[0..nversyms];
-        for (versyms) |ver| {
-            const normalized_ver = if (ver & elf.VERSYM_VERSION >= self.verstrings.items.len - 1)
-                elf.VER_NDX_GLOBAL
-            else
-                ver;
-            self.versyms.appendAssumeCapacity(normalized_ver);
+        for (versyms, opts.symtab) |ver, esym| {
+            self.versyms.appendAssumeCapacity(if (esym.st_shndx == elf.SHN_UNDEF) elf.VER_NDX_GLOBAL else ver);
         }
     } else for (0..opts.symtab.len) |_| {
         self.versyms.appendAssumeCapacity(elf.VER_NDX_GLOBAL);
