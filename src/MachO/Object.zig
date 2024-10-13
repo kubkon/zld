@@ -313,7 +313,7 @@ fn initSubsections(self: *Object, allocator: Allocator, nlists: anytype) !void {
         } else nlists.len;
 
         if (nlist_start == nlist_end or nlists[nlist_start].nlist.n_value > sect.addr) {
-            const name = try std.fmt.allocPrintZ(allocator, "{s}${s}", .{ sect.segName(), sect.sectName() });
+            const name = try std.fmt.allocPrintZ(allocator, "{s}${s}$start", .{ sect.segName(), sect.sectName() });
             defer allocator.free(name);
             const size = if (nlist_start == nlist_end) sect.size else nlists[nlist_start].nlist.n_value - sect.addr;
             const atom_index = try self.addAtom(allocator, .{
@@ -364,6 +364,25 @@ fn initSubsections(self: *Object, allocator: Allocator, nlists: anytype) !void {
                 self.symtab.items(.size)[nlists[i].idx] = size;
             }
         }
+
+        // Create a dummy atom marking the end of a section.
+        // Some compilers including Go may emit symbols that are zero-sized and lie at the section
+        // boundary. In order to properly attach such a symbol to an atom (in this case, a dummy
+        // zero-sized atom), we need to create it first.
+        const name = try std.fmt.allocPrintZ(allocator, "{s}${s}$stop", .{ sect.segName(), sect.sectName() });
+        defer allocator.free(name);
+        const atom_index = try self.addAtom(allocator, .{
+            .name = try self.addString(allocator, name),
+            .n_sect = @intCast(n_sect),
+            .off = sect.size,
+            .size = 0,
+            .alignment = sect.@"align",
+        });
+        try self.atoms_indexes.append(allocator, atom_index);
+        try subsections.append(allocator, .{
+            .atom = atom_index,
+            .off = sect.size,
+        });
     }
 }
 
@@ -792,7 +811,17 @@ fn linkNlistToAtom(self: *Object, macho_file: *MachO) !void {
     defer tracy.end();
     for (self.symtab.items(.nlist), self.symtab.items(.atom)) |nlist, *atom| {
         if (!nlist.stab() and nlist.sect()) {
-            if (self.findAtomInSection(nlist.n_value, nlist.n_sect - 1)) |atom_index| {
+            const header = self.sections.items(.header)[nlist.n_sect - 1];
+            const subsections = self.sections.items(.subsections)[nlist.n_sect - 1].items;
+            if (nlist.n_value == header.addr) {
+                // First atom is guaranteed to start at section start address.
+                atom.* = subsections[0].atom;
+            } else if (nlist.n_value == header.addr + header.size) {
+                // Last atom is guaranteed to start at section end address and be
+                // of size 0.
+                atom.* = subsections[subsections.len - 1].atom;
+                assert(self.getAtom(atom.*).?.size == 0);
+            } else if (self.findAtomInSection(nlist.n_value, nlist.n_sect - 1)) |atom_index| {
                 atom.* = atom_index;
             } else {
                 macho_file.base.fatal("{}: symbol {s} not attached to any (sub)section", .{
