@@ -57,6 +57,8 @@ const usage =
     \\-o [path]                          Specify output path for the final artifact
     \\-ObjC                              Force load all members of static archives that implement an
     \\                                   Objective-C class or category
+    \\-Ox                                Set optimisation level from values: [0, 1, 2].
+    \\                                   This option is currently unused.
     \\-pagezero_size [value]             Size of the __PAGEZERO segment in hexademical notation
     \\-platform_version [platform] [min_version] [sdk_version]
     \\                                   Sets the platform, oldest supported version of that platform and 
@@ -155,6 +157,14 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             ctx.fatal(usage ++ "\n", .{cmd});
         } else if (p.arg2("debug-log")) |scope| {
             try ctx.log_scopes.append(scope);
+        } else if (p.arg1("O")) |level_string| {
+            // Purposely ignored but still validate for acceptable values.
+            const level = std.fmt.parseUnsigned(u8, level_string, 0) catch
+                ctx.fatal("Could not parse value '{s}' into integer\n", .{level_string});
+            switch (level) {
+                0...2 => {},
+                else => ctx.fatal("Invalid optimisation level value '{d}', allowed [0, 1, 2]", .{level}),
+            }
         } else if (p.arg2("entitlements")) |path| {
             opts.entitlements = path;
         } else if (p.flag1("v")) {
