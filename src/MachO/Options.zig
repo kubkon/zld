@@ -65,7 +65,7 @@ const usage =
     \\-reexport-l[name]                  Link against library and re-export it for the clients
     \\  -reexport_library [name]
     \\-rpath [path]                      Specify runtime path
-    \\-S                                 Do not put debug information (STABS or DWARF) in the output file
+    \\-S                                 Do not put debug information (STABS or DWARF) in the symbol table
     \\-search_paths_first                Search each dir in library search paths for `libx.dylib` then `libx.a`
     \\-search_dylibs_first               Search `libx.dylib` in each dir in library search paths, then `libx.a`
     \\-stack_size [value]                Size of the default stack in hexadecimal notation
@@ -74,11 +74,12 @@ const usage =
     \\-u [name]                          Specifies symbol which has to be resolved at link time for the link to succeed
     \\-undefined [value]                 Specify how undefined symbols are to be treated: 
     \\                                   error (default), warning, suppress, or dynamic_lookup.
+    \\-v                                 Print version
+    \\--verbose                          Print full linker invocation to stderr
     \\-weak_framework [name]             Link against framework and mark it and all referenced symbols as weak
     \\-weak-l[name]                      Link against library and mark it and all referenced symbols as weak
     \\  -weak_library [name]
-    \\-v                                 Print version
-    \\--verbose                          Print full linker invocation to stderr
+    \\-x                                 Do not put non-global symbols in the symbol table
     \\
     \\ld64.zld: supported targets: macho-x86-64, macho-arm64
     \\ld64.zld: supported emulations: macho_x86_64, macho_arm64
@@ -105,6 +106,7 @@ rpath_list: []const []const u8,
 syslibroot: ?[]const u8 = null,
 stack_size: ?u64 = null,
 strip: bool = false,
+strip_locals: bool = false,
 entry: ?[]const u8 = null,
 force_undefined_symbols: []const []const u8 = &[0][]const u8{},
 current_version: ?Version = null,
@@ -240,6 +242,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             try force_undefined_symbols.put(name, {});
         } else if (p.flag1("S")) {
             opts.strip = true;
+        } else if (p.flag1("x")) {
+            opts.strip_locals = true;
         } else if (p.flag1("r")) {
             opts.relocatable = true;
         } else if (p.flag1("all_load")) {

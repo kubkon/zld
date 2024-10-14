@@ -1703,11 +1703,35 @@ fn addSection(self: *Object, allocator: Allocator, segname: []const u8, sectname
     return n_sect;
 }
 
-pub fn calcSymtabSize(self: *Object, macho_file: *MachO) void {
+/// If -x flag was passed to the linker, we were asked to strip local symbols.
+/// However, in -r mode, we cannot really strip locals yet since this would potentially
+/// completely eliminate ability to dead strip by the linker at a later stage.
+/// Therefore, following Apple ld, we rename every local symbol to a unique
+/// temp name lxxx where xxx is a global integer id.
+pub fn stripLocalsRelocatable(self: *Object, macho_file: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    const is_relocatable = macho_file.options.relocatable;
+    assert(macho_file.options.strip_locals);
+    const gpa = macho_file.base.allocator;
+
+    for (self.symbols.items, 0..) |*sym, i| {
+        const ref = self.getSymbolRef(@intCast(i), macho_file);
+        const file = ref.getFile(macho_file) orelse continue;
+        if (file.getIndex() != self.index) continue;
+        if (sym.getAtom(macho_file)) |atom| if (!atom.alive.load(.seq_cst)) continue;
+        if (sym.isSymbolStab(macho_file)) continue;
+        if (!sym.isLocal()) continue;
+        // Pad to
+        const name = try std.fmt.allocPrintZ(gpa, "l{d:0>3}", .{macho_file.strip_locals_counter.fetchAdd(1, .seq_cst)});
+        defer gpa.free(name);
+        sym.name = try self.addString(gpa, name);
+    }
+}
+
+pub fn calcSymtabSize(self: *Object, macho_file: *MachO) void {
+    const tracy = trace(@src());
+    defer tracy.end();
 
     for (self.symbols.items, 0..) |*sym, i| {
         const ref = self.getSymbolRef(@intCast(i), macho_file);
@@ -1717,12 +1741,14 @@ pub fn calcSymtabSize(self: *Object, macho_file: *MachO) void {
         if (sym.isSymbolStab(macho_file)) continue;
         const name = sym.getName(macho_file);
         if (name.len == 0) continue;
-        // TODO in -r mode, we actually want to merge symbol names and emit only one
-        // work it out when emitting relocs
-        if ((name[0] == 'L' or name[0] == 'l' or
-            mem.startsWith(u8, name, "_OBJC_SELECTOR_REFERENCES_")) and
-            !is_relocatable)
-            continue;
+        if (!macho_file.options.relocatable) {
+            // If -x flag was passed and we are not emitting a relocatable object file,
+            // we simply skip every local symbol.
+            if (macho_file.options.strip_locals and sym.isLocal()) continue;
+            // TODO in -r mode, we actually want to merge symbol names and emit only one
+            // work it out when emitting relocs
+            if ((name[0] == 'L' or name[0] == 'l' or mem.startsWith(u8, name, "_OBJC_SELECTOR_REFERENCES_"))) continue;
+        }
         sym.flags.output_symtab = true;
         if (sym.isLocal()) {
             sym.addExtra(.{ .symtab = self.output_symtab_ctx.nlocals }, macho_file);
