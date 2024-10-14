@@ -1354,146 +1354,188 @@ fn parseDebugInfo(self: *Object, macho_file: *MachO) !void {
 
     const gpa = macho_file.base.allocator;
 
-    var debug_info_index: ?usize = null;
-    var debug_abbrev_index: ?usize = null;
-    var debug_str_index: ?usize = null;
+    var dw_info = Dwarf.Sections{};
+    defer dw_info.deinit(gpa);
 
-    for (self.sections.items(.header), 0..) |sect, index| {
+    for (self.sections.items(.header), 0..) |sect, i| {
         if (sect.attrs() & macho.S_ATTR_DEBUG == 0) continue;
-        if (mem.eql(u8, sect.sectName(), "__debug_info")) debug_info_index = index;
-        if (mem.eql(u8, sect.sectName(), "__debug_abbrev")) debug_abbrev_index = index;
-        if (mem.eql(u8, sect.sectName(), "__debug_str")) debug_str_index = index;
+        const index: u32 = @intCast(i);
+        if (mem.eql(u8, sect.sectName(), "__debug_info")) {
+            try dw_info.sections.putNoClobber(gpa, .debug_info, .{ .index = index });
+        }
+        if (mem.eql(u8, sect.sectName(), "__debug_abbrev")) {
+            try dw_info.sections.putNoClobber(gpa, .debug_abbrev, .{ .index = index });
+        }
+        if (mem.eql(u8, sect.sectName(), "__debug_str")) {
+            try dw_info.sections.putNoClobber(gpa, .debug_str, .{ .index = index });
+        }
+        if (mem.eql(u8, sect.sectName(), "__debug_str_offs")) {
+            try dw_info.sections.putNoClobber(gpa, .debug_str_offsets, .{ .index = index });
+        }
     }
 
-    if (debug_info_index == null or debug_abbrev_index == null) return;
+    if (dw_info.sections.keys().len == 0) return;
 
-    const slice = self.sections.slice();
-    const file = macho_file.getFileHandle(self.file_handle);
-    const debug_info = blk: {
-        const sect = slice.items(.header)[debug_info_index.?];
-        const data = try gpa.alloc(u8, sect.size);
-        const amt = try file.preadAll(data, sect.offset + self.offset);
-        if (amt != data.len) return error.InputOutput;
-        break :blk data;
-    };
-    defer gpa.free(debug_info);
-    const debug_abbrev = blk: {
-        const sect = slice.items(.header)[debug_abbrev_index.?];
-        const data = try gpa.alloc(u8, sect.size);
-        const amt = try file.preadAll(data, sect.offset + self.offset);
-        if (amt != data.len) return error.InputOutput;
-        break :blk data;
-    };
-    defer gpa.free(debug_abbrev);
-    const debug_str = if (debug_str_index) |sid| blk: {
-        const sect = slice.items(.header)[sid];
-        const data = try gpa.alloc(u8, sect.size);
-        const amt = try file.preadAll(data, sect.offset + self.offset);
-        if (amt != data.len) return error.InputOutput;
-        break :blk data;
-    } else &[0]u8{};
-    defer gpa.free(debug_str);
+    for (dw_info.sections.values()) |*sect| {
+        try sect.readData(gpa, macho_file.getFileHandle(self.file_handle), self.*);
+    }
 
     self.compile_unit = self.findCompileUnit(.{
         .gpa = gpa,
-        .debug_info = debug_info,
-        .debug_abbrev = debug_abbrev,
-        .debug_str = debug_str,
-    }) catch null; // TODO figure out what errors are fatal, and when we silently fail
+        .dw_info = dw_info,
+    }, macho_file) catch |err| switch (err) {
+        error.ParseFailed => return error.ParseFailed,
+        else => |e| {
+            macho_file.base.fatal("{}: unexpected error when parsing DWARF info: {s}", .{ self.fmtPath(), @errorName(e) });
+            return error.ParseFailed;
+        },
+    };
 }
 
 fn findCompileUnit(self: *Object, args: struct {
     gpa: Allocator,
-    debug_info: []const u8,
-    debug_abbrev: []const u8,
-    debug_str: []const u8,
-}) !CompileUnit {
-    var cu_wip: struct {
-        comp_dir: ?[:0]const u8 = null,
-        tu_name: ?[:0]const u8 = null,
-    } = .{};
-
+    dw_info: Dwarf.Sections,
+}, macho_file: *MachO) !CompileUnit {
     const gpa = args.gpa;
-    var info_reader = dwarf.InfoReader{ .bytes = args.debug_info, .strtab = args.debug_str };
-    var abbrev_reader = dwarf.AbbrevReader{ .bytes = args.debug_abbrev };
+    var info_reader = Dwarf.InfoReader{ .ctx = args.dw_info };
+    var abbrev_reader = Dwarf.AbbrevReader{ .ctx = args.dw_info };
 
-    const cuh = try info_reader.readCompileUnitHeader();
+    const cuh = switch (try info_reader.readCompileUnitHeader()) {
+        .ok => |cuh| cuh,
+        .wrong_version => |ver| {
+            macho_file.base.fatal("{}: unhandled or unknown DWARF version detected: {d}", .{ self.fmtPath(), ver });
+            return error.ParseFailed;
+        },
+    };
     try abbrev_reader.seekTo(cuh.debug_abbrev_offset);
 
-    const cu_decl = (try abbrev_reader.readDecl()) orelse return error.Eof;
-    if (cu_decl.tag != dwarf.TAG.compile_unit) return error.UnexpectedTag;
+    const cu_decl = (try abbrev_reader.readDecl()) orelse return error.UnexpectedEndOfFile;
+    if (cu_decl.tag != Dwarf.TAG.compile_unit) {
+        macho_file.base.fatal("{}: unexpected DW_TAG_xxx value detected as the first decl: expected 0x{x}, found 0x{x}", .{
+            self.fmtPath(),
+            Dwarf.TAG.compile_unit,
+            cu_decl.tag,
+        });
+        return error.ParseFailed;
+    }
 
-    try info_reader.seekToDie(cu_decl.code, cuh, &abbrev_reader);
-
-    while (try abbrev_reader.readAttr()) |attr| switch (attr.at) {
-        dwarf.AT.name => {
-            cu_wip.tu_name = try info_reader.readString(attr.form, cuh);
+    switch (try info_reader.seekToDie(cu_decl.code, cuh, &abbrev_reader)) {
+        .ok => {},
+        .unknown_form => |form| {
+            macho_file.base.fatal("{}: unexpected DW_FORM_xxx value detected: 0x{x}", .{ self.fmtPath(), form });
+            return error.ParseFailed;
         },
-        dwarf.AT.comp_dir => {
-            cu_wip.comp_dir = try info_reader.readString(attr.form, cuh);
+    }
+
+    const Pos = struct {
+        pos: usize,
+        form: Dwarf.Form,
+    };
+
+    var saved: struct {
+        tu_name: ?Pos,
+        comp_dir: ?Pos,
+        str_offsets_base: ?Pos,
+    } = .{
+        .tu_name = null,
+        .comp_dir = null,
+        .str_offsets_base = null,
+    };
+
+    while (try abbrev_reader.readAttr()) |attr| {
+        switch (attr.at) {
+            Dwarf.AT.name => saved.tu_name = .{ .pos = info_reader.pos, .form = attr.form },
+            Dwarf.AT.comp_dir => saved.comp_dir = .{ .pos = info_reader.pos, .form = attr.form },
+            Dwarf.AT.str_offsets_base => saved.str_offsets_base = .{ .pos = info_reader.pos, .form = attr.form },
+            else => {},
+        }
+        switch (try info_reader.skip(attr.form, cuh)) {
+            .ok => {},
+            .unknown_form => |form| {
+                macho_file.base.fatal("{}: unexpected DW_FORM_xxx value detected: 0x{x}", .{ self.fmtPath(), form });
+                return error.ParseFailed;
+            },
+        }
+    }
+
+    const readDwarfString = struct {
+        fn readDwarfString(
+            reader: *Dwarf.InfoReader,
+            header: Dwarf.CompileUnitHeader,
+            pos: Pos,
+            base: u64,
+        ) !union(enum) {
+            ok: [:0]const u8,
+            invalid_form: Dwarf.Form,
+        } {
+            try reader.seekTo(pos.pos);
+            switch (pos.form) {
+                Dwarf.FORM.strp,
+                Dwarf.FORM.string,
+                => return .{ .ok = try reader.readString(pos.form, header) },
+                Dwarf.FORM.strx,
+                Dwarf.FORM.strx1,
+                Dwarf.FORM.strx2,
+                Dwarf.FORM.strx3,
+                Dwarf.FORM.strx4,
+                => return .{ .ok = try reader.readStringIndexed(pos.form, header, base) },
+                else => return .{ .invalid_form = pos.form },
+            }
+        }
+    }.readDwarfString;
+
+    if (saved.comp_dir == null) {
+        macho_file.base.fatal("{}: missing DW_AT_comp_dir attribute", .{self.fmtPath()});
+        return error.ParseFailed;
+    }
+    if (saved.tu_name == null) {
+        macho_file.base.fatal("{}: missing DW_AT_name attribute", .{self.fmtPath()});
+        return error.ParseFailed;
+    }
+
+    const str_offsets_base: ?u64 = if (saved.str_offsets_base) |str_offsets_base| str_offsets_base: {
+        if (cuh.version < 5) break :str_offsets_base null;
+        try info_reader.seekTo(str_offsets_base.pos);
+        break :str_offsets_base try info_reader.readOffset(cuh.format);
+    } else null;
+
+    for (&[_]Pos{ saved.comp_dir.?, saved.tu_name.? }) |pos| {
+        if (cuh.version >= 5 and needsStrOffsetsBase(pos.form) and str_offsets_base == null) {
+            macho_file.base.fatal("{}: missing DW_AT_str_offsets_base attribute", .{self.fmtPath()});
+            return error.ParseFailed;
+        }
+    }
+
+    const comp_dir = switch (try readDwarfString(&info_reader, cuh, saved.comp_dir.?, str_offsets_base orelse 0)) {
+        .ok => |str| str,
+        .invalid_form => |form| {
+            macho_file.base.fatal("{}: invalid form when parsing DWARF string: 0x{x}", .{ self.fmtPath(), form });
+            return error.ParseFailed;
         },
-        else => switch (attr.form) {
-            dwarf.FORM.sec_offset,
-            dwarf.FORM.ref_addr,
-            => {
-                _ = try info_reader.readOffset(cuh.format);
-            },
-
-            dwarf.FORM.addr => {
-                _ = try info_reader.readNBytes(cuh.address_size);
-            },
-
-            dwarf.FORM.block1,
-            dwarf.FORM.block2,
-            dwarf.FORM.block4,
-            dwarf.FORM.block,
-            => {
-                _ = try info_reader.readBlock(attr.form);
-            },
-
-            dwarf.FORM.exprloc => {
-                _ = try info_reader.readExprLoc();
-            },
-
-            dwarf.FORM.flag_present => {},
-
-            dwarf.FORM.data1,
-            dwarf.FORM.ref1,
-            dwarf.FORM.flag,
-            dwarf.FORM.data2,
-            dwarf.FORM.ref2,
-            dwarf.FORM.data4,
-            dwarf.FORM.ref4,
-            dwarf.FORM.data8,
-            dwarf.FORM.ref8,
-            dwarf.FORM.ref_sig8,
-            dwarf.FORM.udata,
-            dwarf.FORM.ref_udata,
-            dwarf.FORM.sdata,
-            => {
-                _ = try info_reader.readConstant(attr.form);
-            },
-
-            dwarf.FORM.strp,
-            dwarf.FORM.string,
-            => {
-                _ = try info_reader.readString(attr.form, cuh);
-            },
-
-            else => {
-                // TODO actual errors?
-                log.err("unhandled DW_FORM_* value with identifier {x}", .{attr.form});
-                return error.UnhandledForm;
-            },
+    };
+    const tu_name = switch (try readDwarfString(&info_reader, cuh, saved.tu_name.?, str_offsets_base orelse 0)) {
+        .ok => |str| str,
+        .invalid_form => |form| {
+            macho_file.base.fatal("{}: invalid form when parsing DWARF string: 0x{x}", .{ self.fmtPath(), form });
+            return error.ParseFailed;
         },
     };
 
-    if (cu_wip.comp_dir == null) return error.MissingCompDir;
-    if (cu_wip.tu_name == null) return error.MissingTuName;
-
     return .{
-        .comp_dir = try self.addString(gpa, cu_wip.comp_dir.?),
-        .tu_name = try self.addString(gpa, cu_wip.tu_name.?),
+        .comp_dir = try self.addString(gpa, comp_dir),
+        .tu_name = try self.addString(gpa, tu_name),
+    };
+}
+
+fn needsStrOffsetsBase(form: Dwarf.Form) bool {
+    return switch (form) {
+        Dwarf.FORM.strx,
+        Dwarf.FORM.strx1,
+        Dwarf.FORM.strx2,
+        Dwarf.FORM.strx3,
+        Dwarf.FORM.strx4,
+        => true,
+        else => false,
     };
 }
 
@@ -3127,7 +3169,6 @@ const aarch64 = struct {
 };
 
 const assert = std.debug.assert;
-const dwarf = @import("dwarf.zig");
 const eh_frame = @import("eh_frame.zig");
 const log = std.log.scoped(.link);
 const macho = std.macho;
@@ -3139,6 +3180,7 @@ const std = @import("std");
 const Allocator = mem.Allocator;
 const Atom = @import("Atom.zig");
 const Cie = eh_frame.Cie;
+const Dwarf = @import("Dwarf.zig");
 const Fde = eh_frame.Fde;
 const File = @import("file.zig").File;
 const LoadCommandIterator = macho.LoadCommandIterator;
