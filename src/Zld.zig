@@ -150,6 +150,13 @@ pub fn ArgParser(comptime Ctx: type) type {
             return null;
         }
 
+        pub fn argLLVM(p: *Self) ?[]const u8 {
+            if (p.flag1("mllvm")) {
+                return p.it.nextOrFatal(p.ctx);
+            }
+            return null;
+        }
+
         fn argPrefix(p: *Self, comptime pat: []const u8, comptime prefix: []const u8) ?[]const u8 {
             if (mem.startsWith(u8, p.arg, prefix)) {
                 const actual_arg = p.arg[prefix.len..];

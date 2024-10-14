@@ -149,6 +149,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         .framework_dirs = undefined,
         .rpath_list = undefined,
     };
+    var unknown_options = std.ArrayList(u8).init(arena);
 
     var it = Zld.Options.ArgsIterator{ .args = args };
     var p = Zld.ArgParser(@TypeOf(ctx)){ .it = &it, .ctx = ctx };
@@ -157,14 +158,6 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             ctx.fatal(usage ++ "\n", .{cmd});
         } else if (p.arg2("debug-log")) |scope| {
             try ctx.log_scopes.append(scope);
-        } else if (p.arg1("O")) |level_string| {
-            // Purposely ignored but still validate for acceptable values.
-            const level = std.fmt.parseUnsigned(u8, level_string, 0) catch
-                ctx.fatal("Could not parse value '{s}' into integer\n", .{level_string});
-            switch (level) {
-                0...2 => {},
-                else => ctx.fatal("Invalid optimisation level value '{d}', allowed [0, 1, 2]", .{level}),
-            }
         } else if (p.arg2("entitlements")) |path| {
             opts.entitlements = path;
         } else if (p.flag1("v")) {
@@ -329,10 +322,24 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             opts.namespace = .flat;
         } else if (p.flag1("ObjC")) {
             opts.force_load_objc = true;
+        } else if (p.arg1("O")) |level_string| {
+            // Purposely ignored but still validate for acceptable values.
+            const level = std.fmt.parseUnsigned(u8, level_string, 0) catch
+                ctx.fatal("Could not parse value '{s}' into integer\n", .{level_string});
+            switch (level) {
+                0...2 => {},
+                else => ctx.fatal("Invalid optimisation level value '{d}', allowed [0, 1, 2]", .{level}),
+            }
         } else if (p.flag1("adhoc_codesign")) {
             opts.adhoc_codesign = true;
         } else if (p.flag1("no_adhoc_codesign")) {
             opts.adhoc_codesign = false;
+        } else if (p.argLLVM()) |opt| {
+            // Skip any LTO flags since we cannot handle it at the moment anyhow.
+            std.log.debug("TODO unimplemented -mllvm {s} option", .{opt});
+        } else if (mem.startsWith(u8, p.arg, "-")) {
+            try unknown_options.appendSlice(p.arg);
+            try unknown_options.append('\n');
         } else {
             try positionals.append(.{ .path = p.arg, .tag = .obj });
         }
@@ -354,7 +361,13 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         ctx.print("{s}\n", .{version});
     }
 
-    if (positionals.items.len == 0) ctx.fatal("Expected at least one positional argument\n", .{});
+    if (unknown_options.items.len > 0) {
+        ctx.fatal("Unknown options:\n{s}", .{unknown_options.items});
+    }
+
+    if (positionals.items.len == 0) {
+        ctx.fatal("Expected at least one positional argument\n", .{});
+    }
 
     if (opts.namespace == .two_level) switch (opts.undefined_treatment) {
         .warn, .suppress => |x| ctx.fatal("illegal flags: '-undefined {s}' with '-two_levelnamespace'\n", .{

@@ -130,12 +130,12 @@ fn calcSectionSizes(macho_file: *MachO) !void {
             }
         }
 
-        for (macho_file.objects.items) |index| {
+        if (macho_file.options.strip_locals) for (macho_file.objects.items) |index| {
             macho_file.base.thread_pool.spawnWg(&wg, stripLocalsWorker, .{
                 macho_file.getFile(index).?.object,
                 macho_file,
             });
-        }
+        };
 
         macho_file.base.thread_pool.spawnWg(&wg, MachO.updateLinkeditSizeWorker, .{ macho_file, .data_in_code });
     }
