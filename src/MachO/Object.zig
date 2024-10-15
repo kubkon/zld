@@ -366,18 +366,7 @@ fn initSubsections(self: *Object, allocator: Allocator, nlists: anytype) !void {
         }
 
         // Create a dummy atom marking the end of a section.
-        // Some compilers including Go may emit symbols that are zero-sized and lie at the section
-        // boundary. In order to properly attach such a symbol to an atom (in this case, a dummy
-        // zero-sized atom), we need to create it first.
-        const name = try std.fmt.allocPrintZ(allocator, "{s}${s}$stop", .{ sect.segName(), sect.sectName() });
-        defer allocator.free(name);
-        const atom_index = try self.addAtom(allocator, .{
-            .name = try self.addString(allocator, name),
-            .n_sect = @intCast(n_sect),
-            .off = sect.size,
-            .size = 0,
-            .alignment = sect.@"align",
-        });
+        const atom_index = try self.addSectionStopAtom(allocator, @intCast(n_sect));
         try self.atoms_indexes.append(allocator, atom_index);
         try subsections.append(allocator, .{
             .atom = atom_index,
@@ -399,18 +388,22 @@ fn initSections(self: *Object, allocator: Allocator, nlists: anytype) !void {
         if (isFixedSizeLiteral(sect)) continue;
         if (isPtrLiteral(sect)) continue;
 
-        const name = try std.fmt.allocPrintZ(allocator, "{s}${s}", .{ sect.segName(), sect.sectName() });
-        defer allocator.free(name);
+        const subsections = &slice.items(.subsections)[n_sect];
 
-        const atom_index = try self.addAtom(allocator, .{
-            .name = try self.addString(allocator, name),
-            .n_sect = @intCast(n_sect),
-            .off = 0,
-            .size = sect.size,
-            .alignment = sect.@"align",
-        });
-        try self.atoms_indexes.append(allocator, atom_index);
-        try slice.items(.subsections)[n_sect].append(allocator, .{ .atom = atom_index, .off = 0 });
+        {
+            const name = try std.fmt.allocPrintZ(allocator, "{s}${s}", .{ sect.segName(), sect.sectName() });
+            defer allocator.free(name);
+
+            const atom_index = try self.addAtom(allocator, .{
+                .name = try self.addString(allocator, name),
+                .n_sect = @intCast(n_sect),
+                .off = 0,
+                .size = sect.size,
+                .alignment = sect.@"align",
+            });
+            try self.atoms_indexes.append(allocator, atom_index);
+            try subsections.append(allocator, .{ .atom = atom_index, .off = 0 });
+        }
 
         const nlist_start = for (nlists, 0..) |nlist, i| {
             if (nlist.nlist.n_sect - 1 == n_sect) break i;
@@ -436,6 +429,14 @@ fn initSections(self: *Object, allocator: Allocator, nlists: anytype) !void {
                 self.symtab.items(.size)[nlists[i].idx] = size;
             }
         }
+
+        // Create a dummy atom marking the end of a section.
+        const atom_index = try self.addSectionStopAtom(allocator, @intCast(n_sect));
+        try self.atoms_indexes.append(allocator, atom_index);
+        try subsections.append(allocator, .{
+            .atom = atom_index,
+            .off = sect.size,
+        });
     }
 }
 
@@ -1786,7 +1787,9 @@ pub fn calcSymtabSize(self: *Object, macho_file: *MachO) void {
         if (!macho_file.options.relocatable) {
             // If -x flag was passed and we are not emitting a relocatable object file,
             // we simply skip every local symbol.
-            if (macho_file.options.strip_locals and sym.isLocal()) continue;
+            // TODO we currently skip any local that was assigned a GOT entry for the simple
+            // reason we don't yet relax GOT accesses for locals on aarch64.
+            if (macho_file.options.strip_locals and sym.isLocal() and !sym.getSectionFlags().got) continue;
             // TODO in -r mode, we actually want to merge symbol names and emit only one
             // work it out when emitting relocs
             if ((name[0] == 'L' or name[0] == 'l' or mem.startsWith(u8, name, "_OBJC_SELECTOR_REFERENCES_"))) continue;
@@ -2396,6 +2399,23 @@ fn addAtom(self: *Object, allocator: Allocator, args: AddAtomArgs) !Atom.Index {
         .alignment = args.alignment,
     };
     return atom_index;
+}
+
+/// Creates a dummy atom marking the end of a section.
+/// Some compilers including Go may emit symbols that are zero-sized and lie at the section
+/// boundary. In order to properly attach such a symbol to an atom (in this case, a dummy
+/// zero-sized atom), we need to create it first.
+fn addSectionStopAtom(self: *Object, allocator: Allocator, n_sect: u8) !Atom.Index {
+    const sect = self.sections.items(.header)[n_sect];
+    const name = try std.fmt.allocPrintZ(allocator, "{s}${s}$stop", .{ sect.segName(), sect.sectName() });
+    defer allocator.free(name);
+    return self.addAtom(allocator, .{
+        .name = try self.addString(allocator, name),
+        .n_sect = @intCast(n_sect),
+        .off = sect.size,
+        .size = 0,
+        .alignment = sect.@"align",
+    });
 }
 
 pub fn getAtom(self: *Object, atom_index: Atom.Index) ?*Atom {
