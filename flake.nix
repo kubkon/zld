@@ -35,7 +35,8 @@
       system: let
         pkgs = import nixpkgs {inherit overlays system;};
       in rec {
-        devShells.default = pkgs.mkShell {
+        devShells.default = pkgs.stdenvNoCC.mkDerivation {
+          name = "emerald";
           nativeBuildInputs = with pkgs; [
             zigpkgs.master-2024-10-08
             zlspkgs.default
