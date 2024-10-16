@@ -1354,37 +1354,31 @@ fn parseDebugInfo(self: *Object, macho_file: *MachO) !void {
     defer tracy.end();
 
     const gpa = macho_file.base.allocator;
+    const file = macho_file.getFileHandle(self.file_handle);
 
-    var dw_info = Dwarf.Sections{};
-    defer dw_info.deinit(gpa);
+    var dwarf: Dwarf = .{};
+    defer dwarf.deinit(gpa);
 
     for (self.sections.items(.header), 0..) |sect, i| {
         if (sect.attrs() & macho.S_ATTR_DEBUG == 0) continue;
-        const index: u32 = @intCast(i);
+        const index: u8 = @intCast(i);
         if (mem.eql(u8, sect.sectName(), "__debug_info")) {
-            try dw_info.sections.putNoClobber(gpa, .debug_info, .{ .index = index });
+            dwarf.debug_info = try self.readSectionData(gpa, file, index);
         }
         if (mem.eql(u8, sect.sectName(), "__debug_abbrev")) {
-            try dw_info.sections.putNoClobber(gpa, .debug_abbrev, .{ .index = index });
+            dwarf.debug_abbrev = try self.readSectionData(gpa, file, index);
         }
         if (mem.eql(u8, sect.sectName(), "__debug_str")) {
-            try dw_info.sections.putNoClobber(gpa, .debug_str, .{ .index = index });
+            dwarf.debug_str = try self.readSectionData(gpa, file, index);
         }
         if (mem.eql(u8, sect.sectName(), "__debug_str_offs")) {
-            try dw_info.sections.putNoClobber(gpa, .debug_str_offsets, .{ .index = index });
+            dwarf.debug_str_offsets = try self.readSectionData(gpa, file, index);
         }
     }
 
-    if (dw_info.sections.keys().len == 0) return;
+    if (dwarf.debug_info.len == 0) return;
 
-    for (dw_info.sections.values()) |*sect| {
-        try sect.readData(gpa, macho_file.getFileHandle(self.file_handle), self.*);
-    }
-
-    self.compile_unit = self.findCompileUnit(.{
-        .gpa = gpa,
-        .dw_info = dw_info,
-    }, macho_file) catch |err| switch (err) {
+    self.compile_unit = self.findCompileUnit(gpa, dwarf, macho_file) catch |err| switch (err) {
         error.ParseFailed => return error.ParseFailed,
         else => |e| {
             macho_file.base.fatal("{}: unexpected error when parsing DWARF info: {s}", .{ self.fmtPath(), @errorName(e) });
@@ -1393,13 +1387,9 @@ fn parseDebugInfo(self: *Object, macho_file: *MachO) !void {
     };
 }
 
-fn findCompileUnit(self: *Object, args: struct {
-    gpa: Allocator,
-    dw_info: Dwarf.Sections,
-}, macho_file: *MachO) !CompileUnit {
-    const gpa = args.gpa;
-    var info_reader = Dwarf.InfoReader{ .ctx = args.dw_info };
-    var abbrev_reader = Dwarf.AbbrevReader{ .ctx = args.dw_info };
+fn findCompileUnit(self: *Object, gpa: Allocator, dwarf: Dwarf, macho_file: *MachO) !CompileUnit {
+    var info_reader = Dwarf.InfoReader{ .ctx = dwarf };
+    var abbrev_reader = Dwarf.AbbrevReader{ .ctx = dwarf };
 
     const cuh = switch (try info_reader.readCompileUnitHeader()) {
         .ok => |cuh| cuh,
@@ -2546,6 +2536,16 @@ fn addUnwindRecordAssumeCapacity(self: *Object) UnwindInfo.Record.Index {
 pub fn getUnwindRecord(self: *Object, index: UnwindInfo.Record.Index) *UnwindInfo.Record {
     assert(index < self.unwind_records.items.len);
     return &self.unwind_records.items[index];
+}
+
+/// Caller owns the memory.
+fn readSectionData(self: Object, allocator: Allocator, file: File.Handle, n_sect: u8) ![]u8 {
+    const header = self.sections.items(.header)[n_sect];
+    const data = try allocator.alloc(u8, header.size);
+    const amt = try file.preadAll(data, header.offset + self.offset);
+    errdefer allocator.free(data);
+    if (amt != data.len) return error.InputOutput;
+    return data;
 }
 
 pub fn format(

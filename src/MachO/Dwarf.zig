@@ -1,53 +1,32 @@
-index: u32,
-data: []u8 = &[0]u8{},
+debug_info: []u8 = &[0]u8{},
+debug_abbrev: []u8 = &[0]u8{},
+debug_str: []u8 = &[0]u8{},
+debug_str_offsets: []u8 = &[0]u8{},
 
-fn deinit(dwarf: *Dwarf, allocator: Allocator) void {
-    allocator.free(dwarf.data);
-}
-
-pub fn readData(dwarf: *Dwarf, allocator: Allocator, file: File.Handle, object: Object) !void {
-    const header = object.sections.items(.header)[dwarf.index];
-    const data = try allocator.alloc(u8, header.size);
-    const amt = try file.preadAll(data, header.offset + object.offset);
-    errdefer allocator.free(data);
-    if (amt != data.len) return error.InputOutput;
-    dwarf.data = data;
+pub fn deinit(dwarf: *Dwarf, allocator: Allocator) void {
+    allocator.free(dwarf.debug_info);
+    allocator.free(dwarf.debug_abbrev);
+    allocator.free(dwarf.debug_str);
+    allocator.free(dwarf.debug_str_offsets);
 }
 
 /// Pulls an offset into __debug_str section from a __debug_str_offs section.
 /// This is new in DWARFv5 and requires the producer to specify DW_FORM_strx* (`index` arg)
 /// but also DW_AT_str_offsets_base with DW_FORM_sec_offset (`base` arg) in the opening header
 /// of a "referencing entity" such as DW_TAG_compile_unit.
-fn getOffset(dwarf: Dwarf, base: u64, index: u64, dw_fmt: DwarfFormat) u64 {
+fn getOffset(debug_str_offsets: []const u8, base: u64, index: u64, dw_fmt: DwarfFormat) u64 {
     return switch (dw_fmt) {
-        .dwarf32 => @as(*align(1) const u32, @ptrCast(dwarf.data.ptr + base + index * @sizeOf(u32))).*,
-        .dwarf64 => @as(*align(1) const u64, @ptrCast(dwarf.data.ptr + base + index * @sizeOf(u64))).*,
+        .dwarf32 => @as(*align(1) const u32, @ptrCast(debug_str_offsets.ptr + base + index * @sizeOf(u32))).*,
+        .dwarf64 => @as(*align(1) const u64, @ptrCast(debug_str_offsets.ptr + base + index * @sizeOf(u64))).*,
     };
 }
 
-const Index = enum {
-    debug_info,
-    debug_abbrev,
-    debug_str,
-    debug_str_offsets,
-};
-
-pub const Sections = struct {
-    sections: std.AutoArrayHashMapUnmanaged(Index, Dwarf) = .{},
-
-    pub fn deinit(self: *Sections, allocator: Allocator) void {
-        for (self.sections.values()) |*sect| {
-            sect.deinit(allocator);
-        }
-    }
-};
-
 pub const InfoReader = struct {
-    ctx: Sections,
+    ctx: Dwarf,
     pos: usize = 0,
 
     fn bytes(p: InfoReader) []const u8 {
-        return p.ctx.sections.get(.debug_info).?.data;
+        return p.ctx.debug_info;
     }
 
     pub fn readCompileUnitHeader(p: *InfoReader) !union(enum) {
@@ -237,9 +216,8 @@ pub const InfoReader = struct {
     pub fn readString(p: *InfoReader, form: Form, cuh: CompileUnitHeader) ![:0]const u8 {
         switch (form) {
             dw.FORM.strp => {
-                const strtab = p.ctx.sections.get(.debug_str).?.data;
                 const off = try p.readOffset(cuh.format);
-                return mem.sliceTo(@as([*:0]const u8, @ptrCast(strtab.ptr + off)), 0);
+                return mem.sliceTo(@as([*:0]const u8, @ptrCast(p.ctx.debug_str.ptr + off)), 0);
             },
             dw.FORM.string => {
                 const start = p.pos;
@@ -262,9 +240,8 @@ pub const InfoReader = struct {
             dw.FORM.strx4,
             => {
                 const index = try p.readIndex(form);
-                const off = p.ctx.sections.get(.debug_str_offsets).?.getOffset(base, index, cuh.format);
-                const strtab = p.ctx.sections.get(.debug_str).?.data;
-                return mem.sliceTo(@as([*:0]const u8, @ptrCast(strtab.ptr + off)), 0);
+                const off = getOffset(p.ctx.debug_str_offsets, base, index, cuh.format);
+                return mem.sliceTo(@as([*:0]const u8, @ptrCast(p.ctx.debug_str.ptr + off)), 0);
             },
             else => unreachable,
         }
@@ -318,11 +295,11 @@ pub const InfoReader = struct {
 };
 
 pub const AbbrevReader = struct {
-    ctx: Sections,
+    ctx: Dwarf,
     pos: usize = 0,
 
     fn bytes(p: AbbrevReader) []const u8 {
-        return p.ctx.sections.get(.debug_abbrev).?.data;
+        return p.ctx.debug_abbrev;
     }
 
     pub fn hasMore(p: AbbrevReader) bool {
