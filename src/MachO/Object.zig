@@ -1367,12 +1367,21 @@ fn parseDebugInfo(self: *Object, macho_file: *MachO) !void {
 
     if (dwarf.debug_info.len == 0) return;
 
-    self.compile_unit = self.findCompileUnit(gpa, dwarf, macho_file) catch |err| switch (err) {
-        error.ParseFailed => return error.ParseFailed,
-        else => |e| {
-            macho_file.base.fatal("{}: unexpected error when parsing DWARF info: {s}", .{ self.fmtPath(), @errorName(e) });
-            return error.ParseFailed;
-        },
+    self.compile_unit = self.findCompileUnit(gpa, dwarf, macho_file) catch |err| {
+        switch (err) {
+            error.UnhandledForm,
+            error.UnexpectedTag,
+            error.MissingCompDir,
+            error.MissingTuName,
+            error.MissingStrOffsetsBase,
+            error.InvalidForm,
+            => {},
+            else => |e| macho_file.base.fatal("{}: unexpected error when parsing DWARF info: {s}", .{
+                self.fmtPath(),
+                @errorName(e),
+            }),
+        }
+        return error.ParseFailed;
     };
 }
 
@@ -1380,32 +1389,20 @@ fn findCompileUnit(self: *Object, gpa: Allocator, dwarf: Dwarf, macho_file: *Mac
     var info_reader = Dwarf.InfoReader{ .ctx = dwarf };
     var abbrev_reader = Dwarf.AbbrevReader{ .ctx = dwarf };
 
-    const cuh = switch (try info_reader.readCompileUnitHeader()) {
-        .ok => |cuh| cuh,
-        .wrong_version => |ver| {
-            macho_file.base.fatal("{}: unhandled or unknown DWARF version detected: {d}", .{ self.fmtPath(), ver });
-            return error.ParseFailed;
-        },
-    };
+    const cuh = try info_reader.readCompileUnitHeader(.{ .object = self.*, .macho_file = macho_file });
     try abbrev_reader.seekTo(cuh.debug_abbrev_offset);
 
     const cu_decl = (try abbrev_reader.readDecl()) orelse return error.UnexpectedEndOfFile;
     if (cu_decl.tag != Dwarf.TAG.compile_unit) {
-        macho_file.base.fatal("{}: unexpected DW_TAG_xxx value detected as the first decl: expected 0x{x}, found 0x{x}", .{
+        macho_file.base.fatal("{}: unexpected DW_TAG_* value detected as the first decl: expected 0x{x}, got 0x{x}", .{
             self.fmtPath(),
             Dwarf.TAG.compile_unit,
             cu_decl.tag,
         });
-        return error.ParseFailed;
+        return error.UnexpectedTag;
     }
 
-    switch (try info_reader.seekToDie(cu_decl.code, cuh, &abbrev_reader)) {
-        .ok => {},
-        .unknown_form => |form| {
-            macho_file.base.fatal("{}: unexpected DW_FORM_xxx value detected: 0x{x}", .{ self.fmtPath(), form });
-            return error.ParseFailed;
-        },
-    }
+    try info_reader.seekToDie(cu_decl.code, cuh, &abbrev_reader, .{ .object = self.*, .macho_file = macho_file });
 
     const Pos = struct {
         pos: usize,
@@ -1423,100 +1420,61 @@ fn findCompileUnit(self: *Object, gpa: Allocator, dwarf: Dwarf, macho_file: *Mac
     };
 
     while (try abbrev_reader.readAttr()) |attr| {
+        const pos: Pos = .{ .pos = info_reader.pos, .form = attr.form };
         switch (attr.at) {
-            Dwarf.AT.name => saved.tu_name = .{ .pos = info_reader.pos, .form = attr.form },
-            Dwarf.AT.comp_dir => saved.comp_dir = .{ .pos = info_reader.pos, .form = attr.form },
-            Dwarf.AT.str_offsets_base => saved.str_offsets_base = .{ .pos = info_reader.pos, .form = attr.form },
+            Dwarf.AT.name => saved.tu_name = pos,
+            Dwarf.AT.comp_dir => saved.comp_dir = pos,
+            Dwarf.AT.str_offsets_base => saved.str_offsets_base = pos,
             else => {},
         }
-        switch (try info_reader.skip(attr.form, cuh)) {
-            .ok => {},
-            .unknown_form => |form| {
-                macho_file.base.fatal("{}: unexpected DW_FORM_xxx value detected: 0x{x}", .{ self.fmtPath(), form });
-                return error.ParseFailed;
-            },
-        }
+        try info_reader.skip(attr.form, cuh, .{ .object = self.*, .macho_file = macho_file });
     }
-
-    const readDwarfString = struct {
-        fn readDwarfString(
-            reader: *Dwarf.InfoReader,
-            header: Dwarf.CompileUnitHeader,
-            pos: Pos,
-            base: u64,
-        ) !union(enum) {
-            ok: [:0]const u8,
-            invalid_form: Dwarf.Form,
-        } {
-            try reader.seekTo(pos.pos);
-            switch (pos.form) {
-                Dwarf.FORM.strp,
-                Dwarf.FORM.string,
-                => return .{ .ok = try reader.readString(pos.form, header) },
-                Dwarf.FORM.strx,
-                Dwarf.FORM.strx1,
-                Dwarf.FORM.strx2,
-                Dwarf.FORM.strx3,
-                Dwarf.FORM.strx4,
-                => return .{ .ok = try reader.readStringIndexed(pos.form, header, base) },
-                else => return .{ .invalid_form = pos.form },
-            }
-        }
-    }.readDwarfString;
 
     if (saved.comp_dir == null) {
         macho_file.base.fatal("{}: missing DW_AT_comp_dir attribute", .{self.fmtPath()});
-        return error.ParseFailed;
+        return error.MissingCompDir;
     }
     if (saved.tu_name == null) {
         macho_file.base.fatal("{}: missing DW_AT_name attribute", .{self.fmtPath()});
-        return error.ParseFailed;
+        return error.MissingTuName;
     }
 
     const str_offsets_base: ?u64 = if (saved.str_offsets_base) |str_offsets_base| str_offsets_base: {
-        if (cuh.version < 5) break :str_offsets_base null;
         try info_reader.seekTo(str_offsets_base.pos);
         break :str_offsets_base try info_reader.readOffset(cuh.format);
     } else null;
 
-    for (&[_]Pos{ saved.comp_dir.?, saved.tu_name.? }) |pos| {
-        if (cuh.version >= 5 and needsStrOffsetsBase(pos.form) and str_offsets_base == null) {
-            macho_file.base.fatal("{}: missing DW_AT_str_offsets_base attribute", .{self.fmtPath()});
-            return error.ParseFailed;
-        }
+    var cu: CompileUnit = .{ .comp_dir = .{}, .tu_name = .{} };
+    for (&[_]struct { Pos, *MachO.String }{
+        .{ saved.comp_dir.?, &cu.comp_dir },
+        .{ saved.tu_name.?, &cu.tu_name },
+    }) |tuple| {
+        const pos, const str_offset_ptr = tuple;
+        try info_reader.seekTo(pos.pos);
+        str_offset_ptr.* = switch (pos.form) {
+            Dwarf.FORM.strp,
+            Dwarf.FORM.string,
+            => try self.addString(gpa, try info_reader.readString(pos.form, cuh)),
+            Dwarf.FORM.strx,
+            Dwarf.FORM.strx1,
+            Dwarf.FORM.strx2,
+            Dwarf.FORM.strx3,
+            Dwarf.FORM.strx4,
+            => blk: {
+                const base = str_offsets_base orelse {
+                    macho_file.base.fatal("{}: missing DW_AT_str_offsets_base attribute", .{self.fmtPath()});
+                    return error.MissingStrOffsetsBase;
+                };
+                break :blk try self.addString(gpa, try info_reader.readStringIndexed(pos.form, cuh, base));
+            },
+            else => |form| {
+                macho_file.base.fatal("{}: invalid DW_FORM_* when parsing string: 0x{x}", .{ self.fmtPath(), form });
+                return error.InvalidForm;
+            },
+        };
     }
 
-    const comp_dir = switch (try readDwarfString(&info_reader, cuh, saved.comp_dir.?, str_offsets_base orelse 0)) {
-        .ok => |str| str,
-        .invalid_form => |form| {
-            macho_file.base.fatal("{}: invalid form when parsing DWARF string: 0x{x}", .{ self.fmtPath(), form });
-            return error.ParseFailed;
-        },
-    };
-    const tu_name = switch (try readDwarfString(&info_reader, cuh, saved.tu_name.?, str_offsets_base orelse 0)) {
-        .ok => |str| str,
-        .invalid_form => |form| {
-            macho_file.base.fatal("{}: invalid form when parsing DWARF string: 0x{x}", .{ self.fmtPath(), form });
-            return error.ParseFailed;
-        },
-    };
-
-    return .{
-        .comp_dir = try self.addString(gpa, comp_dir),
-        .tu_name = try self.addString(gpa, tu_name),
-    };
-}
-
-fn needsStrOffsetsBase(form: Dwarf.Form) bool {
-    return switch (form) {
-        Dwarf.FORM.strx,
-        Dwarf.FORM.strx1,
-        Dwarf.FORM.strx2,
-        Dwarf.FORM.strx3,
-        Dwarf.FORM.strx4,
-        => true,
-        else => false,
-    };
+    return cu;
 }
 
 pub fn resolveSymbols(self: *Object, macho_file: *MachO) !void {

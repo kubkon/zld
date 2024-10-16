@@ -21,6 +21,11 @@ fn getOffset(debug_str_offsets: []const u8, base: u64, index: u64, dw_fmt: Dwarf
     };
 }
 
+const ErrCtx = struct {
+    object: Object,
+    macho_file: *MachO,
+};
+
 pub const InfoReader = struct {
     ctx: Dwarf,
     pos: usize = 0,
@@ -29,10 +34,7 @@ pub const InfoReader = struct {
         return p.ctx.debug_info;
     }
 
-    pub fn readCompileUnitHeader(p: *InfoReader) !union(enum) {
-        ok: CompileUnitHeader,
-        wrong_version: Version,
-    } {
+    pub fn readCompileUnitHeader(p: *InfoReader, err_ctx: ErrCtx) !CompileUnitHeader {
         var length: u64 = try p.readInt(u32);
         const is_64bit = length == 0xffffffff;
         if (is_64bit) {
@@ -57,19 +59,25 @@ pub const InfoReader = struct {
                 .address_size = try p.readByte(),
                 .debug_abbrev_offset = try p.readOffset(dw_fmt),
             },
-            else => return .{ .wrong_version = version },
+            else => {
+                err_ctx.macho_file.base.fatal("{}: unhandled DWARF version: expected 4 or 5, got {d}", .{
+                    err_ctx.object.fmtPath(),
+                    version,
+                });
+                return error.InvalidVersion;
+            },
         };
-        return .{ .ok = .{
+        return .{
             .format = dw_fmt,
             .length = length,
             .version = version,
             .debug_abbrev_offset = other.debug_abbrev_offset,
             .address_size = other.address_size,
             .unit_type = other.unit_type,
-        } };
+        };
     }
 
-    pub fn seekToDie(p: *InfoReader, code: Code, cuh: CompileUnitHeader, abbrev_reader: *AbbrevReader) !SkipResult {
+    pub fn seekToDie(p: *InfoReader, code: Code, cuh: CompileUnitHeader, abbrev_reader: *AbbrevReader, err_ctx: ErrCtx) !void {
         const cuh_length = math.cast(usize, cuh.length) orelse return error.Overflow;
         const end_pos = p.pos + switch (cuh.format) {
             .dwarf32 => @as(usize, 4),
@@ -78,27 +86,28 @@ pub const InfoReader = struct {
         while (p.pos < end_pos) {
             const di_code = try p.readULEB128(u64);
             if (di_code == 0) return error.UnexpectedEndOfFile;
-            if (di_code == code) return .ok;
+            if (di_code == code) return;
 
             while (try abbrev_reader.readAttr()) |attr| {
-                const res = try p.skip(attr.form, cuh);
-                switch (res) {
-                    .ok => {},
-                    .unknown_form => return res,
-                }
+                try p.skip(attr.form, cuh, err_ctx);
             }
         }
         return error.UnexpectedEndOfFile;
     }
 
-    const SkipResult = union(enum) {
-        ok,
-        unknown_form: Form,
-    };
-
     /// When skipping attributes, we don't really need to be able to handle them all
     /// since we only ever care about the DW_TAG_compile_unit.
-    pub fn skip(p: *InfoReader, form: Form, cuh: CompileUnitHeader) !SkipResult {
+    pub fn skip(p: *InfoReader, form: Form, cuh: CompileUnitHeader, err_ctx: ErrCtx) !void {
+        p.skipInner(form, cuh) catch |err| switch (err) {
+            error.UnhandledForm => {
+                err_ctx.macho_file.base.fatal("{}: unhandled DW_FORM_* 0x{x}", .{ err_ctx.object.fmtPath(), form });
+                return error.UnhandledForm;
+            },
+            else => |e| return e,
+        };
+    }
+
+    fn skipInner(p: *InfoReader, form: Form, cuh: CompileUnitHeader) !void {
         switch (form) {
             dw.FORM.sec_offset,
             dw.FORM.ref_addr,
@@ -168,10 +177,9 @@ pub const InfoReader = struct {
                     _ = try p.readIndex(form);
                 },
 
-                else => return .{ .unknown_form = form },
-            } else return .{ .unknown_form = form },
+                else => return error.UnhandledForm,
+            } else return error.UnhandledForm,
         }
-        return .ok;
     }
 
     pub fn readBlock(p: *InfoReader, form: Form) ![]const u8 {
@@ -198,7 +206,7 @@ pub const InfoReader = struct {
             dw.FORM.data8, dw.FORM.ref8, dw.FORM.ref_sig8 => try p.readInt(u64),
             dw.FORM.udata, dw.FORM.ref_udata => try p.readULEB128(u64),
             dw.FORM.sdata => @bitCast(try p.readILEB128(i64)),
-            else => return error.UnhandledConstantForm,
+            else => return error.UnhandledForm,
         };
     }
 
@@ -206,10 +214,10 @@ pub const InfoReader = struct {
         return switch (form) {
             dw.FORM.strx1, dw.FORM.addrx1 => try p.readByte(),
             dw.FORM.strx2, dw.FORM.addrx2 => try p.readInt(u16),
-            dw.FORM.strx3, dw.FORM.addrx3 => error.UnhandledDwForm,
+            dw.FORM.strx3, dw.FORM.addrx3 => error.UnhandledForm,
             dw.FORM.strx4, dw.FORM.addrx4 => try p.readInt(u32),
             dw.FORM.strx, dw.FORM.addrx => try p.readULEB128(u64),
-            else => return error.UnhandledIndexForm,
+            else => return error.UnhandledForm,
         };
     }
 
@@ -396,6 +404,7 @@ const std = @import("std");
 const Allocator = mem.Allocator;
 const Dwarf = @This();
 const File = @import("file.zig").File;
+const MachO = @import("../MachO.zig");
 const Object = @import("Object.zig");
 
 pub const At = u64;
