@@ -1,5 +1,5 @@
 {
-  description = "An empty project that uses Zig.";
+  description = "Emerald linker";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-23.05";
@@ -35,6 +35,24 @@
       system: let
         pkgs = import nixpkgs {inherit overlays system;};
       in rec {
+        packages.default = packages.emerald;
+        packages.emerald = pkgs.stdenvNoCC.mkDerivation {
+          name = "emerald";
+          version = "master";
+          src = ./.;
+          nativeBuildInputs = [ pkgs.zigpkgs."0.13.0" ];
+          dontConfigure = true;
+          dontInstall = true;
+          doCheck = false; # TODO enable this
+          buildPhase = ''
+            mkdir -p .cache
+            zig build install -Doptimize=ReleaseFast --prefix $out --cache-dir $(pwd)/.zig-cache --global-cache-dir $(pwd)/.cache 
+          '';
+          checkPhase = ''
+            zig build test -Dhas-zig --cache-dir $(pwd)/.zig-cache --global-cache-dir $(pwd)/.cache
+          '';
+        };
+
         devShells.default = pkgs.stdenvNoCC.mkDerivation {
           name = "emerald";
           nativeBuildInputs = with pkgs; [
