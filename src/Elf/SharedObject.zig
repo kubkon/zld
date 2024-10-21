@@ -10,12 +10,12 @@ strtab: std.ArrayListUnmanaged(u8) = .{},
 versyms: std.ArrayListUnmanaged(elf.Elf64_Versym) = .{},
 verstrings: std.ArrayListUnmanaged(u32) = .{},
 
-symbols: std.ArrayListUnmanaged(Symbol) = .empty,
-symbols_extra: std.ArrayListUnmanaged(u32) = .empty,
-symbols_resolver: std.ArrayListUnmanaged(Elf.SymbolResolver.Index) = .empty,
+symbols: std.ArrayListUnmanaged(Symbol) = .{},
+symbols_extra: std.ArrayListUnmanaged(u32) = .{},
+symbols_resolver: std.ArrayListUnmanaged(Elf.SymbolResolver.Index) = .{},
 
 aliases: ?std.ArrayListUnmanaged(u32) = null,
-dynamic_table: std.ArrayListUnmanaged(elf.Elf64_Dyn) = .empty,
+dynamic_table: std.ArrayListUnmanaged(elf.Elf64_Dyn) = .{},
 
 needed: bool,
 alive: bool,
@@ -420,14 +420,14 @@ fn addSymbolAssumeCapacity(self: *SharedObject) Symbol.Index {
 }
 
 pub fn addSymbolExtra(self: *SharedObject, allocator: Allocator, extra: Symbol.Extra) !u32 {
-    const fields = @typeInfo(Symbol.Extra).@"struct".fields;
+    const fields = @typeInfo(Symbol.Extra).Struct.fields;
     try self.symbols_extra.ensureUnusedCapacity(allocator, fields.len);
     return self.addSymbolExtraAssumeCapacity(extra);
 }
 
 pub fn addSymbolExtraAssumeCapacity(self: *SharedObject, extra: Symbol.Extra) u32 {
     const index = @as(u32, @intCast(self.symbols_extra.items.len));
-    const fields = @typeInfo(Symbol.Extra).@"struct".fields;
+    const fields = @typeInfo(Symbol.Extra).Struct.fields;
     inline for (fields) |field| {
         self.symbols_extra.appendAssumeCapacity(switch (field.type) {
             u32 => @field(extra, field.name),
@@ -438,7 +438,7 @@ pub fn addSymbolExtraAssumeCapacity(self: *SharedObject, extra: Symbol.Extra) u3
 }
 
 pub fn getSymbolExtra(self: *SharedObject, index: u32) Symbol.Extra {
-    const fields = @typeInfo(Symbol.Extra).@"struct".fields;
+    const fields = @typeInfo(Symbol.Extra).Struct.fields;
     var i: usize = index;
     var result: Symbol.Extra = undefined;
     inline for (fields) |field| {
@@ -452,7 +452,7 @@ pub fn getSymbolExtra(self: *SharedObject, index: u32) Symbol.Extra {
 }
 
 pub fn setSymbolExtra(self: *SharedObject, index: u32, extra: Symbol.Extra) void {
-    const fields = @typeInfo(Symbol.Extra).@"struct".fields;
+    const fields = @typeInfo(Symbol.Extra).Struct.fields;
     inline for (fields, 0..) |field, i| {
         self.symbols_extra.items[index + i] = switch (field.type) {
             u32 => @field(extra, field.name),

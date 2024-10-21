@@ -242,7 +242,7 @@ const AddExtraOpts = struct {
 
 pub fn addExtra(symbol: *Symbol, opts: AddExtraOpts, elf_file: *Elf) void {
     var extra = symbol.getExtra(elf_file);
-    inline for (@typeInfo(@TypeOf(opts)).@"struct".fields) |field| {
+    inline for (@typeInfo(@TypeOf(opts)).Struct.fields) |field| {
         if (@field(opts, field.name)) |x| {
             @field(extra, field.name) = x;
         }

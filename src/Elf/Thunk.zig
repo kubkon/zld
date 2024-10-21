@@ -1,6 +1,6 @@
 value: i64 = 0,
 out_shndx: u32 = 0,
-symbols: std.AutoArrayHashMapUnmanaged(Elf.Ref, void) = .empty,
+symbols: std.AutoArrayHashMapUnmanaged(Elf.Ref, void) = .{},
 output_symtab_ctx: Elf.SymtabCtx = .{},
 
 pub fn deinit(thunk: *Thunk, allocator: Allocator) void {

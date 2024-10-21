@@ -15,7 +15,7 @@ jobs:
     - uses: actions/checkout@v3
     - uses: mlugg/setup-zig@v1
       with:
-        version: master
+        version: 0.13.0
     - run: zig version
     - run: zig fmt --check src 
     - run: zig build test -Dhas-static -Dhas-zig -Dhas-objc-msgsend-stubs
@@ -28,7 +28,7 @@ jobs:
     - uses: actions/checkout@v3
     - uses: mlugg/setup-zig@v1
       with:
-        version: master
+        version: 0.13.0
     - uses: ilammy/msvc-dev-cmd@v1
     - run: zig version
     - run: zig fmt --check src 
@@ -41,7 +41,7 @@ jobs:
     - uses: actions/checkout@v3
     - uses: mlugg/setup-zig@v1
       with:
-        version: master
+        version: 0.13.0
     - run: sudo apt-get install -y musl-tools
     - run: zig version
     - run: CC=musl-gcc zig build test -Dhas-static -Dmusl
@@ -53,7 +53,7 @@ jobs:
     - uses: actions/checkout@v3
     - uses: mlugg/setup-zig@v1
       with:
-        version: master
+        version: 0.13.0
     - run: sudo apt-get install -y clang
     - run: zig version
     - run: CC=clang zig build test -Dhas-static -Dsystem-compiler=clang
