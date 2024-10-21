@@ -82,13 +82,7 @@ pub fn main() !void {
     const all_args = try std.process.argsAlloc(arena);
     const cmd = std.fs.path.basename(all_args[0]);
     const tag: Ld.Tag = blk: {
-        if (mem.eql(u8, cmd, "ld")) break :blk switch (builtin.target.ofmt) {
-            .elf => .elf,
-            .macho => .macho,
-            .coff => .coff,
-            .wasm => .wasm,
-            else => |other| fatal("unsupported file format '{s}'", .{@tagName(other)}),
-        } else if (mem.eql(u8, cmd, "ld.emerald")) {
+        if (mem.eql(u8, cmd, "ld.emerald")) {
             break :blk .elf;
         } else if (mem.eql(u8, cmd, "ld64.emerald")) {
             break :blk .macho;
@@ -96,10 +90,13 @@ pub fn main() !void {
             break :blk .coff;
         } else if (mem.eql(u8, cmd, "wasm-emerald")) {
             break :blk .wasm;
-        } else {
-            std.io.getStdOut().writeAll(usage) catch {};
-            std.process.exit(0);
-        }
+        } else break :blk switch (builtin.target.ofmt) {
+            .elf => .elf,
+            .macho => .macho,
+            .coff => .coff,
+            .wasm => .wasm,
+            else => |other| fatal("unsupported file format '{s}'", .{@tagName(other)}),
+        };
     };
 
     const opts = try Ld.Options.parse(arena, tag, all_args[1..], .{
