@@ -399,14 +399,14 @@ fn addSymbolAssumeCapacity(self: *InternalObject) Symbol.Index {
 }
 
 pub fn addSymbolExtra(self: *InternalObject, allocator: Allocator, extra: Symbol.Extra) !u32 {
-    const fields = @typeInfo(Symbol.Extra).@"struct".fields;
+    const fields = @typeInfo(Symbol.Extra).Struct.fields;
     try self.symbols_extra.ensureUnusedCapacity(allocator, fields.len);
     return self.addSymbolExtraAssumeCapacity(extra);
 }
 
 pub fn addSymbolExtraAssumeCapacity(self: *InternalObject, extra: Symbol.Extra) u32 {
     const index = @as(u32, @intCast(self.symbols_extra.items.len));
-    const fields = @typeInfo(Symbol.Extra).@"struct".fields;
+    const fields = @typeInfo(Symbol.Extra).Struct.fields;
     inline for (fields) |field| {
         self.symbols_extra.appendAssumeCapacity(switch (field.type) {
             u32 => @field(extra, field.name),
@@ -417,7 +417,7 @@ pub fn addSymbolExtraAssumeCapacity(self: *InternalObject, extra: Symbol.Extra) 
 }
 
 pub fn getSymbolExtra(self: *InternalObject, index: u32) Symbol.Extra {
-    const fields = @typeInfo(Symbol.Extra).@"struct".fields;
+    const fields = @typeInfo(Symbol.Extra).Struct.fields;
     var i: usize = index;
     var result: Symbol.Extra = undefined;
     inline for (fields) |field| {
@@ -431,7 +431,7 @@ pub fn getSymbolExtra(self: *InternalObject, index: u32) Symbol.Extra {
 }
 
 pub fn setSymbolExtra(self: *InternalObject, index: u32, extra: Symbol.Extra) void {
-    const fields = @typeInfo(Symbol.Extra).@"struct".fields;
+    const fields = @typeInfo(Symbol.Extra).Struct.fields;
     inline for (fields, 0..) |field, i| {
         self.symbols_extra.items[index + i] = switch (field.type) {
             u32 => @field(extra, field.name),

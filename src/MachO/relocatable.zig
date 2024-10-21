@@ -129,9 +129,13 @@ fn calcSectionSizes(macho_file: *MachO) !void {
                 });
             }
         }
-        for (macho_file.objects.items) |index| {
-            macho_file.base.thread_pool.spawnWg(&wg, File.calcSymtabSize, .{ macho_file.getFile(index).?, macho_file });
-        }
+
+        if (macho_file.options.strip_locals) for (macho_file.objects.items) |index| {
+            macho_file.base.thread_pool.spawnWg(&wg, stripLocalsWorker, .{
+                macho_file.getFile(index).?.object,
+                macho_file,
+            });
+        };
 
         macho_file.base.thread_pool.spawnWg(&wg, MachO.updateLinkeditSizeWorker, .{ macho_file, .data_in_code });
     }
@@ -221,9 +225,32 @@ fn calcEhFrameSizeWorker(macho_file: *MachO) void {
     };
 }
 
+fn stripLocalsWorker(object: *Object, macho_file: *MachO) void {
+    const tracy = trace(@src());
+    defer tracy.end();
+    object.stripLocalsRelocatable(macho_file) catch |err| {
+        macho_file.base.fatal("failed to strip local symbols in object {}: {s}", .{
+            object.fmtPath(),
+            @errorName(err),
+        });
+        _ = macho_file.has_errors.swap(true, .seq_cst);
+    };
+}
+
 fn calcSymtabSize(macho_file: *MachO) void {
     const tracy = trace(@src());
     defer tracy.end();
+
+    var wg: WaitGroup = .{};
+
+    {
+        wg.reset();
+        defer wg.wait();
+
+        for (macho_file.objects.items) |index| {
+            macho_file.base.thread_pool.spawnWg(&wg, File.calcSymtabSize, .{ macho_file.getFile(index).?, macho_file });
+        }
+    }
 
     var nlocals: u32 = 0;
     var nstabs: u32 = 0;

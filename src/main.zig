@@ -43,7 +43,7 @@ fn logFn(
         const scope_name = @tagName(scope);
         for (log_scopes.items) |log_scope| {
             if (mem.eql(u8, log_scope, scope_name)) break;
-        } else return;
+        } else if (scope != .default) return;
     }
 
     // We only recognize 4 log levels in this application.

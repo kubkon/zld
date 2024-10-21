@@ -119,7 +119,7 @@ pub fn addExtra(symbol: *Symbol, opts: AddExtraOpts, coff_file: *Coff) !void {
         symbol.extra = try coff_file.addSymbolExtra(.{});
     }
     var extra = symbol.getExtra(coff_file).?;
-    inline for (@typeInfo(@TypeOf(opts)).@"struct".fields) |field| {
+    inline for (@typeInfo(@TypeOf(opts)).Struct.fields) |field| {
         if (@field(opts, field.name)) |x| {
             @field(extra, field.name) = x;
         }

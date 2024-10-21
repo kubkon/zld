@@ -6,7 +6,7 @@
 
 ### Building
 
-You will need latest Zig in your path. You can get nightly binaries from [here](https://ziglang.org/download/).
+You will need Zig 0.13.0 in your path. You can download it from [here](https://ziglang.org/download/).
 
 ```
 $ zig build

@@ -67,6 +67,10 @@ binds_to_weak: AtomicBool = AtomicBool.init(false),
 weak_defines: AtomicBool = AtomicBool.init(false),
 has_errors: AtomicBool = AtomicBool.init(false),
 
+/// Atomic counter used only in relocatable (-r) mode when -x flag (strip locals)
+/// was specified. See Object.stripLocalsRelocatable for usage.
+strip_locals_counter: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+
 pub fn openPath(allocator: Allocator, options: Options, thread_pool: *ThreadPool) !*MachO {
     const file = try options.emit.directory.createFile(options.emit.sub_path, .{
         .truncate = true,

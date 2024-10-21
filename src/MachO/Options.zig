@@ -57,6 +57,8 @@ const usage =
     \\-o [path]                          Specify output path for the final artifact
     \\-ObjC                              Force load all members of static archives that implement an
     \\                                   Objective-C class or category
+    \\-Ox                                Set optimisation level from values: [0, 1, 2].
+    \\                                   This option is currently unused.
     \\-pagezero_size [value]             Size of the __PAGEZERO segment in hexademical notation
     \\-platform_version [platform] [min_version] [sdk_version]
     \\                                   Sets the platform, oldest supported version of that platform and 
@@ -65,7 +67,7 @@ const usage =
     \\-reexport-l[name]                  Link against library and re-export it for the clients
     \\  -reexport_library [name]
     \\-rpath [path]                      Specify runtime path
-    \\-S                                 Do not put debug information (STABS or DWARF) in the output file
+    \\-S                                 Do not put debug information (STABS or DWARF) in the symbol table
     \\-search_paths_first                Search each dir in library search paths for `libx.dylib` then `libx.a`
     \\-search_dylibs_first               Search `libx.dylib` in each dir in library search paths, then `libx.a`
     \\-stack_size [value]                Size of the default stack in hexadecimal notation
@@ -74,11 +76,12 @@ const usage =
     \\-u [name]                          Specifies symbol which has to be resolved at link time for the link to succeed
     \\-undefined [value]                 Specify how undefined symbols are to be treated: 
     \\                                   error (default), warning, suppress, or dynamic_lookup.
+    \\-v                                 Print version
+    \\--verbose                          Print full linker invocation to stderr
     \\-weak_framework [name]             Link against framework and mark it and all referenced symbols as weak
     \\-weak-l[name]                      Link against library and mark it and all referenced symbols as weak
     \\  -weak_library [name]
-    \\-v                                 Print version
-    \\--verbose                          Print full linker invocation to stderr
+    \\-x                                 Do not put non-global symbols in the symbol table
     \\
     \\ld64.zld: supported targets: macho-x86-64, macho-arm64
     \\ld64.zld: supported emulations: macho_x86_64, macho_arm64
@@ -105,6 +108,7 @@ rpath_list: []const []const u8,
 syslibroot: ?[]const u8 = null,
 stack_size: ?u64 = null,
 strip: bool = false,
+strip_locals: bool = false,
 entry: ?[]const u8 = null,
 force_undefined_symbols: []const []const u8 = &[0][]const u8{},
 current_version: ?Version = null,
@@ -145,6 +149,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         .framework_dirs = undefined,
         .rpath_list = undefined,
     };
+    var unknown_options = std.ArrayList(u8).init(arena);
 
     var it = Zld.Options.ArgsIterator{ .args = args };
     var p = Zld.ArgParser(@TypeOf(ctx)){ .it = &it, .ctx = ctx };
@@ -240,6 +245,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             try force_undefined_symbols.put(name, {});
         } else if (p.flag1("S")) {
             opts.strip = true;
+        } else if (p.flag1("x")) {
+            opts.strip_locals = true;
         } else if (p.flag1("r")) {
             opts.relocatable = true;
         } else if (p.flag1("all_load")) {
@@ -315,10 +322,24 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             opts.namespace = .flat;
         } else if (p.flag1("ObjC")) {
             opts.force_load_objc = true;
+        } else if (p.arg1("O")) |level_string| {
+            // Purposely ignored but still validate for acceptable values.
+            const level = std.fmt.parseUnsigned(u8, level_string, 0) catch
+                ctx.fatal("Could not parse value '{s}' into integer\n", .{level_string});
+            switch (level) {
+                0...2 => {},
+                else => ctx.fatal("Invalid optimisation level value '{d}', allowed [0, 1, 2]", .{level}),
+            }
         } else if (p.flag1("adhoc_codesign")) {
             opts.adhoc_codesign = true;
         } else if (p.flag1("no_adhoc_codesign")) {
             opts.adhoc_codesign = false;
+        } else if (p.argLLVM()) |opt| {
+            // Skip any LTO flags since we cannot handle it at the moment anyhow.
+            std.log.debug("TODO unimplemented -mllvm {s} option", .{opt});
+        } else if (mem.startsWith(u8, p.arg, "-")) {
+            try unknown_options.appendSlice(p.arg);
+            try unknown_options.append('\n');
         } else {
             try positionals.append(.{ .path = p.arg, .tag = .obj });
         }
@@ -340,7 +361,13 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         ctx.print("{s}\n", .{version});
     }
 
-    if (positionals.items.len == 0) ctx.fatal("Expected at least one positional argument\n", .{});
+    if (unknown_options.items.len > 0) {
+        ctx.fatal("Unknown options:\n{s}", .{unknown_options.items});
+    }
+
+    if (positionals.items.len == 0) {
+        ctx.fatal("Expected at least one positional argument\n", .{});
+    }
 
     if (opts.namespace == .two_level) switch (opts.undefined_treatment) {
         .warn, .suppress => |x| ctx.fatal("illegal flags: '-undefined {s}' with '-two_levelnamespace'\n", .{

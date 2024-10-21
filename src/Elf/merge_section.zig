@@ -14,8 +14,8 @@ pub const MergeSection = struct {
         IndexContext,
         std.hash_map.default_max_load_percentage,
     ) = .{},
-    subsections: std.ArrayListUnmanaged(MergeSubsection) = .empty,
-    finalized_subsections: std.ArrayListUnmanaged(MergeSubsection.Index) = .empty,
+    subsections: std.ArrayListUnmanaged(MergeSubsection) = .{},
+    finalized_subsections: std.ArrayListUnmanaged(MergeSubsection.Index) = .{},
 
     pub fn deinit(msec: *MergeSection, allocator: Allocator) void {
         msec.bytes.deinit(allocator);
