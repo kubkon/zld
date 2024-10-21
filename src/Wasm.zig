@@ -2,10 +2,10 @@
 const Wasm = @This();
 
 const std = @import("std");
-const Zld = @import("Zld.zig");
 const Atom = @import("Wasm/Atom.zig");
 const Object = @import("Wasm/Object.zig");
 const Archive = @import("Wasm/Archive.zig");
+const Ld = @import("Ld.zig");
 const Symbol = @import("Wasm/Symbol.zig");
 const sections = @import("Wasm/sections.zig");
 const types = @import("Wasm/types.zig");
@@ -22,7 +22,7 @@ const mem = std.mem;
 const log = std.log.scoped(.wasm);
 const gc_loc = std.log.scoped(.@"wasm-garbage-man");
 
-base: Zld,
+base: Ld,
 /// Configuration of the linker provided by the user
 options: Options,
 /// A list with references to objects we link to during `flush()`

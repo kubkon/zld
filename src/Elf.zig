@@ -1,4 +1,4 @@
-base: Zld,
+base: Ld,
 options: Options,
 shoff: u64 = 0,
 
@@ -3001,7 +3001,7 @@ pub const null_sym = elf.Elf64_Sym{
     .st_size = 0,
 };
 
-pub const base_tag = Zld.Tag.elf;
+pub const base_tag = Ld.Tag.elf;
 
 const std = @import("std");
 const build_options = @import("build_options");
@@ -3038,6 +3038,7 @@ const Hash = std.hash.Wyhash;
 const HashSection = synthetic.HashSection;
 const InputMergeSection = merge_section.InputMergeSection;
 const InternalObject = @import("Elf/InternalObject.zig");
+const Ld = @import("Ld.zig");
 const LdScript = @import("Elf/LdScript.zig");
 const MergeSection = merge_section.MergeSection;
 const MergeSubsection = merge_section.MergeSubsection;
@@ -3051,4 +3052,3 @@ const Symbol = @import("Elf/Symbol.zig");
 const ThreadPool = std.Thread.Pool;
 const Thunk = @import("Elf/Thunk.zig");
 const VerneedSection = synthetic.VerneedSection;
-const Zld = @import("Zld.zig");

@@ -1,4 +1,4 @@
-emit: Zld.Emit,
+emit: Ld.Emit,
 cpu_arch: ?std.Target.Cpu.Arch = null,
 positionals: []const Coff.LinkObject,
 lib_paths: []const []const u8,
@@ -20,7 +20,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     };
     var verbose = false;
 
-    var it = Zld.Options.ArgsIterator{ .args = args };
+    var it = Ld.Options.ArgsIterator{ .args = args };
     var p = ArgsParser(@TypeOf(it)){ .it = &it };
     while (p.hasMore()) {
         if (p.flag("help")) {
@@ -146,7 +146,7 @@ const usage =
     \\
     \\General Options:
     \\-align:number                 Alignment value in bytes
-    \\-debug-log:scope              Turn on debugging logs for 'scope' (requires zld compiled with -Dlog)
+    \\-debug-log:scope              Turn on debugging logs for 'scope' (requires linker compiled with -Dlog)
     \\-defaultlib:name              Link a default library
     \\-filealign:size               Section alignment size in bytes, must be power of two
     \\-help                         Print this help and exit
@@ -156,7 +156,7 @@ const usage =
     \\-v                            Print full linker invocation to stderr
 ;
 
-const cmd = "link-zld.exe";
+const cmd = "link-emerald.exe";
 
 const builtin = @import("builtin");
 const io = std.io;
@@ -168,4 +168,4 @@ const Allocator = mem.Allocator;
 const CrossTarget = std.zig.CrossTarget;
 const Coff = @import("../Coff.zig");
 const Options = @This();
-const Zld = @import("../Zld.zig");
+const Ld = @import("../Ld.zig");

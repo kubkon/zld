@@ -3,7 +3,7 @@
 const Options = @This();
 
 const std = @import("std");
-const Zld = @import("../Zld.zig");
+const Ld = @import("../Ld.zig");
 const Wasm = @import("../Wasm.zig");
 
 const mem = std.mem;
@@ -14,7 +14,7 @@ const usage =
     \\
     \\Options:
     \\-h, --help                         Print this help and exit
-    \\--debug-log [scope]                Turn on debugging logs for [scope] (requires zld compiled with -Dlog)
+    \\--debug-log [scope]                Turn on debugging logs for [scope] (requires linker compiled with -Dlog)
     \\-o [path]                          Output path of the binary
     \\--entry <entry>                    Name of entry point symbol
     \\--global-base=<value>              Value from where the global data will start
@@ -37,7 +37,7 @@ const usage =
 ;
 
 /// Result path of the binary
-emit: Zld.Emit,
+emit: Ld.Emit,
 /// List of positionals (paths) of objects and archives
 /// that may be linked into the final binary
 positionals: []const []const u8,
@@ -88,7 +88,7 @@ exports: []const []const u8,
 /// atomics and bulk-memory enabled.
 shared_memory: bool = false,
 
-const cmd = "wasm-zld";
+const cmd = "wasm-emerald";
 
 pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options {
     if (args.len == 0) ctx.fatal(usage, .{cmd});
@@ -114,7 +114,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     var exports = std.ArrayList([]const u8).init(arena);
     var shared_memory: bool = false;
 
-    var it = Zld.Options.ArgsIterator{ .args = args };
+    var it = Ld.Options.ArgsIterator{ .args = args };
     while (it.next()) |arg| {
         if (mem.eql(u8, arg, "-h") or mem.eql(u8, arg, "--help")) {
             ctx.fatal(usage, .{cmd});

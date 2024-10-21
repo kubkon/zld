@@ -1,6 +1,6 @@
-# zld
+# emerald
 
-`zld` is a drop-in replacement for your system linker `ld` written in Zig.
+`emerald` is a drop-in replacement for your system linker `ld` written in Zig.
 
 ## Quick start guide
 
@@ -12,7 +12,7 @@ You will need Zig 0.13.0 in your path. You can download it from [here](https://z
 $ zig build
 ```
 
-This will create the `ld.zld` (Elf), `ld64.zld` (MachO), `link-zld` (Coff) and `wasm-zld` (Wasm) binaries in `zig-out/bin/`.
+This will create the `ld.emerald` (Elf), `ld64.emerald` (MachO), `emerald-link.exe` (Coff) and `wasm-emerald` (Wasm) binaries in `zig-out/bin/`.
 You can then use it like you'd use a standard linker.
 
 ```
@@ -32,10 +32,10 @@ $ clang -c hello.c
 $ zig cc -c hello.c
 
 # On macOS
-$ ./zig-out/bin/ld64.zld hello.o -o hello
+$ ./zig-out/bin/ld64.emerald hello.o -o hello
 
 # On Linux
-$ ./zig-out/bin/ld.zld hello.o -o hello
+$ ./zig-out/bin/ld.emerald hello.o -o hello
 
 # Run!
 $ ./hello

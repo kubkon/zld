@@ -4,7 +4,7 @@ pub fn addElfTests(b: *Build, options: common.Options) *Step {
     if (builtin.target.ofmt != .elf) return skipTestStep(elf_step);
 
     const opts = Options{
-        .zld = options.zld,
+        .ld = options.ld,
         .is_musl = options.is_musl,
         .has_zig = options.has_zig,
         .has_static = options.has_static,
@@ -310,7 +310,7 @@ fn testComment(b: *Build, opts: Options) *Step {
 
     const check = exe.check();
     check.dumpSection(".comment");
-    check.checkContains("ld.zld");
+    check.checkContains("ld.emerald");
     test_step.dependOn(&check.step);
 
     return test_step;
@@ -3718,7 +3718,7 @@ fn cc(b: *Build, name: []const u8, opts: Options) SysCmd {
     cmd.addArgs(&.{ opts.cc_override orelse "cc", "-fno-lto" });
     cmd.addArg("-o");
     const out = cmd.addOutputFileArg(name);
-    cmd.addPrefixedDirectorySourceArg("-B", opts.zld.dirname());
+    cmd.addPrefixedDirectorySourceArg("-B", opts.ld.dirname());
     return .{ .cmd = cmd, .out = out };
 }
 
@@ -3731,7 +3731,7 @@ fn ar(b: *Build, name: []const u8) SysCmd {
 
 fn ld(b: *Build, name: []const u8, opts: Options) SysCmd {
     const cmd = Run.create(b, "ld");
-    cmd.addFileArg(opts.zld);
+    cmd.addFileArg(opts.ld);
     cmd.addArg("-o");
     const out = cmd.addOutputFileArg(name);
     return .{ .cmd = cmd, .out = out };
@@ -3745,7 +3745,7 @@ fn zig(b: *Build, name: []const u8, comptime mode: enum { obj, exe, lib }) SysCm
 }
 
 const Options = struct {
-    zld: LazyPath,
+    ld: LazyPath,
     system_compiler: common.SystemCompiler,
     has_static: bool,
     has_zig: bool,

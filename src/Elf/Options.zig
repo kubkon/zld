@@ -1,4 +1,4 @@
-emit: Zld.Emit,
+emit: Ld.Emit,
 shared: bool = false,
 relocatable: bool = false,
 positionals: []const Elf.LinkObject,
@@ -68,8 +68,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
         .rpath_list = undefined,
     };
 
-    var it = Zld.Options.ArgsIterator{ .args = args };
-    var p = Zld.ArgParser(@TypeOf(ctx)){ .it = &it, .ctx = ctx };
+    var it = Ld.Options.ArgsIterator{ .args = args };
+    var p = Ld.ArgParser(@TypeOf(ctx)){ .it = &it, .ctx = ctx };
     while (p.hasMore()) {
         if (p.flag2("help")) {
             ctx.fatal(usage ++ "\n", .{cmd});
@@ -378,7 +378,7 @@ const usage =
     \\--build-id=[none,md5,sha1,sha256,uuid,HEXSTRING]
     \\                              Generate build ID
     \\  --no-build-id
-    \\--debug-log [value]           Turn on debugging logs for [value] (requires zld compiled with -Dlog)
+    \\--debug-log [value]           Turn on debugging logs for [value] (requires linker compiled with -Dlog)
     \\--dynamic                     Alias for --Bdynamic
     \\--dynamic-linker=[value], -I [value]      
     \\                              Set the dynamic linker to use
@@ -438,12 +438,12 @@ const usage =
     \\-v, --version                 Print version
     \\-V                            Print version and target information
     \\
-    \\ld.zld: supported target: elf64-x86-64, elf64-littleaarch64, elf64-littleriscv
-    \\ld.zld: supported emulations: elf64_x86_64, aarch64linux, aarch64elf, elf64lriscv
+    \\ld.emerald: supported target: elf64-x86-64, elf64-littleaarch64, elf64-littleriscv
+    \\ld.emerald: supported emulations: elf64_x86_64, aarch64linux, aarch64elf, elf64lriscv
 ;
 
 pub const version =
-    \\ld.zld 0.0.4 (compatible with GNU ld)
+    \\ld.emerald 0.0.4 (compatible with GNU ld)
 ;
 
 fn cpuArchToElfEmulation(cpu_arch: std.Target.Cpu.Arch) []const u8 {
@@ -483,7 +483,7 @@ fn parseSectionStart(opts: *Options, arena: Allocator, name: []const u8, value: 
     _ = try opts.section_start.put(arena, try arena.dupe(u8, name), start);
 }
 
-const cmd = "ld.zld";
+const cmd = "ld.emerald";
 
 pub const BuildId = enum {
     none,
@@ -510,4 +510,4 @@ const process = std.process;
 const Allocator = mem.Allocator;
 const Elf = @import("../Elf.zig");
 const Options = @This();
-const Zld = @import("../Zld.zig");
+const Ld = @import("../Ld.zig");

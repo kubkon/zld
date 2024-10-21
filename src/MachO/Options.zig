@@ -10,7 +10,7 @@ const process = std.process;
 const Allocator = mem.Allocator;
 const CrossTarget = std.zig.CrossTarget;
 const MachO = @import("../MachO.zig");
-const Zld = @import("../Zld.zig");
+const Ld = @import("../Ld.zig");
 
 pub const SearchStrategy = enum {
     paths_first,
@@ -30,7 +30,7 @@ const usage =
     \\-dead_strip                        Remove functions and data that are unreachable by the entry point or 
     \\                                   exported symbols
     \\-dead_strip_dylibs                 Remove dylibs that were unreachable by the entry point or exported symbols
-    \\--debug-log [scope]                Turn on debugging logs for [scope] (requires zld compiled with -Dlog)
+    \\--debug-log [scope]                Turn on debugging logs for [scope] (requires linker compiled with -Dlog)
     \\-dylib                             Create dynamic library
     \\-dynamic                           Perform dynamic linking
     \\-e [name]                          Specifies the entry point of main executable
@@ -83,17 +83,17 @@ const usage =
     \\  -weak_library [name]
     \\-x                                 Do not put non-global symbols in the symbol table
     \\
-    \\ld64.zld: supported targets: macho-x86-64, macho-arm64
-    \\ld64.zld: supported emulations: macho_x86_64, macho_arm64
+    \\ld64.emerald: supported targets: macho-x86-64, macho-arm64
+    \\ld64.emerald: supported emulations: macho_x86_64, macho_arm64
 ;
 
 const version =
-    \\ld64.zld 0.0.4 (compatible with Apple ld64)
+    \\ld64.emerald 0.0.4 (compatible with Apple ld64)
 ;
 
-const cmd = "ld64.zld";
+const cmd = "ld64.emerald";
 
-emit: Zld.Emit,
+emit: Ld.Emit,
 dylib: bool = false,
 relocatable: bool = false,
 dynamic: bool = false,
@@ -151,8 +151,8 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     };
     var unknown_options = std.ArrayList(u8).init(arena);
 
-    var it = Zld.Options.ArgsIterator{ .args = args };
-    var p = Zld.ArgParser(@TypeOf(ctx)){ .it = &it, .ctx = ctx };
+    var it = Ld.Options.ArgsIterator{ .args = args };
+    var p = Ld.ArgParser(@TypeOf(ctx)){ .it = &it, .ctx = ctx };
     while (p.hasMore()) {
         if (p.flag2("help")) {
             ctx.fatal(usage ++ "\n", .{cmd});
