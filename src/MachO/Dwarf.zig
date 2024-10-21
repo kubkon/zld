@@ -47,7 +47,7 @@ pub const InfoReader = struct {
             address_size: u8,
             unit_type: u8,
         } = switch (version) {
-            4 => .{
+            1...4 => .{
                 .debug_abbrev_offset = try p.readOffset(dw_fmt),
                 .address_size = try p.readByte(),
                 .unit_type = 0,
@@ -60,7 +60,7 @@ pub const InfoReader = struct {
                 .debug_abbrev_offset = try p.readOffset(dw_fmt),
             },
             else => {
-                err_ctx.macho_file.base.fatal("{}: unhandled DWARF version: expected 4 or 5, got {d}", .{
+                err_ctx.macho_file.base.fatal("{}: unhandled DWARF version: {d}", .{
                     err_ctx.object.fmtPath(),
                     version,
                 });
