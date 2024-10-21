@@ -204,7 +204,7 @@ pub const ErrorMsg = struct {
     }
 };
 
-pub fn openPath(allocator: Allocator, tag: Tag, options: Options, thread_pool: *ThreadPool) !*Zld {
+pub fn openPath(allocator: Allocator, tag: Tag, options: Options, thread_pool: *ThreadPool) !*Ld {
     return switch (tag) {
         .macho => &(try MachO.openPath(allocator, options.macho, thread_pool)).base,
         .elf => &(try Elf.openPath(allocator, options.elf, thread_pool)).base,
@@ -213,7 +213,7 @@ pub fn openPath(allocator: Allocator, tag: Tag, options: Options, thread_pool: *
     };
 }
 
-pub fn deinit(base: *Zld) void {
+pub fn deinit(base: *Ld) void {
     base.file.close();
     assert(base.warnings.items.len == 0);
     base.warnings.deinit(base.allocator);
@@ -243,7 +243,7 @@ pub fn deinit(base: *Zld) void {
     }
 }
 
-pub fn flush(base: *Zld) !void {
+pub fn flush(base: *Ld) !void {
     switch (base.tag) {
         .elf => try @as(*Elf, @fieldParentPtr("base", base)).flush(),
         .macho => try @as(*MachO, @fieldParentPtr("base", base)).flush(),
@@ -252,12 +252,12 @@ pub fn flush(base: *Zld) !void {
     }
 }
 
-pub fn warn(base: *Zld, comptime format: []const u8, args: anytype) void {
+pub fn warn(base: *Ld, comptime format: []const u8, args: anytype) void {
     const warning = base.addWarningWithNotes(0) catch return;
     warning.addMsg(format, args) catch return;
 }
 
-pub fn fatal(base: *Zld, comptime format: []const u8, args: anytype) void {
+pub fn fatal(base: *Ld, comptime format: []const u8, args: anytype) void {
     const err = base.addErrorWithNotes(0) catch return;
     err.addMsg(format, args) catch return;
 }
@@ -285,7 +285,7 @@ pub const ErrorWithNotes = struct {
     }
 };
 
-pub fn addErrorWithNotes(base: *Zld, note_count: usize) !ErrorWithNotes {
+pub fn addErrorWithNotes(base: *Ld, note_count: usize) !ErrorWithNotes {
     base.errors_mutex.lock();
     defer base.errors_mutex.unlock();
     const err_index = base.errors.items.len;
@@ -295,7 +295,7 @@ pub fn addErrorWithNotes(base: *Zld, note_count: usize) !ErrorWithNotes {
     return .{ .err_index = err_index, .allocator = base.allocator, .errors = base.errors.items };
 }
 
-pub fn addWarningWithNotes(base: *Zld, note_count: usize) !ErrorWithNotes {
+pub fn addWarningWithNotes(base: *Ld, note_count: usize) !ErrorWithNotes {
     base.warnings_mutex.lock();
     defer base.warnings_mutex.unlock();
     const err_index = base.warnings.items.len;
@@ -305,7 +305,7 @@ pub fn addWarningWithNotes(base: *Zld, note_count: usize) !ErrorWithNotes {
     return .{ .err_index = err_index, .allocator = base.allocator, .errors = base.warnings.items };
 }
 
-pub fn getAllWarningsAlloc(base: *Zld) !ErrorBundle {
+pub fn getAllWarningsAlloc(base: *Ld) !ErrorBundle {
     var bundle: ErrorBundle.Wip = undefined;
     try bundle.init(base.allocator);
     defer bundle.deinit();
@@ -333,7 +333,7 @@ pub fn getAllWarningsAlloc(base: *Zld) !ErrorBundle {
     return bundle.toOwnedBundle("");
 }
 
-pub fn getAllErrorsAlloc(base: *Zld) !ErrorBundle {
+pub fn getAllErrorsAlloc(base: *Ld) !ErrorBundle {
     var bundle: ErrorBundle.Wip = undefined;
     try bundle.init(base.allocator);
     defer bundle.deinit();
@@ -403,7 +403,7 @@ fn renderWarningMessageToWriter(
     }
 }
 
-pub fn reportErrors(base: *Zld) void {
+pub fn reportErrors(base: *Ld) void {
     var errors = base.getAllErrorsAlloc() catch @panic("OOM");
     defer errors.deinit(base.allocator);
     if (errors.errorMessageCount() > 0) {
@@ -411,7 +411,7 @@ pub fn reportErrors(base: *Zld) void {
     }
 }
 
-pub fn reportWarnings(base: *Zld) void {
+pub fn reportWarnings(base: *Ld) void {
     var warnings = base.getAllWarningsAlloc() catch @panic("OOM");
     defer warnings.deinit(base.allocator);
     if (warnings.errorMessageCount() > 0) {
@@ -451,7 +451,7 @@ pub fn linearSearch(comptime T: type, haystack: []align(1) const T, predicate: a
 }
 
 test {
-    std.testing.refAllDeclsRecursive(Zld);
+    std.testing.refAllDeclsRecursive(Ld);
 }
 
 const std = @import("std");
@@ -470,5 +470,5 @@ pub const Wasm = @import("Wasm.zig");
 const Allocator = mem.Allocator;
 const CrossTarget = std.zig.CrossTarget;
 const ErrorBundle = std.zig.ErrorBundle;
+const Ld = @This();
 const ThreadPool = std.Thread.Pool;
-const Zld = @This();

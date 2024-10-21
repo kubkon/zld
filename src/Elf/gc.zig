@@ -149,7 +149,7 @@ pub fn dumpPrunedAtoms(elf_file: *Elf) !void {
         for (object.atoms_indexes.items) |atom_index| {
             const atom = object.getAtom(atom_index) orelse continue;
             if (!atom.flags.alive)
-                try stderr.print("ld.zld: removing unused section '{s}' in file '{}'\n", .{
+                try stderr.print("ld.emerald: removing unused section '{s}' in file '{}'\n", .{
                     atom.getName(elf_file),
                     atom.getObject(elf_file).fmtPath(),
                 });

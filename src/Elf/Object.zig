@@ -442,8 +442,8 @@ fn filterRelocs(
         }
     };
 
-    const f_start = Zld.binarySearch(elf.Elf64_Rela, relocs, Predicate{ .value = start });
-    const f_len = Zld.linearSearch(elf.Elf64_Rela, relocs[f_start..], LPredicate{ .value = start + len });
+    const f_start = Ld.binarySearch(elf.Elf64_Rela, relocs, Predicate{ .value = start });
+    const f_len = Ld.linearSearch(elf.Elf64_Rela, relocs[f_start..], LPredicate{ .value = start + len });
 
     return .{ .start = f_start, .len = f_len };
 }
@@ -1408,4 +1408,4 @@ const File = @import("file.zig").File;
 const InputMergeSection = @import("merge_section.zig").InputMergeSection;
 const StringTable = @import("../StringTable.zig");
 const Symbol = @import("Symbol.zig");
-const Zld = @import("../Zld.zig");
+const Ld = @import("../Ld.zig");

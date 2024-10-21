@@ -589,7 +589,7 @@ fn emitProducerSection(wasm: *const Wasm, bytes: *std.ArrayList(u8)) !void {
     } else processed_map.deinit();
 
     try processed_map.put(.{
-        .value = try wasm.base.allocator.dupe(u8, "Zld"),
+        .value = try wasm.base.allocator.dupe(u8, "Emerald"),
         .version = try wasm.base.allocator.dupe(u8, "0.1"),
     }, {});
 
@@ -665,7 +665,7 @@ fn emitProducerSection(wasm: *const Wasm, bytes: *std.ArrayList(u8)) !void {
         }
     }
 
-    // processed-by field (this is never empty as it's always populated by Zld itself)
+    // processed-by field (this is never empty as it's always populated by Emerald itself)
     {
         const processed_by = "processed-by";
         try leb.writeULEB128(writer, @as(u32, @intCast(processed_by.len)));
@@ -675,7 +675,7 @@ fn emitProducerSection(wasm: *const Wasm, bytes: *std.ArrayList(u8)) !void {
 
         // versioned name
         for (processed_map.keys()) |field| {
-            try leb.writeULEB128(writer, @as(u32, @intCast(field.value.len))); // len of "Zld"
+            try leb.writeULEB128(writer, @as(u32, @intCast(field.value.len))); // len of "Emerald"
             try writer.writeAll(field.value);
 
             try leb.writeULEB128(writer, @as(u32, @intCast(field.version.len)));

@@ -4,7 +4,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     if (builtin.target.os.tag != .macos) return skipTestStep(macho_step);
 
     var opts = Options{
-        .zld = options.zld,
+        .ld = options.ld,
         .has_zig = options.has_zig,
         .has_objc_msgsend_stubs = options.has_objc_msgsend_stubs,
         .macos_sdk = undefined,
@@ -4103,7 +4103,7 @@ fn testWeakRef2(b: *Build, opts: Options) *Step {
 }
 
 const Options = struct {
-    zld: LazyPath,
+    ld: LazyPath,
     has_zig: bool,
     has_objc_msgsend_stubs: bool,
     macos_sdk: []const u8,
@@ -4116,7 +4116,7 @@ fn cc(b: *Build, name: []const u8, opts: Options) SysCmd {
     cmd.addArgs(&.{ opts.cc_override orelse "cc", "-fno-lto" });
     cmd.addArg("-o");
     const out = cmd.addOutputFileArg(name);
-    cmd.addPrefixedDirectorySourceArg("-B", opts.zld.dirname());
+    cmd.addPrefixedDirectorySourceArg("-B", opts.ld.dirname());
     return .{ .cmd = cmd, .out = out };
 }
 
@@ -4143,7 +4143,7 @@ fn lipo(b: *Build, name: []const u8) SysCmd {
 
 fn ld(b: *Build, name: []const u8, opts: Options) SysCmd {
     const cmd = Run.create(b, "ld");
-    cmd.addFileArg(opts.zld);
+    cmd.addFileArg(opts.ld);
     cmd.addArg("-o");
     const out = cmd.addOutputFileArg(name);
     return .{ .cmd = cmd, .out = out };

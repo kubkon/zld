@@ -19,9 +19,9 @@ pub fn addTests(b: *Build, comp: *Compile, build_opts: struct {
         error.InvalidWtf8 => @panic("InvalidWtf8"),
         error.OutOfMemory => @panic("OOM"),
     };
-    const zld = WriteFile.create(b).addCopyFile(comp.getEmittedBin(), "ld");
+    const ld = WriteFile.create(b).addCopyFile(comp.getEmittedBin(), "ld");
     const opts: Options = .{
-        .zld = zld,
+        .ld = ld,
         .system_compiler = system_compiler,
         .has_static = build_opts.has_static,
         .has_zig = build_opts.has_zig,
@@ -43,7 +43,7 @@ pub const SystemCompiler = enum {
 };
 
 pub const Options = struct {
-    zld: LazyPath,
+    ld: LazyPath,
     system_compiler: SystemCompiler,
     has_static: bool = false,
     has_zig: bool = false,

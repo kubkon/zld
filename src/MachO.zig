@@ -1,4 +1,4 @@
-base: Zld,
+base: Ld,
 options: Options,
 
 dyld_info_cmd: macho.dyld_info_command = .{},
@@ -1279,8 +1279,8 @@ fn reportUndefs(self: *MachO) !void {
     const addFn = switch (self.options.undefined_treatment) {
         .dynamic_lookup => unreachable, // handled above
         .suppress => unreachable, // handled above
-        .@"error" => &Zld.addErrorWithNotes,
-        .warn => &Zld.addWarningWithNotes,
+        .@"error" => &Ld.addErrorWithNotes,
+        .warn => &Ld.addWarningWithNotes,
     };
 
     const gpa = self.base.allocator;
@@ -3324,7 +3324,7 @@ pub const String = struct {
     len: u32 = 0,
 };
 
-pub const base_tag = Zld.Tag.macho;
+pub const base_tag = Ld.Tag.macho;
 
 const aarch64 = @import("aarch64.zig");
 const assert = std.debug.assert;
@@ -3364,6 +3364,7 @@ const GotSection = synthetic.GotSection;
 const Hash = std.hash.Wyhash;
 const Indsymtab = synthetic.Indsymtab;
 const InternalObject = @import("MachO/InternalObject.zig");
+const Ld = @import("Ld.zig");
 const MachO = @This();
 const Md5 = std.crypto.hash.Md5;
 const Object = @import("MachO/Object.zig");
@@ -3383,4 +3384,3 @@ const TlvPtrSection = synthetic.TlvPtrSection;
 const UnwindInfo = @import("MachO/UnwindInfo.zig");
 const WaitGroup = std.Thread.WaitGroup;
 const WeakBind = synthetic.WeakBind;
-const Zld = @import("Zld.zig");

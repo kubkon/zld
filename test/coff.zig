@@ -4,7 +4,7 @@ pub fn addCoffTests(b: *Build, options: common.Options) *Step {
     if (builtin.target.ofmt != .coff) return skipTestStep(coff_step);
 
     const opts = Options{
-        .zld = options.zld,
+        .ld = options.ld,
     };
 
     coff_step.dependOn(testHelloDynamic(b, opts));
@@ -39,13 +39,13 @@ fn cl(b: *Build, name: []const u8, opts: Options) SysCmd {
 
 fn ld(b: *Build, name: []const u8, opts: Options) SysCmd {
     const cmd = Run.create(b, "ld");
-    cmd.addFileArg(opts.zld);
+    cmd.addFileArg(opts.ld);
     const out = cmd.addPrefixedOutputFileArg("/out:", name);
     return .{ .cmd = cmd, .out = out };
 }
 
 const Options = struct {
-    zld: LazyPath,
+    ld: LazyPath,
 };
 
 const std = @import("std");

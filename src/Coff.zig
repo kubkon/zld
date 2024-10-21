@@ -1,4 +1,4 @@
-base: Zld,
+base: Ld,
 options: Options,
 
 internal_object_index: ?File.Index = null,
@@ -1718,7 +1718,7 @@ const AlternateName = struct {
     index: Symbol.Index,
 };
 
-pub const base_tag = Zld.Tag.coff;
+pub const base_tag = Ld.Tag.coff;
 
 const build_options = @import("build_options");
 const builtin = @import("builtin");
@@ -1741,10 +1741,10 @@ const Coff = @This();
 const Dll = @import("Coff/Dll.zig");
 const File = @import("Coff/file.zig").File;
 const InternalObject = @import("Coff/InternalObject.zig");
+const Ld = @import("Ld.zig");
 const Object = @import("Coff/Object.zig");
 pub const Options = @import("Coff/Options.zig");
 const RelocSection = synthetic.RelocSection;
 const StringTable = @import("StringTable.zig");
 const Symbol = @import("Coff/Symbol.zig");
 const ThreadPool = std.Thread.Pool;
-const Zld = @import("Zld.zig");

@@ -32,7 +32,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const exe = b.addExecutable(.{
-        .name = "zld",
+        .name = "emerald",
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = mode,
@@ -76,10 +76,10 @@ pub fn build(b: *std.Build) void {
     const install = b.addInstallArtifact(exe, .{});
     const symlinks = addSymlinks(b, install, &[_][]const u8{
         "ld",
-        "ld.zld",
-        "ld64.zld",
-        "link-zld.exe",
-        "wasm-zld",
+        "ld.emerald",
+        "ld64.emerald",
+        "emerald-link.exe",
+        "wasm-emerald",
     });
     symlinks.step.dependOn(&install.step);
 
@@ -90,7 +90,7 @@ pub fn build(b: *std.Build) void {
     const has_objc_msgsend_stubs = b.option(bool, "has-objc-msgsend-stubs", "Whether the system compiler supports '-fobjc-msgsend-selector-stubs' flag") orelse false;
 
     const unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/Zld.zig"),
+        .root_source_file = b.path("src/Ld.zig"),
         .target = target,
         .optimize = mode,
         .use_llvm = use_llvm,

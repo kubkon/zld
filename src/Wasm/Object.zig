@@ -310,7 +310,7 @@ pub const ParseError = error{
     /// Object file contains a feature that is unknown to the linker
     UnknownFeature,
     /// The 'elemkind' found in the element section is unsupported.
-    /// Zld currently only supports funcrefs.
+    /// Emerald currently only supports funcrefs.
     UnsupportedElemKind,
 };
 

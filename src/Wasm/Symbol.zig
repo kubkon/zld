@@ -74,7 +74,7 @@ pub const Flag = enum(u32) {
     /// Indicates a symbol is TLS
     WASM_SYM_TLS = 0x100,
 
-    /// Zld specific flag. Uses the most significant bit of the flag to annotate whether a symbol is
+    /// Emerald specific flag. Uses the most significant bit of the flag to annotate whether a symbol is
     /// alive or not. Dead symbols are allowed to be garbage collected.
     alive = 0x80000000,
 };

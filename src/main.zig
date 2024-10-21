@@ -6,7 +6,7 @@ const tracy = @import("tracy.zig");
 
 const Allocator = mem.Allocator;
 const ThreadPool = std.Thread.Pool;
-const Zld = @import("Zld.zig");
+const Ld = @import("Ld.zig");
 
 var tracy_alloc = tracy.tracyAllocator(std.heap.c_allocator);
 
@@ -16,12 +16,12 @@ else
     std.heap.c_allocator;
 
 const usage =
-    \\zld is a generic linker driver.
+    \\emerald is a generic linker driver.
     \\Call
-    \\  ELF: ld.zld
-    \\  MachO: ld64.zld
-    \\  COFF: link-zld
-    \\  Wasm: wasm-zld
+    \\  ELF: ld.emerald
+    \\  MachO: ld64.emerald
+    \\  COFF: emerald-link.exe
+    \\  Wasm: wasm-emerald
 ;
 
 var log_scopes: std.ArrayList([]const u8) = std.ArrayList([]const u8).init(gpa);
@@ -81,20 +81,20 @@ pub fn main() !void {
 
     const all_args = try std.process.argsAlloc(arena);
     const cmd = std.fs.path.basename(all_args[0]);
-    const tag: Zld.Tag = blk: {
+    const tag: Ld.Tag = blk: {
         if (mem.eql(u8, cmd, "ld")) break :blk switch (builtin.target.ofmt) {
             .elf => .elf,
             .macho => .macho,
             .coff => .coff,
             .wasm => .wasm,
             else => |other| fatal("unsupported file format '{s}'", .{@tagName(other)}),
-        } else if (mem.eql(u8, cmd, "ld.zld")) {
+        } else if (mem.eql(u8, cmd, "ld.emerald")) {
             break :blk .elf;
-        } else if (mem.eql(u8, cmd, "ld64.zld")) {
+        } else if (mem.eql(u8, cmd, "ld64.emerald")) {
             break :blk .macho;
-        } else if (mem.eql(u8, cmd, "link-zld.exe")) {
+        } else if (mem.eql(u8, cmd, "emerald-link.exe")) {
             break :blk .coff;
-        } else if (mem.eql(u8, cmd, "wasm-zld")) {
+        } else if (mem.eql(u8, cmd, "wasm-emerald")) {
             break :blk .wasm;
         } else {
             std.io.getStdOut().writeAll(usage) catch {};
@@ -102,7 +102,7 @@ pub fn main() !void {
         }
     };
 
-    const opts = try Zld.Options.parse(arena, tag, all_args[1..], .{
+    const opts = try Ld.Options.parse(arena, tag, all_args[1..], .{
         .print = print,
         .fatal = fatal,
         .log_scopes = &log_scopes,
@@ -112,9 +112,9 @@ pub fn main() !void {
     try thread_pool.init(.{ .allocator = gpa });
     defer thread_pool.deinit();
 
-    const zld = try Zld.openPath(gpa, tag, opts, &thread_pool);
-    defer zld.deinit();
-    zld.flush() catch |err| switch (err) {
+    const ld = try Ld.openPath(gpa, tag, opts, &thread_pool);
+    defer ld.deinit();
+    ld.flush() catch |err| switch (err) {
         error.FlushFailed,
         error.InferCpuFailed,
         error.ParseFailed,
@@ -124,15 +124,15 @@ pub fn main() !void {
         error.ResolveFailed,
         error.Unimplemented,
         => {
-            zld.reportWarnings();
-            zld.reportErrors();
+            ld.reportWarnings();
+            ld.reportErrors();
             std.process.exit(1);
         },
         else => |e| {
-            zld.reportErrors();
+            ld.reportErrors();
             print("unexpected linker error: {s}\n", .{@errorName(e)});
             return e;
         },
     };
-    zld.reportWarnings();
+    ld.reportWarnings();
 }
