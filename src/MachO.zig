@@ -839,6 +839,8 @@ fn parseDependentDylibs(
 
     if (self.dylibs.items.len == 0) return;
 
+    log.debug("parsing dependent dylibs aka reexports", .{});
+
     // TODO handle duplicate dylibs - it is not uncommon to have the same dylib loaded multiple times
     // in which case we should track that and return File.Index immediately instead re-parsing paths.
 
@@ -870,13 +872,24 @@ fn parseDependentDylibs(
                 }
 
                 if (std.fs.path.isAbsolute(id.name)) {
-                    const path = if (self.options.syslibroot) |root|
-                        try std.fs.path.join(arena, &.{ root, id.name })
-                    else
-                        id.name;
-                    for (&[_][]const u8{ "", ".tbd", ".dylib" }) |ext| {
-                        const full_path = try std.fmt.allocPrint(arena, "{s}{s}", .{ path, ext });
-                        if (try accessPath(full_path)) break :full_path full_path;
+                    // If the path is absolute, we need to check the path as-is as well as prefixed
+                    // with syslibroot if it was specified. Next, we also need to consider all possible
+                    // combinations of extensions: ["", ".tbd", ".dylib", "<ext>"].
+                    var paths: [2]?[]const u8 = .{
+                        if (self.options.syslibroot) |root|
+                            try std.fs.path.join(arena, &.{ root, id.name })
+                        else
+                            null,
+                        id.name,
+                    };
+                    for (&paths) |maybe_path| {
+                        const path = maybe_path orelse continue;
+                        const curr_ext = std.fs.path.extension(path);
+                        const without_ext = if (curr_ext.len > 0) path[0 .. path.len - curr_ext.len] else path;
+                        for (&[_][]const u8{ "", ".tbd", ".dylib", curr_ext }) |ext| {
+                            const full_path = try std.fmt.allocPrint(arena, "{s}{s}", .{ without_ext, ext });
+                            if (try accessPath(full_path)) break :full_path full_path;
+                        }
                     }
                 }
 
