@@ -32,7 +32,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const exe = b.addExecutable(.{
-        .name = "emerald",
+        .name = "ld",
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = mode,
@@ -75,7 +75,6 @@ pub fn build(b: *std.Build) void {
     }
     const install = b.addInstallArtifact(exe, .{});
     const symlinks = addSymlinks(b, install, &[_][]const u8{
-        "ld",
         "ld.emerald",
         "ld64.emerald",
         "emerald-link.exe",
