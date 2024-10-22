@@ -34,6 +34,8 @@ const usage =
     \\-dylib                             Create dynamic library
     \\-dynamic                           Perform dynamic linking
     \\-e [name]                          Specifies the entry point of main executable
+    \\-exported_symbol [name]            Marks symbol [name] as global
+    \\-exported_symbols_list [filename]  Specifies which symbols are to be marked as global
     \\--entitlements                     Add path to entitlements file for embedding in code signature
     \\-flat_namespace                    Use flat namespace dylib resolution strategy
     \\-force_load [path]                 Loads all members of the specified static archive library
@@ -128,6 +130,7 @@ namespace: Namespace = .two_level,
 all_load: bool = false,
 force_load_objc: bool = false,
 adhoc_codesign: ?bool = null,
+exported_symbols: []const []const u8 = &[0][]const u8{},
 
 pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options {
     if (args.len == 0) ctx.fatal(usage ++ "\n", .{cmd});
@@ -137,6 +140,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     var framework_dirs = std.StringArrayHashMap(void).init(arena);
     var rpath_list = std.StringArrayHashMap(void).init(arena);
     var force_undefined_symbols = std.StringArrayHashMap(void).init(arena);
+    var exported_symbols = std.StringArrayHashMap(void).init(arena);
     var print_version = false;
     var verbose = false;
     var opts: Options = .{
@@ -227,6 +231,13 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             opts.dead_strip = true;
         } else if (p.flag1("dead_strip_dylibs")) {
             opts.dead_strip_dylibs = true;
+        } else if (p.arg1("exported_symbol")) |name| {
+            try exported_symbols.put(name, {});
+        } else if (p.arg1("exported_symbols_list")) |filename| {
+            parseExportedSymbolsListFromFile(arena, filename, &exported_symbols) catch |err| switch (err) {
+                error.FileNotFound => ctx.fatal("Specified file in -exported_symbols_list {s} does not exist\n", .{filename}),
+                else => |e| return e,
+            };
         } else if (p.arg1("e")) |name| {
             opts.entry = name;
         } else if (p.arg1("undefined")) |treatment| {
@@ -395,6 +406,18 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     try opts.inferPlatformVersions(arena);
 
     return opts;
+}
+
+fn parseExportedSymbolsListFromFile(arena: Allocator, filename: []const u8, exported_symbols: *std.StringArrayHashMap(void)) !void {
+    const file = try std.fs.cwd().openFile(filename, .{});
+    defer file.close();
+    const data = try file.readToEndAlloc(arena, std.math.maxInt(u32));
+    var it = mem.tokenizeScalar(u8, data, '\n');
+    while (it.next()) |line| {
+        const trimmed = mem.trim(u8, line, " ");
+        if (trimmed.len == 0) continue;
+        try exported_symbols.put(trimmed, {});
+    }
 }
 
 fn inferPlatformVersions(opts: *Options, arena: Allocator) !void {
