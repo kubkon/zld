@@ -37,6 +37,8 @@ const usage =
     \\-exported_symbol [name]            Marks symbol [name] as global
     \\-exported_symbols_list [filename]  Specifies which symbols are to be marked as global
     \\--entitlements                     Add path to entitlements file for embedding in code signature
+    \\-filelist [file[,dirname]]         Specifies a list of files to link. If the optional [dirname] is
+    \\                                   specified, it is prepended to each filename in the list file.
     \\-flat_namespace                    Use flat namespace dylib resolution strategy
     \\-force_load [path]                 Loads all members of the specified static archive library
     \\-framework [name]                  Link against framework
@@ -345,6 +347,13 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
             opts.adhoc_codesign = true;
         } else if (p.flag1("no_adhoc_codesign")) {
             opts.adhoc_codesign = false;
+        } else if (p.arg1("filelist")) |filename_with_dirname| {
+            parseFileList(arena, filename_with_dirname, &positionals) catch |err| switch (err) {
+                error.FileNotFound => ctx.fatal("Specified file in -filelist {s} does not exist\n", .{
+                    filename_with_dirname,
+                }),
+                else => |e| return e,
+            };
         } else if (p.argLLVM()) |opt| {
             // Skip any LTO flags since we cannot handle it at the moment anyhow.
             std.log.debug("TODO unimplemented -mllvm {s} option", .{opt});
@@ -418,6 +427,26 @@ fn parseExportedSymbolsListFromFile(arena: Allocator, filename: []const u8, expo
         const trimmed = mem.trim(u8, line, " ");
         if (trimmed.len == 0) continue;
         try exported_symbols.put(trimmed, {});
+    }
+}
+
+fn parseFileList(arena: Allocator, filename_with_dirname: []const u8, positionals: *std.ArrayList(MachO.LinkObject)) !void {
+    const dirname, const filename = if (std.mem.indexOfScalar(u8, filename_with_dirname, ',')) |index|
+        .{ filename_with_dirname[index + 1 ..], filename_with_dirname[0..index] }
+    else
+        .{ null, filename_with_dirname };
+    const file = try std.fs.cwd().openFile(filename, .{});
+    defer file.close();
+    const data = try file.readToEndAlloc(arena, std.math.maxInt(u32));
+    var it = mem.tokenizeScalar(u8, data, '\n');
+    while (it.next()) |line| {
+        const trimmed = mem.trim(u8, line, " ");
+        if (trimmed.len == 0) continue;
+        const full_path = if (dirname) |dir|
+            try std.fs.path.join(arena, &.{ dir, trimmed })
+        else
+            trimmed;
+        try positionals.append(.{ .path = full_path, .tag = .obj });
     }
 }
 
