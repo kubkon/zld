@@ -402,6 +402,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, ctx: anytype) !Options 
     opts.framework_dirs = framework_dirs.keys();
     opts.rpath_list = rpath_list.keys();
     opts.force_undefined_symbols = force_undefined_symbols.keys();
+    opts.exported_symbols = exported_symbols.keys();
 
     try opts.inferPlatformVersions(arena);
 

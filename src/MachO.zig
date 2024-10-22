@@ -2682,6 +2682,16 @@ inline fn requiresThunks(self: MachO) bool {
     return self.options.cpu_arch.? == .aarch64;
 }
 
+pub fn isMarkedForExport(self: MachO, name: []const u8) ?bool {
+    if (self.options.exported_symbols.len == 0) return null;
+    // TODO handle wildcards
+    // TODO handle unexport list
+    for (self.options.exported_symbols) |exp_name| {
+        if (mem.eql(u8, exp_name, name)) return true;
+    }
+    return false;
+}
+
 const AddSectionOpts = struct {
     flags: u32 = macho.S_REGULAR,
     reserved1: u32 = 0,
