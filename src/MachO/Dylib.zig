@@ -805,6 +805,16 @@ pub const TargetMatcher = struct {
                 const host_target = try targetToAppleString(allocator, cpu_arch, .MACOS);
                 try self.target_strings.append(allocator, host_target);
             },
+            .MACOS => {
+                // Older TAPI output would encode "macos" as "macosx", so take that into account too.
+                const host_target = try targetToAppleString(allocator, cpu_arch, .MACOS);
+                defer allocator.free(host_target);
+                var host_target_aug = try std.ArrayList(u8).initCapacity(allocator, host_target.len + 1);
+                defer host_target_aug.deinit();
+                host_target_aug.appendSliceAssumeCapacity(host_target);
+                host_target_aug.appendAssumeCapacity('x');
+                try self.target_strings.append(allocator, try host_target_aug.toOwnedSlice());
+            },
             else => {},
         }
 

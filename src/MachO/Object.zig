@@ -1541,6 +1541,12 @@ pub fn mergeSymbolVisibility(self: *Object, macho_file: *MachO) void {
     for (self.symbols.items, 0..) |sym, i| {
         const ref = self.getSymbolRef(@intCast(i), macho_file);
         const global = ref.getSymbol(macho_file) orelse continue;
+        if (global.getFile(macho_file).? != .dylib) {
+            if (macho_file.isMarkedForExport(global.getName(macho_file))) |is_export| {
+                global.visibility = if (is_export) .global else .hidden;
+                continue;
+            }
+        }
         if (sym.visibility.rank() < global.visibility.rank()) {
             global.visibility = sym.visibility;
         }
