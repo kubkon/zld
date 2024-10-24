@@ -33,6 +33,7 @@ pub fn addMachOTests(b: *Build, options: common.Options) *Step {
     macho_step.dependOn(testEntryPoint(b, opts));
     macho_step.dependOn(testEntryPointArchive(b, opts));
     macho_step.dependOn(testEntryPointDylib(b, opts));
+    macho_step.dependOn(testExportedSymbol(b, opts));
     macho_step.dependOn(testFatArchive(b, opts));
     macho_step.dependOn(testFatDylib(b, opts));
     macho_step.dependOn(testFlatNamespace(b, opts));
@@ -761,6 +762,51 @@ fn testEntryPointDylib(b: *Build, opts: Options) *Step {
     const run = exe.run();
     run.expectStdOutEqual("Hello!\n");
     test_step.dependOn(run.step());
+
+    return test_step;
+}
+
+fn testExportedSymbol(b: *Build, opts: Options) *Step {
+    const test_step = b.step("test-macho-exported-symbol", "");
+
+    const obj = cc(b, "a.o", opts);
+    obj.addCSource(
+        \\#include<stdio.h>
+        \\int foo() { return 0; }
+        \\int bar() { return 1; }
+        \\void foobar() { printf("foobar"); }
+    );
+    obj.addArg("-c");
+
+    {
+        const lib = cc(b, "liba.dylib", opts);
+        lib.addFileSource(obj.getFile());
+        lib.addArg("-shared");
+
+        const check = lib.check();
+        check.checkInExports();
+        check.checkContains("_foo");
+        check.checkContains("_bar");
+        check.checkContains("_foobar");
+        check.checkInIndirectSymtab();
+        check.checkContains("_printf");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const lib = cc(b, "liba.dylib", opts);
+        lib.addFileSource(obj.getFile());
+        lib.addArgs(&.{ "-shared", "-Wl,-exported_symbol,_foo" });
+
+        const check = lib.check();
+        check.checkInExports();
+        check.checkContains("_foo");
+        check.checkNotPresent("_bar");
+        check.checkNotPresent("_foobar");
+        check.checkInIndirectSymtab();
+        check.checkContains("_printf");
+        test_step.dependOn(&check.step);
+    }
 
     return test_step;
 }
